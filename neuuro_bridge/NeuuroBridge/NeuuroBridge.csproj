@@ -1,0 +1,27 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net48</TargetFramework>
+    <!-- SenzeBandCore.dll is a native x64 (mixed-mode) assembly, so the whole app must run as x64. -->
+    <Platforms>x64</Platforms>
+    <PlatformTarget>x64</PlatformTarget>
+    <LangVersion>latest</LangVersion>
+    <RootNamespace>NeuuroBridge</RootNamespace>
+    <AssemblyName>NeuuroBridge</AssemblyName>
+    <Nullable>disable</Nullable>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <!-- Neeuro SenzeBand SDK (STANDARD tier). Copied into lib\ from the BrainTech example. -->
+    <Reference Include="SenzeBandSDK">
+      <HintPath>lib\SenzeBandSDK.dll</HintPath>
+      <Private>true</Private>
+    </Reference>
+    <Reference Include="SenzeBandCore">
+      <HintPath>lib\SenzeBandCore.dll</HintPath>
+      <Private>true</Private>
+    </Reference>
+  </ItemGroup>
+
+</Project>

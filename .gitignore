@@ -1,0 +1,15 @@
+# Build output
+[Bb]in/
+[Oo]bj/
+
+# SDK runtime logs (contain the license/developer code — never commit)
+logs/
+
+# Visual Studio
+.vs/
+*.user
+*.suo
+
+# Rider / VS Code
+.idea/
+.vscode/
