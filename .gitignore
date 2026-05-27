@@ -5,6 +5,9 @@
 # SDK runtime logs (contain the license/developer code — never commit)
 logs/
 
+# Local secrets — keep the real .env out of git (the .env.example template is tracked)
+.env
+
 # Visual Studio
 .vs/
 *.user

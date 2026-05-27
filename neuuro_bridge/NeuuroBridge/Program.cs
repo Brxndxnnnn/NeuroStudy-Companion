@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.Diagnostics;
+using System.IO;
 using System.Linq;
 using System.Threading;
 
@@ -297,6 +298,7 @@ namespace NeuuroBridge
             }
         }
 
+        // Resolution order: command-line arg > NEUURO_LICENSE_KEY env var > .env file > prompt.
         private static string ResolveLicense(string[] args)
         {
             if (args.Length > 0 && !string.IsNullOrWhiteSpace(args[0]))
@@ -306,8 +308,57 @@ namespace NeuuroBridge
             if (!string.IsNullOrWhiteSpace(env))
                 return env.Trim();
 
+            var fromFile = FindDotEnvValue("NEUURO_LICENSE_KEY");
+            if (!string.IsNullOrWhiteSpace(fromFile))
+            {
+                Print("Using license key from .env file.");
+                return fromFile;
+            }
+
             Console.Write("Enter Neeuro license key: ");
             return (Console.ReadLine() ?? "").Trim();
+        }
+
+        // Looks for a ".env" file by walking up from the working directory and the
+        // executable directory, then returns the requested KEY=VALUE entry.
+        private static string FindDotEnvValue(string key)
+        {
+            foreach (var start in new[] { Directory.GetCurrentDirectory(), AppContext.BaseDirectory })
+            {
+                var dir = start;
+                for (int depth = 0; depth < 8 && dir != null; depth++)
+                {
+                    var path = Path.Combine(dir, ".env");
+                    if (File.Exists(path))
+                    {
+                        var value = ReadEnvKey(path, key);
+                        if (!string.IsNullOrWhiteSpace(value)) return value;
+                    }
+                    dir = Directory.GetParent(dir)?.FullName;
+                }
+            }
+            return null;
+        }
+
+        private static string ReadEnvKey(string path, string key)
+        {
+            foreach (var raw in File.ReadAllLines(path))
+            {
+                var line = raw.Trim();
+                if (line.Length == 0 || line.StartsWith("#")) continue;
+
+                int eq = line.IndexOf('=');
+                if (eq <= 0) continue;
+                if (!string.Equals(line.Substring(0, eq).Trim(), key, StringComparison.OrdinalIgnoreCase)) continue;
+
+                var value = line.Substring(eq + 1).Trim();
+                if (value.Length >= 2 &&
+                    ((value[0] == '"' && value[value.Length - 1] == '"') ||
+                     (value[0] == '\'' && value[value.Length - 1] == '\'')))
+                    value = value.Substring(1, value.Length - 2);
+                return value;
+            }
+            return null;
         }
 
         private static void Print(string message) => Console.WriteLine(message);
