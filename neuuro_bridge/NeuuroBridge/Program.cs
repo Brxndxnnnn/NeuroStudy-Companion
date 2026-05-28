@@ -19,7 +19,7 @@ namespace NeuuroBridge
 
         // ── Live state, updated by SDK callbacks (threadpool threads) ───────
         private static readonly object _stateLock = new object();
-        private static volatile bool _showRaw;          // gates raw-EEG console output
+        private static volatile int _displayMode;        // 0=off 1=sdk-only 2=fft-only 3=both
         private static long _rawFrameCount;
         private static bool? _signalReady;
         private static string _battery;
@@ -51,6 +51,7 @@ namespace NeuuroBridge
 
         private static void Main(string[] args)
         {
+            Console.OutputEncoding = System.Text.Encoding.UTF8;
             Console.Title = "Neuuro Bridge — SenzeBand EEG";
             Print("=== Neuuro Bridge ===");
 
@@ -156,34 +157,39 @@ namespace NeuuroBridge
             {
                 Print("");
                 Print("======== MENU ========");
-                Print("  1. Show live EEG (raw + filtered, per channel)");
-                Print("  2. Show SenzeBand device info");
-                Print("  3. Show signal & battery status");
-                Print("  4. Re-attempt authentication");
-                Print("  5. Disconnect and exit");
+                Print("  1. Live EEG — SDK data only  (attention, relaxation, ABDT band powers)");
+                Print("  2. Live EEG — FFT data only  (custom band powers)");
+                Print("  3. Live EEG — both SDK and FFT");
+                Print("  4. Show SenzeBand device info");
+                Print("  5. Show signal & battery status");
+                Print("  6. Re-attempt authentication");
+                Print("  7. Disconnect and exit");
                 Print("======================");
-                Console.Write("Choose [1-5]: ");
+                Console.Write("Choose [1-7]: ");
 
                 switch ((Console.ReadLine() ?? "").Trim())
                 {
-                    case "1": ShowLiveData(); break;
-                    case "2": ShowDeviceInfo(); break;
-                    case "3": ShowStatus(); break;
-                    case "4": Print("Re-attempting authentication..."); _svc.Authenticate(force: true); break;
-                    case "5": return;
+                    case "1": ShowLiveData(1); break;
+                    case "2": ShowLiveData(2); break;
+                    case "3": ShowLiveData(3); break;
+                    case "4": ShowDeviceInfo(); break;
+                    case "5": ShowStatus(); break;
+                    case "6": Print("Re-attempting authentication..."); _svc.Authenticate(force: true); break;
+                    case "7": return;
                     default: Print("Invalid choice."); break;
                 }
             }
         }
 
-        private static void ShowLiveData()
+        private static void ShowLiveData(int mode)
         {
-            Print("\n--- Live EEG (press ENTER to return to menu) ---");
+            string label = mode == 1 ? "SDK only" : mode == 2 ? "FFT only" : "SDK + FFT";
+            Print($"\n--- Live EEG [{label}] (press ENTER to return to menu) ---");
             Print("raw = ADC counts (large DC offset); filt = band-passed, zero-centred. pk-pk = max-min over the frame.");
             _rawThrottle.Restart();
-            _showRaw = true;
+            _displayMode = mode;
             Console.ReadLine();   // block here; frames print from callback threads
-            _showRaw = false;
+            _displayMode = 0;
             Print("--- stopped ---");
         }
 
@@ -249,7 +255,7 @@ namespace NeuuroBridge
                 lock (_stateLock) _lastRawInt = frame.IntSamples;
             }
 
-            if (!_showRaw) return;
+            if (_displayMode == 0) return;
             // Throttle to ~2 snapshots/sec so the stream stays readable.
             if (_rawThrottle.ElapsedMilliseconds < 500) return;
             _rawThrottle.Restart();
@@ -258,6 +264,7 @@ namespace NeuuroBridge
 
         private static void PrintEegSnapshot()
         {
+            int mode = _displayMode;
             int[] raw; float[] filt;
             float[,] sdkAbdt; float sdkAtt, sdkRel, sdkMwl; BandPowers[] fftPow;
             lock (_stateLock)
@@ -276,40 +283,47 @@ namespace NeuuroBridge
                     ChannelLabels[ch], r.a, r.b, f.a, f.b));
             }
 
-            // SDK cognitive outputs
-            string Fmt(float v) => float.IsNaN(v) ? "  ---  " : v.ToString("F3");
-            Print($"\n  SDK  attention={Fmt(sdkAtt)}  relaxation={Fmt(sdkRel)}  mental-workload={Fmt(sdkMwl)}");
+            bool showSdk = mode == 1 || mode == 3;
+            bool showFft = mode == 2 || mode == 3;
 
-            if (sdkAbdt != null)
+            if (showSdk)
             {
-                // SDK delivers float[NUM_CHANNELS=4, NUM_FREQTYPES=5].
-                // Band order confirmed from SDK source: ABDT acronym + Gamma appended.
-                // [0]=Alpha  [1]=Beta  [2]=Delta  [3]=Theta  [4]=Gamma
-                string[] sdkBandNames = { "α", "β", "δ", "θ", "γ" };
-                int chs = sdkAbdt.GetLength(0), bands = sdkAbdt.GetLength(1);
-                Print($"  SDK  ch     α(alpha)   β(beta)    δ(delta)   θ(theta)   γ(gamma)");
-                for (int ch = 0; ch < Math.Min(chs, ChannelCount); ch++)
+                string Fmt(float v) => float.IsNaN(v) ? "  ---  " : v.ToString("F3");
+                Print($"\n  SDK  attention={Fmt(sdkAtt)}  relaxation={Fmt(sdkRel)}  mental-workload={Fmt(sdkMwl)}");
+
+                if (sdkAbdt != null)
                 {
-                    var parts = new System.Text.StringBuilder($"       {ChannelLabels[ch],-4}");
-                    for (int b = 0; b < bands; b++)
+                    // SDK delivers float[NUM_CHANNELS=4, NUM_FREQTYPES=5].
+                    // Band order confirmed from SDK source: ABDT acronym + Gamma appended.
+                    // [0]=Alpha  [1]=Beta  [2]=Delta  [3]=Theta  [4]=Gamma
+                    string[] sdkBandNames = { "α", "β", "δ", "θ", "γ" };
+                    int chs = sdkAbdt.GetLength(0), bands = sdkAbdt.GetLength(1);
+                    Print("  SDK  ch     α(alpha)   β(beta)    δ(delta)   θ(theta)   γ(gamma)");
+                    for (int ch = 0; ch < Math.Min(chs, ChannelCount); ch++)
                     {
-                        string lbl = b < sdkBandNames.Length ? sdkBandNames[b] : b.ToString();
-                        parts.Append($"  {lbl}={sdkAbdt[ch, b]:F4}");
+                        var parts = new System.Text.StringBuilder($"       {ChannelLabels[ch],-4}");
+                        for (int b = 0; b < bands; b++)
+                        {
+                            string lbl = b < sdkBandNames.Length ? sdkBandNames[b] : b.ToString();
+                            parts.Append($"  {lbl}={sdkAbdt[ch, b]:F4}");
+                        }
+                        Print(parts.ToString());
                     }
-                    Print(parts.ToString());
                 }
             }
 
-            // Custom FFT band powers
-            if (fftPow != null)
+            if (showFft)
             {
-                Print("  FFT  ch     δ(delta)   θ(theta)   α(alpha)    β(beta)   γ(gamma)");
-                for (int ch = 0; ch < ChannelCount; ch++)
-                    Print($"       {ChannelLabels[ch],-4} {fftPow[ch]}");
-            }
-            else
-            {
-                Print("  FFT  (accumulating — fires after first 256 filtered samples)");
+                if (fftPow != null)
+                {
+                    Print("  FFT  ch     δ(delta)   θ(theta)   α(alpha)    β(beta)   γ(gamma)");
+                    for (int ch = 0; ch < ChannelCount; ch++)
+                        Print($"       {ChannelLabels[ch],-4} {fftPow[ch]}");
+                }
+                else
+                {
+                    Print("  FFT  (accumulating — fires after first 256 filtered samples)");
+                }
             }
         }
 
