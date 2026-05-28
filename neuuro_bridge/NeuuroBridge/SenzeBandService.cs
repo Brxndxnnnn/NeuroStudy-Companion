@@ -63,6 +63,14 @@ namespace NeuuroBridge
         public event Action<bool, string> OnAuthStatus;               // STANDARD-tier server auth (ok, detail)
         public event Action<string> OnLog;
 
+        // ── SDK-computed cognitive features ─────────────────────────────────
+        public event Action<float> OnAttention;
+        public event Action<float> OnRelaxation;
+        public event Action<float> OnMentalWorkload;
+        // [channelIdx, bandIdx]: bandIdx 0=Alpha 1=Beta 2=Delta 3=Theta (SDK "ABDT" ordering).
+        // Actual ordering unverifiable without live hardware; treat as a best-effort label until confirmed.
+        public event Action<float[,]> OnAbdt;
+
         // ── Step 1: Initialize ──────────────────────────────────────────────
         public void Initialize(string licenseCode)
         {
@@ -143,8 +151,10 @@ namespace NeuuroBridge
             // Required no-op delegates: connectingToNewDevice() invokes these
             // unconditionally; leaving any unassigned throws NullReferenceException
             // inside the SDK during connect.
-            sbci.assignAttentionDelegate(_ => { });
-            sbci.assignRelaxationDelegate(_ => { });
+            sbci.assignAttentionDelegate(v => Post(() => OnAttention?.Invoke(v)));
+            sbci.assignRelaxationDelegate(v => Post(() => OnRelaxation?.Invoke(v)));
+            sbci.assignMentalWorkloadDelegate(v => Post(() => OnMentalWorkload?.Invoke(v)));
+            sbci.assignABDTDelegate(v => Post(() => OnAbdt?.Invoke(v)));
             sbci.assignAccDelegate(_ => { });
             sbci.assignMCUDelegate(OnMcu);   // MCU ID is needed to authenticate the device
             sbci.assignFirmwareVerDelegate(_ => { });
@@ -156,8 +166,6 @@ namespace NeuuroBridge
             sbci.assignImpedanceDelegate(_ => { });
             sbci.assignCalParamsDelegate(_ => { });
             sbci.assignSPO2HeartRateDelegate(_ => { });
-            sbci.assignMentalWorkloadDelegate(_ => { });
-            sbci.assignABDTDelegate(_ => { });
             sbci.assignRawData200msDelegate(_ => { });
             sbci.assignFilteredDataDelegate(OnFiltered);   // band-passed, zero-centered EEG
             sbci.assignPPGDataDelegate(_ => { });     // must be assigned: PPG packets NPE grabCharacteristic otherwise

@@ -28,6 +28,16 @@ namespace NeuuroBridge
         private static float[] _lastFiltered;
         private static readonly Stopwatch _rawThrottle = Stopwatch.StartNew();
 
+        // ── SDK cognitive features ───────────────────────────────────────────
+        private static float _sdkAttention     = float.NaN;
+        private static float _sdkRelaxation    = float.NaN;
+        private static float _sdkMentalWorkload = float.NaN;
+        private static float[,] _sdkAbdt;   // [channelIdx, bandIdx]: 0=Alpha 1=Beta 2=Delta 3=Theta
+
+        // ── Custom FFT processor ─────────────────────────────────────────────
+        private static EegProcessor _processor;
+        private static BandPowers[] _fftPowers;
+
         private const int ChannelCount = 4;   // Fp1, Fp2, T4, T3 — frame is ChannelCount * samplesPerChannel
 
         // Channel labels per the SenzeBand layout (see SDK docs).
@@ -65,6 +75,15 @@ namespace NeuuroBridge
                     : $"\n[AUTH] Authentication FAILED ({detail}). Raw EEG will not stream.");
                 if (ok) _authed.Set();
             };
+
+            _svc.OnAttention      += v => { lock (_stateLock) _sdkAttention = v; };
+            _svc.OnRelaxation     += v => { lock (_stateLock) _sdkRelaxation = v; };
+            _svc.OnMentalWorkload += v => { lock (_stateLock) _sdkMentalWorkload = v; };
+            _svc.OnAbdt           += v => { lock (_stateLock) _sdkAbdt = v; };
+
+            _processor = new EegProcessor();
+            _svc.OnFilteredEeg += f => _processor.AddFilteredFrame(f);
+            _processor.OnBandPowers += powers => { lock (_stateLock) _fftPowers = powers; };
 
             // 1) Initialize
             Print("Initializing SDK...");
@@ -240,7 +259,13 @@ namespace NeuuroBridge
         private static void PrintEegSnapshot()
         {
             int[] raw; float[] filt;
-            lock (_stateLock) { raw = _lastRawInt; filt = _lastFiltered; }
+            float[,] sdkAbdt; float sdkAtt, sdkRel, sdkMwl; BandPowers[] fftPow;
+            lock (_stateLock)
+            {
+                raw = _lastRawInt; filt = _lastFiltered;
+                sdkAbdt = _sdkAbdt; sdkAtt = _sdkAttention; sdkRel = _sdkRelaxation;
+                sdkMwl = _sdkMentalWorkload; fftPow = _fftPowers;
+            }
 
             Print($"\n[frame {Interlocked.Read(ref _rawFrameCount)}]  ch     raw mean   raw pk-pk    filt last   filt pk-pk");
             for (int ch = 0; ch < ChannelCount; ch++)
@@ -249,6 +274,42 @@ namespace NeuuroBridge
                 var f = FloatChannelStats(filt, ch);
                 Print(string.Format("            {0,-4} {1,10} {2,11}   {3,10} {4,11}",
                     ChannelLabels[ch], r.a, r.b, f.a, f.b));
+            }
+
+            // SDK cognitive outputs
+            string Fmt(float v) => float.IsNaN(v) ? "  ---  " : v.ToString("F3");
+            Print($"\n  SDK  attention={Fmt(sdkAtt)}  relaxation={Fmt(sdkRel)}  mental-workload={Fmt(sdkMwl)}");
+
+            if (sdkAbdt != null)
+            {
+                // SDK delivers float[NUM_CHANNELS=4, NUM_FREQTYPES=5].
+                // Band order confirmed from SDK source: ABDT acronym + Gamma appended.
+                // [0]=Alpha  [1]=Beta  [2]=Delta  [3]=Theta  [4]=Gamma
+                string[] sdkBandNames = { "α", "β", "δ", "θ", "γ" };
+                int chs = sdkAbdt.GetLength(0), bands = sdkAbdt.GetLength(1);
+                Print($"  SDK  ch     α(alpha)   β(beta)    δ(delta)   θ(theta)   γ(gamma)");
+                for (int ch = 0; ch < Math.Min(chs, ChannelCount); ch++)
+                {
+                    var parts = new System.Text.StringBuilder($"       {ChannelLabels[ch],-4}");
+                    for (int b = 0; b < bands; b++)
+                    {
+                        string lbl = b < sdkBandNames.Length ? sdkBandNames[b] : b.ToString();
+                        parts.Append($"  {lbl}={sdkAbdt[ch, b]:F4}");
+                    }
+                    Print(parts.ToString());
+                }
+            }
+
+            // Custom FFT band powers
+            if (fftPow != null)
+            {
+                Print("  FFT  ch     δ(delta)   θ(theta)   α(alpha)    β(beta)   γ(gamma)");
+                for (int ch = 0; ch < ChannelCount; ch++)
+                    Print($"       {ChannelLabels[ch],-4} {fftPow[ch]}");
+            }
+            else
+            {
+                Print("  FFT  (accumulating — fires after first 256 filtered samples)");
             }
         }
 
