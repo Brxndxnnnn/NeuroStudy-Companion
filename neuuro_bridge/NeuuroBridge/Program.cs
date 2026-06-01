@@ -160,22 +160,24 @@ namespace NeuuroBridge
                 Print("  1. Live EEG — SDK data only  (attention, relaxation, ABDT band powers)");
                 Print("  2. Live EEG — FFT data only  (custom band powers)");
                 Print("  3. Live EEG — both SDK and FFT");
-                Print("  4. Show SenzeBand device info");
-                Print("  5. Show signal & battery status");
-                Print("  6. Re-attempt authentication");
-                Print("  7. Disconnect and exit");
+                Print("  4. Live EEG — raw ADC samples (Fp1, Fp2, T4, T3 integer values)");
+                Print("  5. Show SenzeBand device info");
+                Print("  6. Show signal & battery status");
+                Print("  7. Re-attempt authentication");
+                Print("  8. Disconnect and exit");
                 Print("======================");
-                Console.Write("Choose [1-7]: ");
+                Console.Write("Choose [1-8]: ");
 
                 switch ((Console.ReadLine() ?? "").Trim())
                 {
                     case "1": ShowLiveData(1); break;
                     case "2": ShowLiveData(2); break;
                     case "3": ShowLiveData(3); break;
-                    case "4": ShowDeviceInfo(); break;
-                    case "5": ShowStatus(); break;
-                    case "6": Print("Re-attempting authentication..."); _svc.Authenticate(force: true); break;
-                    case "7": return;
+                    case "4": ShowLiveData(4); break;
+                    case "5": ShowDeviceInfo(); break;
+                    case "6": ShowStatus(); break;
+                    case "7": Print("Re-attempting authentication..."); _svc.Authenticate(force: true); break;
+                    case "8": return;
                     default: Print("Invalid choice."); break;
                 }
             }
@@ -183,9 +185,12 @@ namespace NeuuroBridge
 
         private static void ShowLiveData(int mode)
         {
-            string label = mode == 1 ? "SDK only" : mode == 2 ? "FFT only" : "SDK + FFT";
+            string label = mode == 1 ? "SDK only" : mode == 2 ? "FFT only" : mode == 3 ? "SDK + FFT" : "raw samples";
             Print($"\n--- Live EEG [{label}] (press ENTER to return to menu) ---");
-            Print("raw = ADC counts (large DC offset); filt = band-passed, zero-centred. pk-pk = max-min over the frame.");
+            if (mode == 4)
+                Print("Raw ADC integer samples per channel, as delivered by the SDK (large DC offset present).");
+            else
+                Print("raw = ADC counts (large DC offset); filt = band-passed, zero-centred. pk-pk = max-min over the frame.");
             _rawThrottle.Restart();
             _displayMode = mode;
             Console.ReadLine();   // block here; frames print from callback threads
@@ -259,7 +264,8 @@ namespace NeuuroBridge
             // Throttle to ~2 snapshots/sec so the stream stays readable.
             if (_rawThrottle.ElapsedMilliseconds < 500) return;
             _rawThrottle.Restart();
-            PrintEegSnapshot();
+            if (_displayMode == 4) PrintRawSamples();
+            else PrintEegSnapshot();
         }
 
         private static void PrintEegSnapshot()
@@ -324,6 +330,32 @@ namespace NeuuroBridge
                 {
                     Print("  FFT  (accumulating — fires after first 256 filtered samples)");
                 }
+            }
+        }
+
+        private static void PrintRawSamples()
+        {
+            int[] raw;
+            lock (_stateLock) raw = _lastRawInt;
+
+            if (raw == null || raw.Length < ChannelCount)
+            {
+                Print("  (no raw data yet)");
+                return;
+            }
+
+            int samplesPerCh = raw.Length / ChannelCount;
+            Print($"\n[frame {Interlocked.Read(ref _rawFrameCount)}]  {samplesPerCh} samples/channel");
+            for (int ch = 0; ch < ChannelCount; ch++)
+            {
+                int start = ch * samplesPerCh;
+                var sb = new System.Text.StringBuilder($"  {ChannelLabels[ch],-4}: ");
+                for (int i = start; i < start + samplesPerCh; i++)
+                {
+                    sb.Append(raw[i]);
+                    if (i < start + samplesPerCh - 1) sb.Append(", ");
+                }
+                Print(sb.ToString());
             }
         }
 
