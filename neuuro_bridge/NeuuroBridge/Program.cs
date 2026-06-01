@@ -3,6 +3,8 @@ using System.Collections.Generic;
 using System.Diagnostics;
 using System.IO;
 using System.Linq;
+using System.Security.Cryptography;
+using System.Text;
 using System.Threading;
 
 namespace NeuuroBridge
@@ -48,6 +50,11 @@ namespace NeuuroBridge
         private static SenzeBandDeviceInfo _connDevice;
 
         private static SenzeBandService _svc;
+
+        // ── Session identity ─────────────────────────────────────────────────
+        private static string _sessionId = "";       // UUID v4 — DB key
+        private static string _pairingCode = "";     // 6-char code — typed into web frontend
+        private static DateTime _sessionStartUtc;
 
         private static void Main(string[] args)
         {
@@ -137,10 +144,13 @@ namespace NeuuroBridge
                     Print("WARNING: not authenticated yet — raw EEG may not stream. (Menu option 4 retries.)");
             }
 
-            // 6) Start streaming; the menu controls what's shown.
+            // 6) Generate session identity now that we have a confirmed BLE address.
+            GenerateSession(_connAddress);
+
+            // 7) Start streaming; the menu controls what's shown.
             _svc.StartStream();
 
-            // 7) Interactive menu
+            // 8) Interactive menu
             RunMenu();
 
             // 7) Shut down
@@ -157,6 +167,10 @@ namespace NeuuroBridge
             {
                 Print("");
                 Print("======== MENU ========");
+                Print($"  Session ID   : {_sessionId}");
+                Print($"  Pairing Code : {_pairingCode}  ← enter this on the web frontend");
+                Print($"  Started      : {_sessionStartUtc:yyyy-MM-dd HH:mm:ss} UTC");
+                Print("----------------------");
                 Print("  1. Live EEG — SDK data only  (attention, relaxation, ABDT band powers)");
                 Print("  2. Live EEG — FFT data only  (custom band powers)");
                 Print("  3. Live EEG — both SDK and FFT");
@@ -466,6 +480,29 @@ namespace NeuuroBridge
                 return value;
             }
             return null;
+        }
+
+        // ── Session generation ───────────────────────────────────────────────
+        private static void GenerateSession(string bleAddress)
+        {
+            _sessionStartUtc = DateTime.UtcNow;
+            _sessionId       = Guid.NewGuid().ToString();
+            _pairingCode     = BuildPairingCode(bleAddress, _sessionStartUtc);
+            Print($"\n[Session] ID={_sessionId}  Pairing={_pairingCode}");
+        }
+
+        // Derives a 6-char uppercase alphanumeric code from the BLE address and
+        // session start time. SHA-256 over "address|yyyyMMddHHmmss", take the
+        // first 6 hex chars of the digest. Collision probability is negligible
+        // for the expected session volume.
+        private static string BuildPairingCode(string bleAddress, DateTime utc)
+        {
+            var input = $"{bleAddress}|{utc:yyyyMMddHHmmss}";
+            using (var sha = SHA256.Create())
+            {
+                var hash = sha.ComputeHash(Encoding.UTF8.GetBytes(input));
+                return BitConverter.ToString(hash).Replace("-", "").Substring(0, 6).ToUpperInvariant();
+            }
         }
 
         private static void Print(string message) => Console.WriteLine(message);
