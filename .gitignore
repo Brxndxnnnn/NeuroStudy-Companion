@@ -7,6 +7,7 @@ logs/
 
 # Local secrets — keep the real .env out of git (the .env.example template is tracked)
 .env
+.env.docker
 
 # Visual Studio
 .vs/
