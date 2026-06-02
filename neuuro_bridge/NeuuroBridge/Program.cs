@@ -56,6 +56,13 @@ namespace NeuuroBridge
         private static string _pairingCode = "";     // 6-char code — typed into web frontend
         private static DateTime _sessionStartUtc;
 
+        // ── CSV capture state ────────────────────────────────────────────────
+        private static volatile bool _capturing;
+        private static readonly Stopwatch _captureWatch = new Stopwatch();
+        private static readonly List<(long Ms, long Frame, int[] Samples)> _captureBuf =
+            new List<(long, long, int[])>();
+        private static readonly object _captureLock = new object();
+
         private static void Main(string[] args)
         {
             Console.OutputEncoding = System.Text.Encoding.UTF8;
@@ -175,12 +182,13 @@ namespace NeuuroBridge
                 Print("  2. Live EEG — FFT data only  (custom band powers)");
                 Print("  3. Live EEG — both SDK and FFT");
                 Print("  4. Live EEG — raw ADC samples (Fp1, Fp2, T4, T3 integer values)");
-                Print("  5. Show SenzeBand device info");
-                Print("  6. Show signal & battery status");
-                Print("  7. Re-attempt authentication");
-                Print("  8. Disconnect and exit");
+                Print("  5. Capture raw session → CSV");
+                Print("  6. Show SenzeBand device info");
+                Print("  7. Show signal & battery status");
+                Print("  8. Re-attempt authentication");
+                Print("  9. Disconnect and exit");
                 Print("======================");
-                Console.Write("Choose [1-8]: ");
+                Console.Write("Choose [1-9]: ");
 
                 switch ((Console.ReadLine() ?? "").Trim())
                 {
@@ -188,10 +196,11 @@ namespace NeuuroBridge
                     case "2": ShowLiveData(2); break;
                     case "3": ShowLiveData(3); break;
                     case "4": ShowLiveData(4); break;
-                    case "5": ShowDeviceInfo(); break;
-                    case "6": ShowStatus(); break;
-                    case "7": Print("Re-attempting authentication..."); _svc.Authenticate(force: true); break;
-                    case "8": return;
+                    case "5": CaptureSession(); break;
+                    case "6": ShowDeviceInfo(); break;
+                    case "7": ShowStatus(); break;
+                    case "8": Print("Re-attempting authentication..."); _svc.Authenticate(force: true); break;
+                    case "9": return;
                     default: Print("Invalid choice."); break;
                 }
             }
@@ -272,6 +281,14 @@ namespace NeuuroBridge
             {
                 Interlocked.Increment(ref _rawFrameCount);
                 lock (_stateLock) _lastRawInt = frame.IntSamples;
+
+                if (_capturing)
+                {
+                    long ms = _captureWatch.ElapsedMilliseconds;
+                    long fn = Interlocked.Read(ref _rawFrameCount);
+                    lock (_captureLock)
+                        _captureBuf.Add((ms, fn, (int[])frame.IntSamples.Clone()));
+                }
             }
 
             if (_displayMode == 0) return;
@@ -480,6 +497,94 @@ namespace NeuuroBridge
                 return value;
             }
             return null;
+        }
+
+        // ── CSV capture ──────────────────────────────────────────────────────
+        private static void CaptureSession()
+        {
+            int minutes;
+            while (true)
+            {
+                Console.Write("Capture duration in minutes [1-15]: ");
+                if (int.TryParse(Console.ReadLine(), out minutes) && minutes >= 1 && minutes <= 15)
+                    break;
+                Print("Enter a number between 1 and 15.");
+            }
+
+            long durationMs = (long)minutes * 60_000L;
+            Print($"Capturing {minutes} min of raw EEG. Press ENTER to stop early.");
+
+            lock (_captureLock) _captureBuf.Clear();
+            _captureWatch.Restart();
+            _capturing = true;
+
+            bool stopped = false;
+            while (!stopped && _captureWatch.ElapsedMilliseconds < durationMs)
+            {
+                long secsLeft = (durationMs - _captureWatch.ElapsedMilliseconds + 999) / 1000;
+                Print($"  {secsLeft}s remaining...");
+
+                var tick = Stopwatch.StartNew();
+                while (!stopped && tick.ElapsedMilliseconds < 2000)
+                {
+                    try
+                    {
+                        if (Console.KeyAvailable && Console.ReadKey(intercept: true).Key == ConsoleKey.Enter)
+                            stopped = true;
+                    }
+                    catch (InvalidOperationException) { }
+                    if (!stopped) Thread.Sleep(50);
+                }
+            }
+
+            _capturing = false;
+            long capturedMs = _captureWatch.ElapsedMilliseconds;
+
+            int frameCount;
+            lock (_captureLock) frameCount = _captureBuf.Count;
+            Print($"\nCapture complete: {capturedMs / 1000.0:F1}s, {frameCount} frames captured.");
+
+            WriteCsvFromBuffer();
+        }
+
+        private static void WriteCsvFromBuffer()
+        {
+            List<(long Ms, long Frame, int[] Samples)> frames;
+            lock (_captureLock) frames = new List<(long, long, int[])>(_captureBuf);
+
+            if (frames.Count == 0)
+            {
+                Print("No frames captured — CSV not written.");
+                return;
+            }
+
+            string filename = $"raw_{_sessionId}_{DateTime.UtcNow:yyyyMMdd_HHmmss}.csv";
+            int rowsWritten = 0;
+
+            using (var sw = new StreamWriter(filename, append: false, encoding: Encoding.UTF8))
+            {
+                sw.WriteLine("elapsed_ms,frame,sample_idx,Fp1,Fp2,T4,T3");
+                foreach (var (ms, frameNum, samples) in frames)
+                {
+                    if (samples == null || samples.Length < ChannelCount) continue;
+                    int spc = samples.Length / ChannelCount;
+                    for (int s = 0; s < spc; s++)
+                    {
+                        sw.Write(ms); sw.Write(',');
+                        sw.Write(frameNum); sw.Write(',');
+                        sw.Write(s);
+                        for (int ch = 0; ch < ChannelCount; ch++)
+                        {
+                            sw.Write(',');
+                            sw.Write(samples[ch * spc + s]);
+                        }
+                        sw.WriteLine();
+                        rowsWritten++;
+                    }
+                }
+            }
+
+            Print($"Saved → {Path.GetFullPath(filename)}  ({rowsWritten} rows)");
         }
 
         // ── Session generation ───────────────────────────────────────────────
