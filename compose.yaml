@@ -1,0 +1,51 @@
+# compose.yaml  ← Docker Compose now prefers this name over docker-compose.yml
+services:
+
+  db:
+    image: timescale/timescaledb:latest-pg17
+    container_name: neurostudy_db
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB}
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+    restart: always
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+      - ./db/migrations:/docker-entrypoint-initdb.d
+    ports:
+      - "5433:5432"   # 5432 kept free for your local psql install
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U neurostudy_user -d neurostudy"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  backend:
+      build: ./backend
+      container_name: neurostudy_backend
+      env_file: ./.env.docker
+      ports:
+        - "3000:3000"
+      depends_on:
+        db:
+          condition: service_healthy
+      volumes:
+        - ./backend/src:/app/src
+      command: npx nodemon src/index.js   # ← overrides the Dockerfile CMD for dev
+
+  # ── NeuroBridge ─────────────────────────────────────────────────
+  # Uncomment when neuuro_bridge/NeuroBridge/Dockerfile is ready
+  # Or just put in your own one
+  #
+  # neuuro_bridge:
+  #   build: ./neuuro_bridge/NeuroBridge
+  #   container_name: neurostudy_bridge
+  #   env_file: ./neuuro_bridge/NeuroBridge/.env
+  #   depends_on:
+  #     db:
+  #       condition: service_healthy
+  #   # ports:
+  #   #   - "XXXX:XXXX"   ← TBC on which port the service exposes
+
+volumes:
+  postgres-data:
