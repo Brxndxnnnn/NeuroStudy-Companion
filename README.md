@@ -13,8 +13,8 @@ Before starting the services, make sure the backend environment file is in place
 
 We use two environment files to separate containerized settings from running the backend locally:
 
-- `.env.docker` — used by `docker compose` via the `env_file` entry in [compose.yaml](compose.yaml). This file should contain values appropriate for the containers (for example `POSTGRES_HOST` set to the `db` service host `db` and `POSTGRES_PORT` set to `5432`).
-- `.env` — used when running the backend locally (for example with `npm run dev`). This file can contain developer-specific overrides (local hostnames, credentials, or tools) and is not required to be identical to `.env.docker`.T
+- `.env.docker` — used by `docker compose` via the `env_file` entry in [compose.yaml](compose.yaml). This file should contain values appropriate for the containers (for example `POSTGRES_HOST` set to `db` and `POSTGRES_PORT` set to `5432`).
+- `.env` — used when running the backend locally (for example with `npm run dev`). This file can contain developer-specific overrides (local hostnames, credentials, or tools) and is not required to be identical to `.env.docker`. An example would be `POSTGRES_HOST` set to `localhost` and `POSTGRES_PORT` set to `5433`.
 
 Recommended workflow:
 
@@ -28,15 +28,22 @@ cp .env.example .env.docker
 2. Edit `.env.docker` so the `POSTGRES_*` values point to the Dockerized DB (example):
 
 ```env
+POSTGRES_DB=neurostudy
 POSTGRES_USER=your_own_username
 POSTGRES_PASSWORD=your_own_password
-POSTGRES_DB=neurostudy
 POSTGRES_HOST=db
 POSTGRES_PORT=5432
 ```
 
-3. You most probably won't need this part since you will just call the Dockerized backend. 
-Edit `.env` for local development if you run the backend outside Docker. Keep the `POSTGRES_*` values pointed at the Dockerized DB unless you intentionally want to connect to a different Postgres instance.
+3. Edit `.env` for local development if you intend to directly connect to the Dockerized database without Dockerizing your service. Keep the `POSTGRES_*` values pointed at the Dockerized DB unless you intentionally want to connect to a different Postgres instance.
+
+```env
+POSTGRES_DB=neurostudy
+POSTGRES_USER=your_own_username
+POSTGRES_PASSWORD=your_own_password
+POSTGRES_HOST=localhost
+POSTGRES_PORT=5433
+```
 
 Notes:
 
