@@ -16,3 +16,5 @@ logs/
 # Rider / VS Code
 .idea/
 .vscode/
+
+node_modules/
