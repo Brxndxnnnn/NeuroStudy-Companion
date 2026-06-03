@@ -35,9 +35,17 @@ Two environment files control which context your backend runs in:
 ### 1. Copy `.env.example` to create both files if missing:
 
 ```bash
-cp .env.example .env
-cp .env.example .env.docker
+cp .env.example backend/.env
+cp .env.example backend/.env.docker
+cp .env.example db/.env.docker
 ```
+| File | Purpose |
+|---|---|
+| `backend/.env` | Local backend via `npm run dev` |
+| `backend/.env.docker` | Backend running inside Docker |
+| `db/.env.docker` | Database container credentials |
+
+All three files are gitignored. Never commit them.
 
 ### 2. Edit `.env.docker` for Dockerized backend — use Docker internal addresses:
 
@@ -97,15 +105,14 @@ The backend waits for the database health check before starting. The schema is a
 **Verify the backend is running:**
 
 ```bash
-curl http://localhost:3000/health
+curl http://localhost:3000/api/health
 ```
 
 Expected response:
 
 ```json
 {
-  "status": "ok",
-  "db_time": "..."
+  "status": "ok"
 }
 ```
 
@@ -136,8 +143,6 @@ The backend reads `.env` (not `.env.docker`) when run this way. Make sure `.env`
 **Why `localhost:5433` and not `localhost:5432`?**
 
 Your machine may have a local PostgreSQL installation already running on port `5432`. The Docker DB container is exposed on `5433` to avoid a collision. If you accidentally connect to `5432`, you will hit your local PostgreSQL instance (which has no `neurostudy` database) and see a `database does not exist` error.
-
-***
 
 ## If You Are Building Another Service (ML, C#, etc.)
 

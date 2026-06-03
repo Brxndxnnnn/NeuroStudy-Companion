@@ -41,7 +41,7 @@ CREATE TABLE users (
     user_id       uuid        PRIMARY KEY DEFAULT gen_random_uuid(),
     email         text        NOT NULL UNIQUE,
     password_hash text        NOT NULL,
-    clinic_id     uuid        NOT NULL REFERENCES clinics(clinic_id)   ON DELETE RESTRICT,
+    clinic_id     uuid        REFERENCES clinics(clinic_id)   ON DELETE RESTRICT,
     display_name  text,
     created_at    timestamptz NOT NULL DEFAULT now()
 );
@@ -66,69 +66,6 @@ CREATE TABLE revoked_tokens (
 
 -- Index for cleanup job: DELETE FROM revoked_tokens WHERE expires_at < now()
 CREATE INDEX idx_revoked_tokens_expires_at ON revoked_tokens (expires_at);
-
--- ─── Seed: Roles ──────────────────────────────────────────────────────────────
-INSERT INTO roles (name, description) VALUES
-    ('admin',       'Full access across all clinics and users'),
-    ('technician',  'Session and client access scoped to own clinic');
-
--- ─── Seed: Permissions ────────────────────────────────────────────────────────
-INSERT INTO permissions (name, description) VALUES
-    -- Sessions
-    ('sessions:read:own_clinic',    'Read sessions within own clinic'),
-    ('sessions:read:all',           'Read sessions across all clinics'),
-    ('sessions:write:own_clinic',   'Create and end sessions within own clinic'),
-    ('sessions:write:all',          'Create and end sessions across all clinics'),
-
-    -- Clients
-    ('clients:read:own_clinic',     'Read clients within own clinic'),
-    ('clients:read:all',            'Read all clients'),
-    ('clients:write:own_clinic',    'Create and update clients within own clinic'),
-    ('clients:write:all',           'Create and update any client'),
-
-    -- Users
-    ('users:read:all',              'Read all user accounts'),
-    ('users:write:all',             'Create, update and delete user accounts'),
-
-    -- Insights
-    ('insights:read:own_clinic',    'Read insights for own clinic sessions'),
-    ('insights:read:all',           'Read all insights'),
-
-    -- Clinics
-    ('clinics:read:own',            'Read own clinic record'),
-    ('clinics:read:all',            'Read all clinic records'),
-    ('clinics:write:all',           'Create and update clinic records');
-
--- ─── Seed: Role → Permission assignments ──────────────────────────────────────
-INSERT INTO role_permissions (role_id, permission_id)
-SELECT r.role_id, p.permission_id
-FROM roles r, permissions p
-WHERE r.name = 'admin'
-  AND p.name IN (
-    'sessions:read:all',
-    'sessions:write:all',
-    'clients:read:all',
-    'clients:write:all',
-    'users:read:all',
-    'users:write:all',
-    'insights:read:all',
-    'clinics:read:all',
-    'clinics:write:all'
-);
-
-INSERT INTO role_permissions (role_id, permission_id)
-SELECT r.role_id, p.permission_id
-FROM roles r, permissions p
-WHERE r.name = 'technician'
-  AND p.name IN (
-    'sessions:read:own_clinic',
-    'sessions:write:own_clinic',
-    'clients:read:own_clinic',
-    'clients:write:own_clinic',
-    'insights:read:own_clinic',
-    'clinics:read:own'
-);
-
 
 -- ─── Clients ──────────────────────────────────────────────────────────────────
 CREATE TABLE clients (
