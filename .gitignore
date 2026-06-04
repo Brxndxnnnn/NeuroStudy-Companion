@@ -9,6 +9,13 @@ logs/
 .env
 .env.docker
 
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+.venv/
+venv/
+
 # Visual Studio
 .vs/
 *.user
@@ -18,4 +25,5 @@ logs/
 .idea/
 .vscode/
 
+# Node.js
 node_modules/
