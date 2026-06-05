@@ -57,6 +57,7 @@ namespace NeuuroBridge
         public event Action<string> OnDisconnected;                    // address
         public event Action<bool> OnSignalReady;
         public event Action<bool[]> OnChannelStatus;
+        public event Action<float[]> OnImpedance;                      // per-electrode impedance (Fp1, Fp2, T4, T3)
         public event Action<string> OnBattery;
         public event Action<RawEegFrame> OnRawEeg;                     // raw ADC EEG (DC offset present)
         public event Action<float[]> OnFilteredEeg;                    // band-passed, zero-centered EEG
@@ -163,7 +164,7 @@ namespace NeuuroBridge
             sbci.assignSenzebandVersionDelegate(_ => { });
             sbci.assignEvokeDelegate(_ => { });
             sbci.assignDirectionDelegate(_ => { });
-            sbci.assignImpedanceDelegate(_ => { });
+            sbci.assignImpedanceDelegate(v => Post(() => OnImpedance?.Invoke(v)));
             sbci.assignCalParamsDelegate(_ => { });
             sbci.assignSPO2HeartRateDelegate(_ => { });
             sbci.assignRawData200msDelegate(_ => { });

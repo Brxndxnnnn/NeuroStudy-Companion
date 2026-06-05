@@ -26,9 +26,11 @@ namespace NeuuroBridge
         private static bool? _signalReady;
         private static string _battery;
         private static bool[] _channels;
+        private static float[] _impedance;     // per-electrode impedance, frame order (Fp1, Fp2, T4, T3)
         private static int[] _lastRawInt;
         private static float[] _lastFiltered;
         private static readonly Stopwatch _rawThrottle = Stopwatch.StartNew();
+        private static readonly Stopwatch _dbEegThrottle = Stopwatch.StartNew();   // batch window for DB upload
 
         // ── SDK cognitive features ───────────────────────────────────────────
         private static float _sdkAttention     = float.NaN;
@@ -56,6 +58,9 @@ namespace NeuuroBridge
         private static string _pairingCode = "";     // 6-char code — typed into web frontend
         private static DateTime _sessionStartUtc;
 
+        // ── Direct DB upload (TS1.6) ─────────────────────────────────────────
+        private static DbUploader _db;
+
         // ── CSV capture state ────────────────────────────────────────────────
         private static volatile bool _capturing;
         private static readonly Stopwatch _captureWatch = new Stopwatch();
@@ -80,6 +85,7 @@ namespace NeuuroBridge
             _svc.OnDisconnected += addr => Print($"\n[!] Disconnected ({addr})");
             _svc.OnSignalReady += ready => { lock (_stateLock) _signalReady = ready; };
             _svc.OnChannelStatus += ch => { lock (_stateLock) _channels = ch; };
+            _svc.OnImpedance += imp => { lock (_stateLock) _impedance = imp; };
             _svc.OnBattery += b => { lock (_stateLock) _battery = b; };
             _svc.OnRawEeg += HandleRawEeg;
             _svc.OnFilteredEeg += f => { lock (_stateLock) _lastFiltered = f; };
@@ -99,6 +105,7 @@ namespace NeuuroBridge
             _processor = new EegProcessor();
             _svc.OnFilteredEeg += f => _processor.AddFilteredFrame(f);
             _processor.OnBandPowers += powers => { lock (_stateLock) _fftPowers = powers; };
+            _processor.OnBandPowers += UploadBandPowers;   // TS1.6: one band_powers row per FFT fire (~1/s)
 
             // 1) Initialize
             Print("Initializing SDK...");
@@ -154,6 +161,10 @@ namespace NeuuroBridge
             // 6) Generate session identity now that we have a confirmed BLE address.
             GenerateSession(_connAddress);
 
+            // 6b) Connect to the DB, anchor the bridge clock to DB time, create the
+            //     unclaimed session row. Failure is non-fatal — streaming/CSV still work.
+            StartDbUpload();
+
             // 7) Start streaming; the menu controls what's shown.
             _svc.StartStream();
 
@@ -163,6 +174,7 @@ namespace NeuuroBridge
             // 7) Shut down
             Print("\nStopping...");
             _svc.StopStream();
+            _db?.Dispose();   // flush the final EEG/band batch before exit
             _svc.Shutdown();
             Print("Done.");
         }
@@ -177,18 +189,20 @@ namespace NeuuroBridge
                 Print($"  Session ID   : {_sessionId}");
                 Print($"  Pairing Code : {_pairingCode}  ← enter this on the web frontend");
                 Print($"  Started      : {_sessionStartUtc:yyyy-MM-dd HH:mm:ss} UTC");
+                Print($"  DB upload    : {DbStatusLine()}");
                 Print("----------------------");
                 Print("  1. Live EEG — SDK data only  (attention, relaxation, ABDT band powers)");
                 Print("  2. Live EEG — FFT data only  (custom band powers)");
                 Print("  3. Live EEG — both SDK and FFT");
                 Print("  4. Live EEG — raw ADC samples (Fp1, Fp2, T4, T3 integer values)");
-                Print("  5. Capture raw session → CSV");
-                Print("  6. Show SenzeBand device info");
-                Print("  7. Show signal & battery status");
-                Print("  8. Re-attempt authentication");
-                Print("  9. Disconnect and exit");
+                Print("  5. Impedance & signal-quality check (live)");
+                Print("  6. Capture raw session → CSV");
+                Print("  7. Show SenzeBand device info");
+                Print("  8. Show signal & battery status");
+                Print("  9. Re-attempt authentication");
+                Print(" 10. Disconnect and exit");
                 Print("======================");
-                Console.Write("Choose [1-9]: ");
+                Console.Write("Choose [1-10]: ");
 
                 switch ((Console.ReadLine() ?? "").Trim())
                 {
@@ -196,11 +210,12 @@ namespace NeuuroBridge
                     case "2": ShowLiveData(2); break;
                     case "3": ShowLiveData(3); break;
                     case "4": ShowLiveData(4); break;
-                    case "5": CaptureSession(); break;
-                    case "6": ShowDeviceInfo(); break;
-                    case "7": ShowStatus(); break;
-                    case "8": Print("Re-attempting authentication..."); _svc.Authenticate(force: true); break;
-                    case "9": return;
+                    case "5": ShowImpedanceCheck(); break;
+                    case "6": CaptureSession(); break;
+                    case "7": ShowDeviceInfo(); break;
+                    case "8": ShowStatus(); break;
+                    case "9": Print("Re-attempting authentication..."); _svc.Authenticate(force: true); break;
+                    case "10": return;
                     default: Print("Invalid choice."); break;
                 }
             }
@@ -238,6 +253,8 @@ namespace NeuuroBridge
             lock (_stateLock)
             {
                 Print($"  Signal  : {(_signalReady == null ? "(no data yet)" : (_signalReady.Value ? "READY" : "settling..."))}");
+                int q = SignalQuality.Compute(_signalReady, _channels);
+                Print($"  Quality : {q}/100 [{SignalQuality.Label(q)}]");
                 Print($"  Battery : {(_battery == null ? "(no data yet)" : _battery + "%")}");
                 if (_channels == null)
                 {
@@ -249,7 +266,60 @@ namespace NeuuroBridge
                         $"{(i < ChannelLabels.Length ? ChannelLabels[i] : "Ch" + i)}={(ok ? "OK" : "--")}");
                     Print("  Channels: " + string.Join("  ", parts));
                 }
+                if (_impedance != null)
+                {
+                    var parts = _impedance.Select((k, i) =>
+                        $"{(i < ChannelLabels.Length ? ChannelLabels[i] : "Ch" + i)}={k:F1}kΩ");
+                    Print("  Impedance: " + string.Join("  ", parts));
+                }
             }
+        }
+
+        // ── Impedance & signal-quality check (TS1.3) ────────────────────────
+        // Live electrode-contact view for fitting the headset before a session.
+        // Refreshes ~2/s until ENTER. Per-channel impedance + contact status feed a
+        // 0–100 signal-quality score (the same score written to band_powers).
+        private static void ShowImpedanceCheck()
+        {
+            Print("\n--- Impedance & signal quality (press ENTER to return to menu) ---");
+            Print("Fit the band so all four electrodes read GOOD and quality is high before pairing.");
+            var refresh = Stopwatch.StartNew();
+
+            while (true)
+            {
+                if (Console.KeyAvailable && Console.ReadKey(intercept: true).Key == ConsoleKey.Enter)
+                    break;
+
+                if (refresh.ElapsedMilliseconds >= 500)
+                {
+                    refresh.Restart();
+                    bool? ready; bool[] channels; float[] imp;
+                    lock (_stateLock) { ready = _signalReady; channels = _channels; imp = _impedance; }
+
+                    int q = SignalQuality.Compute(ready, channels);
+                    string readyTxt = ready == null ? "(no data)" : ready.Value ? "READY" : "settling...";
+                    Print($"\n  signal={readyTxt}   quality={q}/100 [{SignalQuality.Label(q)}]");
+                    for (int ch = 0; ch < ChannelCount; ch++)
+                    {
+                        bool? ok = channels != null && ch < channels.Length ? channels[ch] : (bool?)null;
+                        float k = imp != null && ch < imp.Length ? imp[ch] : float.NaN;
+                        string contact = ok == null ? "?" : ok.Value ? "OK" : "--";
+                        string kTxt = float.IsNaN(k) ? "   n/a" : $"{k,6:F1}";
+                        Print($"     {ChannelLabels[ch],-4} contact={contact,-2}  impedance={kTxt} kΩ ({SignalQuality.GradeImpedance(k)})");
+                    }
+                }
+                Thread.Sleep(50);
+            }
+            Print("--- stopped ---");
+        }
+
+        private static string DbStatusLine()
+        {
+            if (_db == null) return "(not started)";
+            string clock = _db.ClockAnchored ? "clock-synced" : "NOT connected";
+            string err = string.IsNullOrEmpty(_db.LastError) ? "" : $"  last error: {_db.LastError}";
+            string drop = _db.Dropped > 0 ? $", {_db.Dropped} dropped" : "";
+            return $"{clock} — {_db.EegRowsSent} eeg + {_db.BandRowsSent} band rows sent{drop}{err}";
         }
 
         // ── SDK callbacks ───────────────────────────────────────────────────
@@ -288,6 +358,13 @@ namespace NeuuroBridge
                     long fn = Interlocked.Read(ref _rawFrameCount);
                     lock (_captureLock)
                         _captureBuf.Add((ms, fn, (int[])frame.IntSamples.Clone()));
+                }
+
+                // TS1.6: snapshot one eeg_readings row per ~500 ms window (batched, not per frame).
+                if (_db != null && _db.Streaming && _dbEegThrottle.ElapsedMilliseconds >= 500)
+                {
+                    _dbEegThrottle.Restart();
+                    UploadEegSnapshot();
                 }
             }
 
@@ -608,6 +685,106 @@ namespace NeuuroBridge
                 var hash = sha.ComputeHash(Encoding.UTF8.GetBytes(input));
                 return BitConverter.ToString(hash).Replace("-", "").Substring(0, 6).ToUpperInvariant();
             }
+        }
+
+        // ── Direct DB upload (TS1.6) ─────────────────────────────────────────
+        private static void StartDbUpload()
+        {
+            string connString = BuildConnectionString();
+            _db = new DbUploader(connString, m => Print("  [db] " + m));
+
+            if (!_db.Connect())
+            {
+                Print("[db] No database connection — EEG will NOT be uploaded (streaming/CSV still work).");
+                return;
+            }
+
+            int sampleRate = EegProcessor.SampleRate == 125 ? 125 : 250;   // schema CHECK allows 125/250
+            _db.CreateSession(Guid.Parse(_sessionId), _connAddress, _pairingCode, sampleRate, _sessionStartUtc);
+        }
+
+        // Builds an Npgsql connection string from .env (POSTGRES_* keys, same files the
+        // rest of the stack uses), falling back to the dev compose defaults (localhost:5433).
+        private static string BuildConnectionString()
+        {
+            string host = FindDotEnvValue("POSTGRES_HOST") ?? "localhost";
+            string port = FindDotEnvValue("POSTGRES_PORT") ?? "5433";
+            string dbName = FindDotEnvValue("POSTGRES_DB")   ?? "neurostudy";
+            string user = FindDotEnvValue("POSTGRES_USER") ?? "neurostudy_user";
+            string pass = FindDotEnvValue("POSTGRES_PASSWORD") ?? "neurostudy_pass";
+            return $"Host={host};Port={port};Database={dbName};Username={user};Password={pass};" +
+                   "Timeout=5;Command Timeout=10;Pooling=true";
+        }
+
+        private static void UploadEegSnapshot()
+        {
+            int[] raw; float[] filt;
+            lock (_stateLock) { raw = _lastRawInt; filt = _lastFiltered; }
+            if (raw == null && filt == null) return;
+
+            var row = new EegReadingRow
+            {
+                Time     = _db.DbNow,
+                RawLast  = raw  != null ? new float[ChannelCount] : null,
+                RawPkpk  = raw  != null ? new float[ChannelCount] : null,
+                FiltLast = filt != null ? new float[ChannelCount] : null,
+                FiltPkpk = filt != null ? new float[ChannelCount] : null,
+            };
+            for (int ch = 0; ch < ChannelCount; ch++)
+            {
+                if (raw != null)  { var s = IntLastPkpk(raw, ch);   row.RawLast[ch] = s.last;  row.RawPkpk[ch] = s.pkpk; }
+                if (filt != null) { var s = FloatLastPkpk(filt, ch); row.FiltLast[ch] = s.last; row.FiltPkpk[ch] = s.pkpk; }
+            }
+            _db.EnqueueEeg(row);
+        }
+
+        private static void UploadBandPowers(BandPowers[] powers)
+        {
+            if (_db == null || !_db.Streaming) return;
+            float att, rel, mwl; bool? ready; bool[] channels;
+            lock (_stateLock)
+            {
+                att = _sdkAttention; rel = _sdkRelaxation; mwl = _sdkMentalWorkload;
+                ready = _signalReady; channels = _channels;
+            }
+            _db.EnqueueBand(new BandPowerRow
+            {
+                Time           = _db.DbNow,
+                Attention      = att,
+                Relaxation     = rel,
+                MentalWorkload = mwl,
+                SignalQuality  = SignalQuality.Compute(ready, channels),
+                Bands          = powers,
+            });
+        }
+
+        // Numeric variants of the display stat helpers: last sample + peak-to-peak per channel.
+        private static (float last, float pkpk) IntLastPkpk(int[] d, int ch)
+        {
+            if (d == null || d.Length < ChannelCount) return (0f, 0f);
+            int n = d.Length / ChannelCount, start = ch * n;
+            int min = int.MaxValue, max = int.MinValue;
+            for (int i = start; i < start + n; i++)
+            {
+                int v = d[i];
+                if (v < min) min = v;
+                if (v > max) max = v;
+            }
+            return (d[start + n - 1], max - min);
+        }
+
+        private static (float last, float pkpk) FloatLastPkpk(float[] d, int ch)
+        {
+            if (d == null || d.Length < ChannelCount) return (0f, 0f);
+            int n = d.Length / ChannelCount, start = ch * n;
+            float min = float.MaxValue, max = float.MinValue;
+            for (int i = start; i < start + n; i++)
+            {
+                float v = d[i];
+                if (v < min) min = v;
+                if (v > max) max = v;
+            }
+            return (d[start + n - 1], max - min);
         }
 
         private static void Print(string message) => Console.WriteLine(message);
