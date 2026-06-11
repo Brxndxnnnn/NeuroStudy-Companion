@@ -33,6 +33,19 @@ namespace NeuuroBridge
     }
 
     /// <summary>
+    /// One whole raw-EEG frame queued for the <c>eeg_raw_samples</c> hypertable. Unlike
+    /// the decimated <c>eeg_readings</c> path, every sample is preserved: <see cref="Samples"/>
+    /// is the SDK's int frame ([ch0 block][ch1][ch2][ch3], frame order Fp1,Fp2,T4,T3) and
+    /// <see cref="FrameEnd"/> is DbNow captured at frame arrival — the time of the LAST sample.
+    /// Per-sample timestamps are derived from these at flush time (see CopyRaw).
+    /// </summary>
+    public struct RawEegFrameRecord
+    {
+        public DateTime FrameEnd;
+        public int[] Samples;
+    }
+
+    /// <summary>
     /// Write-only bridge → TimescaleDB sink (TS1.6). Owns the session row, anchors the
     /// bridge clock to DB time once, then streams batched EEG and per-second band powers
     /// via binary COPY. Fire-and-forget: a DB hiccup never blocks or crashes streaming —
@@ -52,8 +65,13 @@ namespace NeuuroBridge
         private const string PlaceholderClinicId = "33333333-3333-3333-3333-333333333333";
         private const string PlaceholderRoleId   = "44444444-4444-4444-4444-444444444444";
 
+        private const int ChannelCount    = 4;        // Fp1, Fp2, T4, T3 (SDK frame order)
         private const int FlushIntervalMs = 500;     // batch window for eeg_readings (~2 flushes/s)
-        private const int MaxQueued       = 20000;    // bound each queue so a dead DB can't OOM us
+        private const int MaxQueued       = 20000;    // bound each summary queue so a dead DB can't OOM us
+        // Raw is 250 rows/s, and ML cannot tolerate gaps — give it a much deeper buffer
+        // (~10 min of frames) before it is forced to drop. Durable spool-to-disk is the
+        // planned follow-up that removes the drop entirely.
+        private const int MaxRawFramesQueued = 200000;
 
         private readonly string _connString;
         private readonly Action<string> _log;
@@ -61,14 +79,20 @@ namespace NeuuroBridge
 
         private readonly ConcurrentQueue<EegReadingRow> _eegQ = new ConcurrentQueue<EegReadingRow>();
         private readonly ConcurrentQueue<BandPowerRow>  _bandQ = new ConcurrentQueue<BandPowerRow>();
+        private readonly ConcurrentQueue<RawEegFrameRecord> _rawQ = new ConcurrentQueue<RawEegFrameRecord>();
 
         private NpgsqlConnection _conn;
         private Timer _flushTimer;
         private Guid _sessionId;
+        private int _sampleRate = 250;                  // true hardware rate (NOT EegProcessor.SampleRate=256)
+        private long _lastRawTicks;                     // strict-monotonic guard for per-sample timestamps
         private TimeSpan _clockOffset = TimeSpan.Zero;  // DbNow = UtcNow + offset
         private long _eegRowsSent;
         private long _bandRowsSent;
+        private long _rawRowsSent;
+        private long _rawFramesIn;                      // frames accepted into the raw queue (for reconciliation)
         private long _dropped;
+        private long _rawDropped;
         private volatile bool _disposed;
         private volatile string _lastError;
 
@@ -83,7 +107,10 @@ namespace NeuuroBridge
         public bool Streaming { get; private set; }
         public long EegRowsSent  => Interlocked.Read(ref _eegRowsSent);
         public long BandRowsSent => Interlocked.Read(ref _bandRowsSent);
+        public long RawRowsSent  => Interlocked.Read(ref _rawRowsSent);
+        public long RawFramesIn  => Interlocked.Read(ref _rawFramesIn);
         public long Dropped      => Interlocked.Read(ref _dropped);
+        public long RawDropped   => Interlocked.Read(ref _rawDropped);
         public string LastError  => _lastError;
 
         /// <summary>Bridge clock mapped onto the DB timeline (see clock-sync note in the design doc).</summary>
@@ -130,6 +157,7 @@ namespace NeuuroBridge
         public bool CreateSession(Guid sessionId, string deviceMac, string pairingCode, int sampleRate, DateTime startUtc)
         {
             _sessionId = sessionId;
+            if (sampleRate == 125 || sampleRate == 250) _sampleRate = sampleRate;
             lock (_ioLock)
             {
                 try
@@ -211,6 +239,21 @@ namespace NeuuroBridge
             Trim(_bandQ, MaxQueued);
         }
 
+        /// <summary>
+        /// Queue one full raw frame for the eeg_raw_samples table. <paramref name="frameEnd"/>
+        /// must be DbNow captured at frame arrival (the last sample's time); <paramref name="samples"/>
+        /// must be a private copy — the SDK reuses its buffer. Cheap: just enqueue; the per-sample
+        /// expansion + COPY happens on the flush thread.
+        /// </summary>
+        public void EnqueueRaw(DateTime frameEnd, int[] samples)
+        {
+            if (_disposed || !Streaming || samples == null) return;
+            _rawQ.Enqueue(new RawEegFrameRecord { FrameEnd = frameEnd, Samples = samples });
+            Interlocked.Increment(ref _rawFramesIn);
+            while (_rawQ.Count > MaxRawFramesQueued && _rawQ.TryDequeue(out _))
+                Interlocked.Increment(ref _rawDropped);
+        }
+
         private void Trim<T>(ConcurrentQueue<T> q, int cap)
         {
             while (q.Count > cap && q.TryDequeue(out _))
@@ -234,16 +277,59 @@ namespace NeuuroBridge
             finally { Monitor.Exit(_ioLock); }
         }
 
-        /// <summary>Drains both queues to the DB. Caller must hold <see cref="_ioLock"/>.</summary>
+        /// <summary>Drains all queues to the DB. Caller must hold <see cref="_ioLock"/>.</summary>
         private void Flush()
         {
-            if (_eegQ.IsEmpty && _bandQ.IsEmpty) return;
+            if (_eegQ.IsEmpty && _bandQ.IsEmpty && _rawQ.IsEmpty) return;
             EnsureOpen();
 
             int eeg = CopyEeg();
             int band = CopyBand();
+            int raw = CopyRaw();
             if (eeg > 0)  Interlocked.Add(ref _eegRowsSent, eeg);
             if (band > 0) Interlocked.Add(ref _bandRowsSent, band);
+            if (raw > 0)  Interlocked.Add(ref _rawRowsSent, raw);
+        }
+
+        /// <summary>
+        /// Expands every queued raw frame into one row per sample and bulk-COPYs them into
+        /// eeg_raw_samples. Per-sample time is derived from the frame's arrival time minus
+        /// (samplesRemaining / sampleRate), at the TRUE 250 Hz rate, and forced strictly
+        /// monotonic so the (session_id, time) PK can never collide. Channel columns map the
+        /// SDK frame order [0]=Fp1 [1]=Fp2 [2]=T4 [3]=T3 onto fp1,fp2,t3,t4 (note t3/t4 swap).
+        /// </summary>
+        private int CopyRaw()
+        {
+            if (_rawQ.IsEmpty) return 0;
+            long periodTicks = TimeSpan.TicksPerSecond / _sampleRate;   // 40000 ticks = 4 ms @ 250 Hz
+            int n = 0;
+            using (var w = _conn.BeginBinaryImport(
+                "COPY eeg_raw_samples (session_id, time, fp1, fp2, t3, t4) FROM STDIN (FORMAT BINARY)"))
+            {
+                while (_rawQ.TryDequeue(out var f))
+                {
+                    var samples = f.Samples;
+                    if (samples == null || samples.Length < ChannelCount) continue;
+                    int spc = samples.Length / ChannelCount;   // samples per channel in this frame
+                    for (int i = 0; i < spc; i++)
+                    {
+                        long t = f.FrameEnd.Ticks - (long)(spc - 1 - i) * periodTicks;
+                        if (t <= _lastRawTicks) t = _lastRawTicks + 1;   // strict-monotonic, unique PK
+                        _lastRawTicks = t;
+
+                        w.StartRow();
+                        w.Write(_sessionId, NpgsqlDbType.Uuid);
+                        w.Write(new DateTime(t, DateTimeKind.Utc), NpgsqlDbType.TimestampTz);
+                        w.Write(samples[0 * spc + i], NpgsqlDbType.Integer);  // fp1 = frame ch0
+                        w.Write(samples[1 * spc + i], NpgsqlDbType.Integer);  // fp2 = frame ch1
+                        w.Write(samples[3 * spc + i], NpgsqlDbType.Integer);  // t3  = frame ch3
+                        w.Write(samples[2 * spc + i], NpgsqlDbType.Integer);  // t4  = frame ch2
+                        n++;
+                    }
+                }
+                w.Complete();
+            }
+            return n;
         }
 
         private int CopyEeg()
@@ -368,8 +454,11 @@ namespace NeuuroBridge
                 catch (Exception ex) { _log("Final flush error: " + ex.Message); }
                 ResetConnection();
             }
-            _log($"DB uploader stopped. Sent {EegRowsSent} eeg + {BandRowsSent} band rows" +
-                 (Dropped > 0 ? $", dropped {Dropped} (queue overflow)." : "."));
+            _log($"DB uploader stopped. Sent {EegRowsSent} eeg + {BandRowsSent} band + {RawRowsSent} raw rows" +
+                 (Dropped > 0 || RawDropped > 0
+                     ? $", dropped {Dropped} summary / {RawDropped} raw frames (queue overflow)."
+                     : ".") +
+                 $"  Raw frames accepted: {RawFramesIn}.");
         }
     }
 }
