@@ -21,8 +21,6 @@ services:
       build: ./backend
       container_name: neurostudy_backend
       env_file: ./backend/.env.docker
-      ports:
-        - "3000:3000"
       depends_on:
         db:
           condition: service_healthy
@@ -48,8 +46,8 @@ services:
       build: ./ml_service
       container_name: neurostudy_ml
       env_file: ./ml_service/.env.docker
-      ports:
-        - "8000:8000"
+      # ports:
+      #   - "8000:8000"
       volumes:
         - ./ml_service:/app
       command: uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
@@ -57,5 +55,16 @@ services:
         db:
           condition: service_healthy
 
+  nginx:
+    image: nginx:alpine
+    container_name: neurostudy_nginx
+    ports:
+      - "8090:80"       # ← only nginx faces the outside
+    volumes:
+      - ./nginx/nginx.conf:/etc/nginx/nginx.conf:ro
+    depends_on:
+      - backend
+      - ml
+    restart: always
 volumes:
   postgres-data:

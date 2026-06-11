@@ -1,15 +1,15 @@
--- 002_dev_seed.sql
+-- 003_dev_seed.sql
 -- Development seed data — NOT for production
--- Applies after 001_init.sql automatically via docker-entrypoint-initdb.d
+-- Applies after 001_init.sql and 002_create_bridge_user.sh automatically via docker-entrypoint-initdb.d
 --
 -- Passwords (bcrypt, 12 rounds):
 --   devpassword → $2b$12$DWn5dj2eV9UkcOu1We5/YOxx.nLG1mnreeLLWsuL2tkOxzuHmFAdi
 -- ─────────────────────────────────────────────────────────────────────────────
 
 -- ─── Seed: Roles ──────────────────────────────────────────────────────────────
-INSERT INTO roles (name, description) VALUES
-    ('admin',       'Full access across all clinics and users'),
-    ('technician',  'Session and client access scoped to own clinic');
+INSERT INTO roles (role_id, name, requires_clinic, description) VALUES
+    ('d0000000-0000-0000-0000-000000000001', 'admin',       false, 'Full access across all clinics and users'),
+    ('d0000000-0000-0000-0000-000000000002', 'technician',  true,  'Session and client access scoped to own clinic');
 
 -- ─── Seed: Permissions ────────────────────────────────────────────────────────
 INSERT INTO permissions (name, description) VALUES
@@ -75,52 +75,40 @@ INSERT INTO clinics (clinic_id, name, address) VALUES
 
 -- ─── Users ───────────────────────────────────────────────────────────────────
 -- Admin (no clinic — NULL is intentional, see ERD decision)
-INSERT INTO users (user_id, email, password_hash, clinic_id, display_name) VALUES
+INSERT INTO users (user_id, email, password_hash, role_id, clinic_id, assigned_by, display_name) VALUES
     (
         'b0000000-0000-0000-0000-000000000001',
         'admin@neurostudy.com',
         '$2b$12$DWn5dj2eV9UkcOu1We5/YOxx.nLG1mnreeLLWsuL2tkOxzuHmFAdi',
+        'd0000000-0000-0000-0000-000000000001',
+        NULL,
         NULL,
         'Dev Admin'
     );
 
 -- Technicians (scoped to a clinic)
-INSERT INTO users (user_id, email, password_hash, clinic_id, display_name) VALUES
+INSERT INTO users (user_id, email, password_hash, role_id, clinic_id, assigned_by, display_name) VALUES
     (
         'b0000000-0000-0000-0000-000000000002',
         'tech1@neurostudy.com',
         '$2b$12$DWn5dj2eV9UkcOu1We5/YOxx.nLG1mnreeLLWsuL2tkOxzuHmFAdi',
+        'd0000000-0000-0000-0000-000000000002',
         'a0000000-0000-0000-0000-000000000001',
+        'b0000000-0000-0000-0000-000000000001',
         'Tech Alice'
     ),
     (
         'b0000000-0000-0000-0000-000000000003',
         'tech2@neurostudy.com',
         '$2b$12$DWn5dj2eV9UkcOu1We5/YOxx.nLG1mnreeLLWsuL2tkOxzuHmFAdi',
+        'd0000000-0000-0000-0000-000000000002',
         'a0000000-0000-0000-0000-000000000002',
+        'b0000000-0000-0000-0000-000000000001',
         'Tech Bob'
     );
 
--- ─── User Roles ───────────────────────────────────────────────────────────────
-INSERT INTO user_roles (user_id, role_id, assigned_by)
-SELECT
-    u.user_id,
-    r.role_id,
-    NULL   -- no assigner for seed data
-FROM users u, roles r
-WHERE u.email = 'admin@neurostudy.com' AND r.name = 'admin';
-
-INSERT INTO user_roles (user_id, role_id, assigned_by)
-SELECT
-    u.user_id,
-    r.role_id,
-    (SELECT user_id FROM users WHERE email = 'admin@neurostudy.com')
-FROM users u, roles r
-WHERE u.email IN ('tech1@neurostudy.com', 'tech2@neurostudy.com')
-AND r.name = 'technician';
-
 -- ─── Clients ─────────────────────────────────────────────────────────────────
-INSERT INTO clients (client_id, name, notes) VALUES
-    ('c0000000-0000-0000-0000-000000000001', 'Alice Tan',   'Referred for attention deficit assessment'),
-    ('c0000000-0000-0000-0000-000000000002', 'Ben Lim',     'Follow-up session, anxiety monitoring'),
-    ('c0000000-0000-0000-0000-000000000003', 'Carol Ng',    'Initial baseline session');
+INSERT INTO clients (client_id, clinic_id, name, dob, gender, race, notes) VALUES
+    ('c0000000-0000-0000-0000-000000000001','a0000000-0000-0000-0000-000000000001', 'Alice Tan', '1990-05-15', 'Female', 'Asian', 'Referred for attention deficit assessment'),
+    ('c0000000-0000-0000-0000-000000000002','a0000000-0000-0000-0000-000000000002', 'Ben Lim', '1985-12-10', 'Male', 'Asian', 'Follow-up session, anxiety monitoring'),
+    ('c0000000-0000-0000-0000-000000000003','a0000000-0000-0000-0000-000000000002', 'Carol Ng', '1992-09-22', 'Female', 'Asian', 'Initial baseline session');

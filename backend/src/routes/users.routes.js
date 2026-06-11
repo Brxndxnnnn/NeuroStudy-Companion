@@ -1,12 +1,9 @@
 import { Router } from 'express'
 import userController from '../controllers/users.controller.js'
-import authenticate from '../middleware/authenticate.js'
 import requirePermission from '../middleware/requirePermission.js'
 import PERMS from '../constants/permissions.js'
 
 const router = Router()
-// All user routes require a valid JWT
-router.use(authenticate)
 
 /**
  * @openapi
@@ -27,8 +24,8 @@ router.use(authenticate)
  *               email:        { type: string, format: email }
  *               password:     { type: string, minLength: 8 }
  *               display_name: { type: string }
- *               clinic_id:    { type: string, format: uuid }
- *               role_id:      { type: string, format: uuid }
+ *               clinic_id:    { type: string, format: uuid, example: "a0000000-0000-0000-0000-000000000001" }
+ *               role_id:      { type: string, format: uuid, example: "d0000000-0000-0000-0000-000000000001" }
  *     responses:
  *       201:
  *         description: User created

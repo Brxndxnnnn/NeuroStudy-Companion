@@ -1,6 +1,7 @@
 import { Router } from 'express'
 import authController from '../controllers/auth.controller.js'
 import authenticate from '../middleware/authenticate.js'
+import dbContext from '../middleware/dbContext.js'
 
 const router = Router()
 /**
@@ -33,6 +34,29 @@ router.post('/login', authController.login)
 
 /**
  * @swagger
+ * /api/auth/refresh:
+ *   post:
+ *     summary: Refresh an expired access token using the HttpOnly refresh token cookie
+ *     tags: [Auth]
+ *     security: [] # Overrides global Bearer requirement; relies on cookie instead
+ *     responses:
+ *       200:
+ *         description: New access token issued successfully
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 accessToken:
+ *                   type: string
+ *                   description: The new short-lived JWT access token
+ *       401:
+ *         description: No refresh token provided, or session is invalid/expired
+ */
+router.post('/refresh', authController.refresh)
+
+/**
+ * @swagger
  * /api/auth/logout:
  *   post:
  *     summary: Revoke the current JWT
@@ -45,7 +69,7 @@ router.post('/login', authController.login)
  *       401:
  *         description: Not authenticated
  */
-router.post('/logout', authenticate, authController.logout)
+router.post('/logout', authenticate, dbContext, authController.logout)
 
 /**
  * @swagger
@@ -61,6 +85,6 @@ router.post('/logout', authenticate, authController.logout)
  *       401:
  *         description: Not authenticated
  */
-router.get('/me', authenticate, authController.me)
+router.get('/me', authenticate, dbContext, authController.me)
 
 export default router

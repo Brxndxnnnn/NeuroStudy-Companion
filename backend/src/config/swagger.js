@@ -25,6 +25,7 @@ const options = {
                     type: 'http',
                     scheme: 'bearer',
                     bearerFormat: 'JWT',
+                    description: 'Enter your Access Token (not Refresh Token)'
                 },
             },
         },

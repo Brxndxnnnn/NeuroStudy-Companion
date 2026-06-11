@@ -1,15 +1,24 @@
 -- 001_init.sql
--- RBAC Tables: roles, permissions, role_permissions, clinics, users, user_roles, revoked_tokens
+-- RBAC Tables: roles, permissions, role_permissions, clinics, users, revoked_tokens
 
 CREATE EXTENSION IF NOT EXISTS timescaledb;
 CREATE EXTENSION IF NOT EXISTS "pgcrypto";
 
+-- ─── Clinics ──────────────────────────────────────────────────────────────────
+CREATE TABLE clinics (
+    clinic_id  uuid        PRIMARY KEY DEFAULT gen_random_uuid(),
+    name       text        NOT NULL,
+    address    text,
+    created_at timestamptz NOT NULL DEFAULT now()
+);
+
 -- ─── Roles ────────────────────────────────────────────────────────────────────
 CREATE TABLE roles (
-    role_id     uuid        PRIMARY KEY DEFAULT gen_random_uuid(),
-    name        text        NOT NULL UNIQUE,
-    description text,
-    created_at  timestamptz NOT NULL DEFAULT now()
+    role_id         uuid        PRIMARY KEY DEFAULT gen_random_uuid(),
+    name            text        NOT NULL UNIQUE,
+    requires_clinic boolean     NOT NULL DEFAULT true,
+    description     text,
+    created_at      timestamptz NOT NULL DEFAULT now()
 );
 
 -- ─── Permissions ──────────────────────────────────────────────────────────────
@@ -28,33 +37,61 @@ CREATE TABLE role_permissions (
     PRIMARY KEY (role_id, permission_id)
 );
 
--- ─── Clinics ──────────────────────────────────────────────────────────────────
-CREATE TABLE clinics (
-    clinic_id  uuid        PRIMARY KEY DEFAULT gen_random_uuid(),
-    name       text        NOT NULL,
-    address    text,
-    created_at timestamptz NOT NULL DEFAULT now()
-);
-
 -- ─── Users ────────────────────────────────────────────────────────────────────
 CREATE TABLE users (
     user_id       uuid        PRIMARY KEY DEFAULT gen_random_uuid(),
     email         text        NOT NULL UNIQUE,
     password_hash text        NOT NULL,
+    role_id       uuid        NOT NULL REFERENCES roles(role_id) ON DELETE RESTRICT,
     clinic_id     uuid        REFERENCES clinics(clinic_id)   ON DELETE RESTRICT,
     display_name  text,
+    assigned_by   uuid        REFERENCES users(user_id)       ON DELETE SET NULL,
     created_at    timestamptz NOT NULL DEFAULT now()
 );
 
--- ─── User Roles (junction) ────────────────────────────────────────────────────
--- user_id is sole PK — enforces one role per user at DB level.
--- When many-to-many becomes necessary, promote to PRIMARY KEY (user_id, role_id).
-CREATE TABLE user_roles (
-    user_id     uuid        PRIMARY KEY REFERENCES users(user_id)      ON DELETE CASCADE,
-    role_id     uuid        NOT NULL    REFERENCES roles(role_id)      ON DELETE RESTRICT,
-    assigned_at timestamptz NOT NULL DEFAULT now(),
-    assigned_by uuid        REFERENCES users(user_id)                  ON DELETE SET NULL
+-- Trigger to ensure that non-admin users must belong to a clinic
+CREATE OR REPLACE FUNCTION enforce_clinic_membership()
+RETURNS TRIGGER AS $$
+DECLARE
+    v_requires_clinic boolean;
+BEGIN
+    SELECT requires_clinic INTO v_requires_clinic FROM roles WHERE role_id = NEW.role_id;
+    IF v_requires_clinic AND NEW.clinic_id IS NULL THEN
+        RAISE EXCEPTION 'Users with this role must belong to a clinic';
+    END IF;
+    RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+
+CREATE TRIGGER trg_enforce_clinic_membership
+BEFORE INSERT OR UPDATE ON users
+FOR EACH ROW
+EXECUTE FUNCTION enforce_clinic_membership();
+
+
+-- ─── Active Sessions ──────────────────────────────────────────────────────────
+-- This table now tracks the long-lived Refresh Token lifecycle.
+-- We do NOT store Access Tokens here.
+CREATE TABLE active_sessions (
+    session_id          uuid        PRIMARY KEY DEFAULT gen_random_uuid(),
+    user_id             uuid        UNIQUE NOT NULL REFERENCES users(user_id) ON DELETE CASCADE,
+    
+    -- The actual refresh token (hashed) or its unique JTI
+    refresh_token_hash  text        NOT NULL, 
+    
+    -- Metadata for security auditing
+    ip_address          inet,
+    user_agent          text,
+    device_type         text,       -- e.g., 'web_browser', 'csharp_bridge'
+    
+    created_at          timestamptz NOT NULL DEFAULT now(),
+    expires_at          timestamptz NOT NULL, -- When the refresh token dies (e.g., +7 days)
+    last_used_at        timestamptz NOT NULL DEFAULT now()
 );
+
+-- Index for fast lookup when the frontend sends the refresh token
+CREATE INDEX idx_active_sessions_refresh_hash ON active_sessions (refresh_token_hash);
+CREATE INDEX idx_active_sessions_user_id ON active_sessions (user_id);
 
 -- ─── Revoked Tokens ───────────────────────────────────────────────────────────
 CREATE TABLE revoked_tokens (
@@ -64,17 +101,34 @@ CREATE TABLE revoked_tokens (
     expires_at timestamptz NOT NULL
 );
 
+CREATE OR REPLACE FUNCTION notify_token_revoked()
+RETURNS trigger AS $$
+BEGIN
+    PERFORM pg_notify('token_revocations', NEW.jti::text);
+    RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+
+CREATE TRIGGER trg_notify_token_revoked
+AFTER INSERT ON revoked_tokens
+FOR EACH ROW
+EXECUTE FUNCTION notify_token_revoked();
+
 -- Index for cleanup job: DELETE FROM revoked_tokens WHERE expires_at < now()
 CREATE INDEX idx_revoked_tokens_expires_at ON revoked_tokens (expires_at);
 
 -- ─── Clients ──────────────────────────────────────────────────────────────────
 CREATE TABLE clients (
     client_id  uuid        PRIMARY KEY DEFAULT gen_random_uuid(),
+    clinic_id  uuid        NOT NULL REFERENCES clinics(clinic_id)   ON DELETE RESTRICT,
     name       text        NOT NULL,
+    dob        date,
+    gender     text,
+    race       text,
     notes      text,
     created_at timestamptz NOT NULL DEFAULT now()
 );
-
+CREATE INDEX idx_clients_clinic_id ON clients(clinic_id);
 
 -- ─── Images ───────────────────────────────────────────────────────────────────
 CREATE TABLE images (
@@ -89,8 +143,9 @@ CREATE TABLE images (
 -- ─── Sessions ─────────────────────────────────────────────────────────────────
 CREATE TABLE sessions (
     session_id   uuid        PRIMARY KEY DEFAULT gen_random_uuid(),
-    client_id    uuid        NOT NULL REFERENCES clients(client_id)    ON DELETE RESTRICT,
-    conducted_by uuid        NOT NULL REFERENCES users(user_id)        ON DELETE RESTRICT,
+    client_id    uuid        REFERENCES clients(client_id)    ON DELETE RESTRICT,
+    clinic_id    uuid        REFERENCES clinics(clinic_id)    ON DELETE SET NULL,
+    conducted_by uuid        REFERENCES users(user_id)        ON DELETE RESTRICT,
     device_id    text,
     pairing_code text,
     paired_at    timestamptz,
@@ -102,7 +157,8 @@ CREATE TABLE sessions (
     sample_rate  int         NOT NULL DEFAULT 250
                              CONSTRAINT chk_sample_rate CHECK (sample_rate IN (125, 250))
 );
-
+CREATE INDEX idx_sessions_pairing_code ON sessions(pairing_code);
+CREATE INDEX idx_sessions_clinic_id ON sessions(clinic_id);
 
 -- ─── Events ───────────────────────────────────────────────────────────────────
 CREATE TABLE events (
@@ -110,9 +166,11 @@ CREATE TABLE events (
     session_id uuid        NOT NULL REFERENCES sessions(session_id)   ON DELETE CASCADE,
     image_id   uuid        NOT NULL REFERENCES images(image_id)       ON DELETE RESTRICT,
     shown_at   timestamptz NOT NULL,
+    clinic_id  uuid        REFERENCES clinics(clinic_id)    ON DELETE SET NULL,
     hidden_at  timestamptz
 );
-
+CREATE INDEX idx_events_session_time ON events (session_id, shown_at);
+CREATE INDEX idx_events_clinic_id ON events(clinic_id);
 
 -- ─── EEG Readings (hypertable) ────────────────────────────────────────────────
 CREATE TABLE eeg_readings (
@@ -192,6 +250,7 @@ CREATE TABLE ml_insights (
     insight_id    uuid        PRIMARY KEY DEFAULT gen_random_uuid(),
     client_id     uuid        NOT NULL REFERENCES clients(client_id)   ON DELETE CASCADE,
     session_id    uuid        REFERENCES sessions(session_id)          ON DELETE SET NULL,  -- nullable: client-level insights
+    clinic_id     uuid        REFERENCES clinics(clinic_id)            ON DELETE SET NULL,
     generated_at  timestamptz NOT NULL DEFAULT now(),
     insight_type  text        NOT NULL,
     payload       jsonb       NOT NULL,
@@ -204,3 +263,73 @@ CREATE TABLE ml_insights (
 CREATE INDEX idx_ml_insights_client_id ON ml_insights (client_id, generated_at DESC);
 -- Index for fetching insights by session
 CREATE INDEX idx_ml_insights_session_id ON ml_insights (session_id) WHERE session_id IS NOT NULL;
+CREATE INDEX idx_ml_insights_clinic_id ON ml_insights(clinic_id);
+
+-- 1. Enable RLS on the tables
+ALTER TABLE clients ENABLE ROW LEVEL SECURITY;
+ALTER TABLE sessions ENABLE ROW LEVEL SECURITY;
+ALTER TABLE ml_insights ENABLE ROW LEVEL SECURITY;
+ALTER TABLE users ENABLE ROW LEVEL SECURITY;
+ALTER TABLE events ENABLE ROW LEVEL SECURITY;
+
+-- 2. FORCE RLS for the table owner! 
+-- (By default, the user who creates the table bypasses RLS. This forces the owner to obey it too).
+ALTER TABLE clients FORCE ROW LEVEL SECURITY;
+ALTER TABLE sessions FORCE ROW LEVEL SECURITY;
+ALTER TABLE ml_insights FORCE ROW LEVEL SECURITY;
+ALTER TABLE users FORCE ROW LEVEL SECURITY;
+ALTER TABLE events FORCE ROW LEVEL SECURITY;
+
+-- 3. Create the Policies
+-- We check two variables: 'app.is_admin' (for global superadmins) and 'app.current_clinic_id'
+
+CREATE POLICY tenant_isolation_policy ON clients
+USING (
+    current_setting('app.is_admin', true)::boolean = true 
+    OR clinic_id = NULLIF(current_setting('app.current_clinic_id', true), '')::uuid
+)
+WITH CHECK (
+    current_setting('app.is_admin', true)::boolean = true 
+    OR clinic_id = NULLIF(current_setting('app.current_clinic_id', true), '')::uuid
+);
+
+-- Repeat for sessions, ml_insights, and users...
+-- (Note: 'USING' applies to SELECT/UPDATE/DELETE. 'WITH CHECK' applies to INSERT/UPDATE).
+CREATE POLICY tenant_isolation_policy ON sessions
+USING (
+    current_setting('app.is_admin', true)::boolean = true 
+    OR clinic_id = NULLIF(current_setting('app.current_clinic_id', true), '')::uuid
+)
+WITH CHECK (
+    current_setting('app.is_admin', true)::boolean = true 
+    OR clinic_id = NULLIF(current_setting('app.current_clinic_id', true), '')::uuid
+);
+
+CREATE POLICY tenant_isolation_policy ON ml_insights
+USING (
+    current_setting('app.is_admin', true)::boolean = true 
+    OR clinic_id = NULLIF(current_setting('app.current_clinic_id', true), '')::uuid
+)
+WITH CHECK (
+    current_setting('app.is_admin', true)::boolean = true 
+    OR clinic_id = NULLIF(current_setting('app.current_clinic_id', true), '')::uuid
+);
+
+CREATE POLICY tenant_isolation_policy ON users
+USING (
+    current_setting('app.is_admin', true)::boolean = true 
+    OR clinic_id = NULLIF(current_setting('app.current_clinic_id', true), '')::uuid
+)
+WITH CHECK (
+    current_setting('app.is_admin', true)::boolean = true 
+    OR clinic_id = NULLIF(current_setting('app.current_clinic_id', true), '')::uuid
+);
+CREATE POLICY tenant_isolation_policy ON events
+USING (
+    current_setting('app.is_admin', true)::boolean = true 
+    OR clinic_id = NULLIF(current_setting('app.current_clinic_id', true), '')::uuid
+)
+WITH CHECK (
+    current_setting('app.is_admin', true)::boolean = true 
+    OR clinic_id = NULLIF(current_setting('app.current_clinic_id', true), '')::uuid
+);

@@ -1,12 +1,9 @@
 import { Router } from 'express'
 import clinicsController from '../controllers/clinics.controller.js'
-import authenticate from '../middleware/authenticate.js'
 import requirePermission from '../middleware/requirePermission.js'
 import PERMS from '../constants/permissions.js'
 
 const router = Router()
-
-router.use(authenticate)
 
 /**
  * @openapi

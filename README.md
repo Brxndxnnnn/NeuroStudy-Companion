@@ -39,6 +39,15 @@ cp .env.example backend/.env
 cp .env.example backend/.env.docker
 cp .env.example db/.env.docker
 ```
+Do the same to your respective folders if needed, eg:
+```bash
+cp .env.example frontend/.env
+cp .env.example frontend/.env.docker
+cp .env.example ml_service/.env
+cp .env.example ml_service/.env.docker
+cp .env.example neuuro_bridge/.env
+cp .env.example neuuro_bridge/.env.docker
+```
 | File | Purpose |
 |---|---|
 | `backend/.env` | Local backend via `npm run dev` |
