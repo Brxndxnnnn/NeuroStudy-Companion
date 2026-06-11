@@ -17,7 +17,7 @@ const options = {
             { name: 'EEG',      description: 'EEG data ingestion' },
         ],
         servers: [
-            { url: `http://localhost:${localPort}`, description: 'Current server' }
+            { url: `/`, description: 'Current server' }
         ],
         components: {
             securitySchemes: {
