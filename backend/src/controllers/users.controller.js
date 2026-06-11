@@ -1,8 +1,6 @@
-import bcrypt from 'bcrypt'
 import userModel from '../models/user.model.js'
 import catchAsync from '../utils/catchAsync.js'
-
-const BCRYPT_ROUNDS = 12
+import authService from '../services/auth.service.js'
 
 // ── POST /api/users ──────────────────────────────────────────────────────────
 const createUser = catchAsync(async (req, res, next) => {
@@ -19,17 +17,17 @@ const createUser = catchAsync(async (req, res, next) => {
         return res.status(400).json({ error: 'role_id is required' })
     }
 
-    const password_hash = await bcrypt.hash(password, BCRYPT_ROUNDS)
+    const password_hash = await authService.hashPassword(password)
     const user = await userModel.create({
         email, password_hash, display_name,
         clinic_id, role_id, assigned_by: req.user.sub
-    })
+    }, req.dbClient)
         .catch(err => {
             if (err.code === '23505') return res.status(409).json({ error: 'Email already in use' })
             if (err.code === '23503') {
                 if (err.constraint === 'users_clinic_id_fkey') {
                     return res.status(400).json({ error: 'clinic_id does not exist' })
-                } else if (err.constraint === 'user_roles_role_id_fkey') {
+                } else if (err.constraint === 'users_role_id_fkey') {
                     return res.status(400).json({ error: 'role_id does not exist' })
                 }
             }
@@ -44,13 +42,13 @@ const createUser = catchAsync(async (req, res, next) => {
 
 // ── GET /api/users ───────────────────────────────────────────────────────────
 const listUsers = catchAsync(async (req, res) => {
-    const users = await userModel.findAll()
+    const users = await userModel.findAll(req.dbClient)
     return res.json(users)
 })
 
 // ── GET /api/users/:id ───────────────────────────────────────────────────────
 const getUser = catchAsync(async (req, res) => {
-    const user = await userModel.findById(req.params.id)
+    const user = await userModel.findById(req.params.id, req.dbClient)
     if (!user) return res.status(404).json({ error: 'User not found' })
     return res.json(user)
 })
@@ -59,7 +57,7 @@ const getUser = catchAsync(async (req, res) => {
 const updateUser = catchAsync(async (req, res, next) => {
     const { display_name, clinic_id } = req.body
 
-    const user = await userModel.update(req.params.id, { display_name, clinic_id })
+    const user = await userModel.update(req.params.id, { display_name, clinic_id }, req.dbClient)
         .catch(err => {
             if (err.code === '23503') {
                 if (err.constraint === 'users_clinic_id_fkey') {
@@ -106,7 +104,7 @@ const assignRole = catchAsync(async (req, res) => {
     const user = await userModel.findById(id)
     if (!user) return res.status(404).json({ error: 'User not found' })
 
-    const result = await userModel.upsertRole(id, role.role_id, req.user.user_id)
+    const result = await userModel.updateRole(id, role.role_id, req.user.user_id, req.dbClient)
 
     return res.json({ message: 'Role assigned', ...result, role_name })
 })

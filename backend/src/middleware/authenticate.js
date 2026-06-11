@@ -8,7 +8,7 @@ const authenticate = async (req, res, next) => {
     const token = header.slice(7)
 
     try {
-        const payload = authService.verifyToken(token)
+        const payload = authService.verifyAccessToken(token)
 
         const revoked = await authService.isRevoked(payload.jti)
         if (revoked)

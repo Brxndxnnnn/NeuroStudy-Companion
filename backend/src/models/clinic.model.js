@@ -1,7 +1,8 @@
 import pool from '../config/db.js'
+import query from '../utils/query.js'
 
-const findAll = async () => {
-    const { rows } = await pool.query(
+const findAll = async (client = pool) => {
+    const { rows } = await query(client, 
         `SELECT clinic_id, name, address, created_at
          FROM clinics
          ORDER BY created_at DESC`
@@ -9,8 +10,8 @@ const findAll = async () => {
     return rows
 }
 
-const findById = async (clinic_id) => {
-    const { rows } = await pool.query(
+const findById = async (clinic_id, client = pool) => {
+    const { rows } = await query(client,
         `SELECT clinic_id, name, address, created_at
          FROM clinics
          WHERE clinic_id = $1`,
@@ -19,8 +20,8 @@ const findById = async (clinic_id) => {
     return rows[0] ?? null
 }
 
-const create = async ({ name, address = null }) => {
-    const { rows } = await pool.query(
+const create = async ({ name, address = null }, client = pool) => {
+    const { rows } = await query(client,
         `INSERT INTO clinics (name, address)
          VALUES ($1, $2)
          RETURNING clinic_id, name, address, created_at`,
@@ -29,7 +30,7 @@ const create = async ({ name, address = null }) => {
     return rows[0]
 }
 
-const update = async (clinic_id, fields) => {
+const update = async (clinic_id, fields, client = pool) => {
     const cols = []
     const vals = []
     let idx = 1
@@ -40,7 +41,7 @@ const update = async (clinic_id, fields) => {
     if (!cols.length) return null  // nothing to update
 
     vals.push(clinic_id)
-    const { rows } = await pool.query(
+    const { rows } = await query(client,
         `UPDATE clinics
          SET ${cols.join(', ')}
          WHERE clinic_id = $${idx}

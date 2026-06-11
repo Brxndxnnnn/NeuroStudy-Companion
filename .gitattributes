@@ -1,0 +1,5 @@
+# Handle line endings automatically for text files
+* text=auto
+
+# Explicitly force all .sh files to use LF line endings upon commit
+*.sh text eol=lf
