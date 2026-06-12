@@ -67,6 +67,7 @@ namespace NeuuroBridge
         public event Action<string> Disconnected;
         public event Action<bool, string> AuthChanged;       // ok, detail
         public event Action SessionStarted;
+        public event Action SessionStopped;
         public event Action<RawEegFrame> RawFrame;           // every raw frame (for waveform charts)
         public event Action<BandPowers[]> FftBandPowers;     // ~1/s FFT result
         public event Action SdkCognitiveChanged;             // attention/relaxation/mwl/ABDT updated
@@ -75,7 +76,8 @@ namespace NeuuroBridge
         // ── State accessors ──────────────────────────────────────────────────
         public bool IsConnected => _svc.IsConnected;
         public bool IsAuthenticated => _svc.IsAuthenticated;
-        public bool IsStreaming => _db != null && _db.Streaming;
+        public bool SessionActive { get; private set; }
+        public bool IsStreaming => SessionActive;
         public bool IsCapturing => _capturing;
         public DbUploader Db => _db;
         public long RawFrameCount => Interlocked.Read(ref _rawFrameCount);
@@ -174,11 +176,24 @@ namespace NeuuroBridge
             GenerateSession(_connAddress);
             bool dbOk = StartDbUpload();
             _svc.StartStream();
+            SessionActive = true;
             SessionStarted?.Invoke();
             return dbOk;
         }
 
-        public void StopStream() => _svc.StopStream();
+        /// <summary>
+        /// Ends the current session: stops streaming and flushes + closes the DB upload (final
+        /// drain), while keeping the device connected so another session can be started. The
+        /// disposed uploader is kept referenced so its final row counts stay visible. Idempotent.
+        /// </summary>
+        public void StopSession()
+        {
+            if (!SessionActive) return;
+            SessionActive = false;
+            try { _svc.StopStream(); } catch { /* ignore */ }
+            try { _db?.Dispose(); } catch { /* ignore */ }
+            SessionStopped?.Invoke();
+        }
 
         private void GenerateSession(string bleAddress)
         {
@@ -219,13 +234,16 @@ namespace NeuuroBridge
                     lock (_captureLock) _captureBuf.Add((ms, fn, (int[])frame.IntSamples.Clone()));
                 }
 
-                if (_db != null && _db.Streaming)
-                    _db.EnqueueRaw(_db.ToDbTime(frame.ArrivalUtc), frame.IntSamples);
-
-                if (_db != null && _db.Streaming && _dbEegThrottle.ElapsedMilliseconds >= 500)
+                // Capture a local ref: StopSession may dispose _db on another thread mid-frame.
+                var db = _db;
+                if (SessionActive && db != null && db.Streaming)
                 {
-                    _dbEegThrottle.Restart();
-                    UploadEegSnapshot();
+                    db.EnqueueRaw(db.ToDbTime(frame.ArrivalUtc), frame.IntSamples);
+                    if (_dbEegThrottle.ElapsedMilliseconds >= 500)
+                    {
+                        _dbEegThrottle.Restart();
+                        UploadEegSnapshot();
+                    }
                 }
             }
 
@@ -256,7 +274,7 @@ namespace NeuuroBridge
 
         private void UploadBandPowers(BandPowers[] powers)
         {
-            if (_db == null || !_db.Streaming) return;
+            if (!SessionActive || _db == null || !_db.Streaming) return;
             float att, rel, mwl; bool? ready; bool[] channels;
             lock (_stateLock)
             {

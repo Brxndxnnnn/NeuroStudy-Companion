@@ -79,8 +79,12 @@
                                 <TextBlock Grid.Row="1" Grid.Column="0" Text="Started " Foreground="{StaticResource Muted2}" FontSize="11"/>
                                 <TextBlock Grid.Row="1" Grid.Column="1" x:Name="TxtStarted" Text="—" FontSize="11"/>
                             </Grid>
-                            <Button x:Name="BtnStartSession" Content="Start session &amp; upload" Margin="0,12,0,0"
-                                    Click="BtnStartSession_Click" IsEnabled="False" Background="{StaticResource Good}"/>
+                            <StackPanel Orientation="Horizontal" Margin="0,12,0,0">
+                                <Button x:Name="BtnStartSession" Content="Start session &amp; upload"
+                                        Click="BtnStartSession_Click" IsEnabled="False" Background="{StaticResource Good}"/>
+                                <Button x:Name="BtnStopSession" Content="Stop session"
+                                        Click="BtnStopSession_Click" IsEnabled="False" Background="{StaticResource Bad}"/>
+                            </StackPanel>
                         </StackPanel>
                     </Border>
 

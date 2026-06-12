@@ -36,6 +36,7 @@ namespace NeuuroBridge.Wpf
             _ctl.Disconnected += addr => Ui(() => OnDisconnected(addr));
             _ctl.AuthChanged += (ok, detail) => Ui(() => OnAuth(ok, detail));
             _ctl.SessionStarted += () => Ui(OnSessionStarted);
+            _ctl.SessionStopped += () => Ui(OnSessionStopped);
 
             _refresh.Tick += (_, __) => RefreshLiveState();
             _refresh.Start();
@@ -97,8 +98,15 @@ namespace NeuuroBridge.Wpf
         {
             BtnStartSession.IsEnabled = false;
             bool dbOk = _ctl.StartSession();
+            BtnStopSession.IsEnabled = true;
             Log(dbOk ? "Session started — uploading to database." :
                        "Session started — DB unreachable, NOT uploading (capture still works).");
+        }
+
+        private void BtnStopSession_Click(object sender, RoutedEventArgs e)
+        {
+            BtnStopSession.IsEnabled = false;
+            _ctl.StopSession();   // flushes + closes upload; device stays connected
         }
 
         private void BtnCapture_Click(object sender, RoutedEventArgs e)
@@ -149,16 +157,27 @@ namespace NeuuroBridge.Wpf
             TxtStarted.Text = _ctl.SessionStartUtc.ToString("yyyy-MM-dd HH:mm:ss") + " UTC";
         }
 
+        private void OnSessionStopped()
+        {
+            // Device stays connected — allow starting a fresh session.
+            BtnStartSession.IsEnabled = _ctl.IsConnected;
+            BtnStopSession.IsEnabled = false;
+            var db = _ctl.Db;
+            Log(db != null
+                ? $"Session stopped — {db.RawRowsSent:N0} raw rows uploaded this session."
+                : "Session stopped.");
+        }
+
         // ── Periodic refresh ─────────────────────────────────────────────────
         private void RefreshLiveState()
         {
             // DB status
             var db = _ctl.Db;
-            if (db == null) { TxtDbState.Text = "not started"; }
+            if (db == null) { TxtDbState.Text = "not started"; TxtDbState.Foreground = Mut; }
             else
             {
-                TxtDbState.Text = db.ClockAnchored ? "clock-synced — streaming" : "NOT connected";
-                TxtDbState.Foreground = db.ClockAnchored ? Good : Bad;
+                if (!_ctl.SessionActive) { TxtDbState.Text = "stopped"; TxtDbState.Foreground = Mut; }
+                else { TxtDbState.Text = db.ClockAnchored ? "clock-synced — streaming" : "NOT connected"; TxtDbState.Foreground = db.ClockAnchored ? Good : Bad; }
                 TxtRawRows.Text = db.RawRowsSent.ToString("N0");
                 TxtEegRows.Text = db.EegRowsSent.ToString("N0");
                 TxtBandRows.Text = db.BandRowsSent.ToString("N0");
