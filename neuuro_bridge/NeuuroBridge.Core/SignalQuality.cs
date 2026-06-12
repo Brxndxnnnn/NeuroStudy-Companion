@@ -13,7 +13,7 @@ namespace NeuuroBridge
     /// can't be verified without hardware, so it does not (yet) drive the score. The
     /// thresholds in <see cref="GradeImpedance"/> are provisional pending a bench check.
     /// </summary>
-    internal static class SignalQuality
+    public static class SignalQuality
     {
         // Provisional kΩ thresholds for a dry-electrode contact. Tune once verified on hardware.
         private const float GoodKohm = 50f;
