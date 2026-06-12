@@ -1,0 +1,173 @@
+<Window x:Class="NeuuroBridge.Wpf.MainWindow"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        Title="Neuuro Bridge — SenzeBand EEG" Height="760" Width="1180"
+        MinHeight="640" MinWidth="980"
+        Background="{StaticResource Bg}" FontFamily="Segoe UI" Foreground="{StaticResource Ink}">
+    <Grid Margin="16">
+        <Grid.RowDefinitions>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="*"/>
+        </Grid.RowDefinitions>
+
+        <!-- Header -->
+        <DockPanel Grid.Row="0" Margin="0,0,0,12">
+            <StackPanel DockPanel.Dock="Left">
+                <TextBlock Text="Neuuro Bridge" FontSize="22" FontWeight="Bold"/>
+                <TextBlock Text="SenzeBand EEG → TimescaleDB" Foreground="{StaticResource Muted2}" FontSize="12"/>
+            </StackPanel>
+            <Border DockPanel.Dock="Right" VerticalAlignment="Center" CornerRadius="12" Padding="12,5"
+                    Background="#1E2A3C" BorderBrush="{StaticResource PanelEdge}" BorderThickness="1">
+                <StackPanel Orientation="Horizontal">
+                    <Ellipse x:Name="ConnDot" Width="10" Height="10" Fill="{StaticResource Bad}" VerticalAlignment="Center" Margin="0,0,8,0"/>
+                    <TextBlock x:Name="ConnPill" Text="Disconnected" VerticalAlignment="Center" FontSize="12" FontWeight="SemiBold"/>
+                </StackPanel>
+            </Border>
+        </DockPanel>
+
+        <!-- Connection bar -->
+        <Border Grid.Row="1" Style="{StaticResource Card}">
+            <Grid>
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="Auto"/>
+                    <ColumnDefinition Width="*"/>
+                    <ColumnDefinition Width="Auto"/>
+                    <ColumnDefinition Width="Auto"/>
+                    <ColumnDefinition Width="Auto"/>
+                </Grid.ColumnDefinitions>
+                <Button x:Name="BtnScan" Grid.Column="0" Content="Scan (12s)" Click="BtnScan_Click" IsEnabled="False"/>
+                <ComboBox x:Name="CmbDevices" Grid.Column="1" Height="34" Margin="0,0,8,0" VerticalContentAlignment="Center"
+                          DisplayMemberPath="DeviceName"/>
+                <Button x:Name="BtnConnect" Grid.Column="2" Content="Connect" Click="BtnConnect_Click" IsEnabled="False"/>
+                <Button x:Name="BtnReauth" Grid.Column="3" Content="Re-auth" Click="BtnReauth_Click" IsEnabled="False"
+                        Background="#334155"/>
+                <Border Grid.Column="4" CornerRadius="6" Padding="10,6" Background="#1E2A3C" VerticalAlignment="Center">
+                    <StackPanel Orientation="Horizontal">
+                        <Ellipse x:Name="AuthDot" Width="9" Height="9" Fill="{StaticResource Muted}" VerticalAlignment="Center" Margin="0,0,6,0"/>
+                        <TextBlock x:Name="TxtAuth" Text="not authenticated" VerticalAlignment="Center" FontSize="12"/>
+                    </StackPanel>
+                </Border>
+            </Grid>
+        </Border>
+
+        <!-- Body: left control column + right (charts in Stage 4) -->
+        <Grid Grid.Row="2">
+            <Grid.ColumnDefinitions>
+                <ColumnDefinition Width="400"/>
+                <ColumnDefinition Width="*"/>
+            </Grid.ColumnDefinitions>
+
+            <!-- LEFT -->
+            <ScrollViewer Grid.Column="0" VerticalScrollBarVisibility="Auto" Margin="0,0,12,0">
+                <StackPanel>
+                    <!-- Session -->
+                    <Border Style="{StaticResource Card}">
+                        <StackPanel>
+                            <TextBlock Style="{StaticResource CardTitle}" Text="SESSION"/>
+                            <TextBlock Text="Pairing code — enter on the web frontend" Foreground="{StaticResource Muted2}" FontSize="11"/>
+                            <TextBlock x:Name="TxtPairing" Text="—" FontSize="30" FontWeight="Bold" Foreground="{StaticResource Accent}"/>
+                            <Grid Margin="0,8,0,0">
+                                <Grid.ColumnDefinitions>
+                                    <ColumnDefinition Width="Auto"/><ColumnDefinition Width="*"/>
+                                </Grid.ColumnDefinitions>
+                                <Grid.RowDefinitions>
+                                    <RowDefinition Height="Auto"/><RowDefinition Height="Auto"/>
+                                </Grid.RowDefinitions>
+                                <TextBlock Grid.Row="0" Grid.Column="0" Text="Session ID " Foreground="{StaticResource Muted2}" FontSize="11"/>
+                                <TextBlock Grid.Row="0" Grid.Column="1" x:Name="TxtSessionId" Text="—" FontSize="11" TextTrimming="CharacterEllipsis"/>
+                                <TextBlock Grid.Row="1" Grid.Column="0" Text="Started " Foreground="{StaticResource Muted2}" FontSize="11"/>
+                                <TextBlock Grid.Row="1" Grid.Column="1" x:Name="TxtStarted" Text="—" FontSize="11"/>
+                            </Grid>
+                            <Button x:Name="BtnStartSession" Content="Start session &amp; upload" Margin="0,12,0,0"
+                                    Click="BtnStartSession_Click" IsEnabled="False" Background="{StaticResource Good}"/>
+                        </StackPanel>
+                    </Border>
+
+                    <!-- DB upload -->
+                    <Border Style="{StaticResource Card}">
+                        <StackPanel>
+                            <TextBlock Style="{StaticResource CardTitle}" Text="DATABASE UPLOAD"/>
+                            <TextBlock x:Name="TxtDbState" Text="not started" FontWeight="SemiBold"/>
+                            <UniformGrid Columns="3" Margin="0,8,0,0">
+                                <StackPanel>
+                                    <TextBlock x:Name="TxtRawRows" Text="0" FontSize="20" FontWeight="Bold"/>
+                                    <TextBlock Text="raw rows" Foreground="{StaticResource Muted2}" FontSize="10"/>
+                                </StackPanel>
+                                <StackPanel>
+                                    <TextBlock x:Name="TxtEegRows" Text="0" FontSize="20" FontWeight="Bold"/>
+                                    <TextBlock Text="eeg rows" Foreground="{StaticResource Muted2}" FontSize="10"/>
+                                </StackPanel>
+                                <StackPanel>
+                                    <TextBlock x:Name="TxtBandRows" Text="0" FontSize="20" FontWeight="Bold"/>
+                                    <TextBlock Text="band rows" Foreground="{StaticResource Muted2}" FontSize="10"/>
+                                </StackPanel>
+                            </UniformGrid>
+                            <TextBlock x:Name="TxtDbExtra" Text="" Foreground="{StaticResource Muted2}" FontSize="11" Margin="0,6,0,0"/>
+                            <TextBlock x:Name="TxtDbError" Text="" Foreground="{StaticResource Bad}" FontSize="11" TextWrapping="Wrap"/>
+                        </StackPanel>
+                    </Border>
+
+                    <!-- Signal & contact -->
+                    <Border Style="{StaticResource Card}">
+                        <StackPanel>
+                            <TextBlock Style="{StaticResource CardTitle}" Text="SIGNAL &amp; CONTACT"/>
+                            <Grid>
+                                <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
+                                <TextBlock Grid.Column="0" Text="Signal quality" Foreground="{StaticResource Muted2}"/>
+                                <TextBlock Grid.Column="1" x:Name="TxtQuality" Text="—" FontWeight="SemiBold"/>
+                            </Grid>
+                            <ProgressBar x:Name="BarQuality" Height="8" Minimum="0" Maximum="100" Value="0" Margin="0,4,0,8"
+                                         Foreground="{StaticResource Good}" Background="#22303F" BorderThickness="0"/>
+                            <Grid>
+                                <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
+                                <TextBlock Grid.Column="0" Text="Signal state" Foreground="{StaticResource Muted2}"/>
+                                <TextBlock Grid.Column="1" x:Name="TxtSignal" Text="—"/>
+                            </Grid>
+                            <Grid Margin="0,2,0,0">
+                                <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
+                                <TextBlock Grid.Column="0" Text="Battery" Foreground="{StaticResource Muted2}"/>
+                                <TextBlock Grid.Column="1" x:Name="TxtBattery" Text="—"/>
+                            </Grid>
+                            <ItemsControl x:Name="ChannelList" Margin="0,8,0,0"/>
+                        </StackPanel>
+                    </Border>
+
+                    <!-- Capture -->
+                    <Border Style="{StaticResource Card}">
+                        <StackPanel>
+                            <TextBlock Style="{StaticResource CardTitle}" Text="RAW CAPTURE → CSV"/>
+                            <StackPanel Orientation="Horizontal">
+                                <Button x:Name="BtnCapture" Content="Start capture" Click="BtnCapture_Click" IsEnabled="False"/>
+                                <TextBlock x:Name="TxtCapture" Text="idle" VerticalAlignment="Center" Foreground="{StaticResource Muted2}"/>
+                            </StackPanel>
+                        </StackPanel>
+                    </Border>
+                </StackPanel>
+            </ScrollViewer>
+
+            <!-- RIGHT: charts placeholder for Stage 4 + live log -->
+            <Grid Grid.Column="1">
+                <Grid.RowDefinitions>
+                    <RowDefinition Height="*"/>
+                    <RowDefinition Height="190"/>
+                </Grid.RowDefinitions>
+                <Border Grid.Row="0" Style="{StaticResource Card}">
+                    <Grid>
+                        <TextBlock Style="{StaticResource CardTitle}" Text="LIVE EEG" VerticalAlignment="Top"/>
+                        <TextBlock x:Name="ChartsPlaceholder" Text="Live charts arrive in Stage 4."
+                                   Foreground="{StaticResource Muted}" HorizontalAlignment="Center" VerticalAlignment="Center"/>
+                    </Grid>
+                </Border>
+                <Border Grid.Row="1" Style="{StaticResource Card}">
+                    <DockPanel>
+                        <TextBlock DockPanel.Dock="Top" Style="{StaticResource CardTitle}" Text="LOG"/>
+                        <TextBox x:Name="LogBox" IsReadOnly="True" Background="Transparent" Foreground="{StaticResource Muted2}"
+                                 BorderThickness="0" FontFamily="Consolas" FontSize="11"
+                                 VerticalScrollBarVisibility="Auto" TextWrapping="NoWrap"/>
+                    </DockPanel>
+                </Border>
+            </Grid>
+        </Grid>
+    </Grid>
+</Window>

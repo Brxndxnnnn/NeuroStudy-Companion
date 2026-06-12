@@ -1,0 +1,20 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net48</TargetFramework>
+    <UseWPF>true</UseWPF>
+    <!-- Must stay x64: Core loads the native x64 SenzeBandCore.dll. -->
+    <Platforms>x64</Platforms>
+    <PlatformTarget>x64</PlatformTarget>
+    <LangVersion>latest</LangVersion>
+    <RootNamespace>NeuuroBridge.Wpf</RootNamespace>
+    <AssemblyName>NeuuroBridge.Wpf</AssemblyName>
+    <Nullable>disable</Nullable>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\NeuuroBridge.Core\NeuuroBridge.Core.csproj" />
+  </ItemGroup>
+
+</Project>
