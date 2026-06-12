@@ -35,14 +35,17 @@
                     <ColumnDefinition Width="Auto"/>
                     <ColumnDefinition Width="Auto"/>
                     <ColumnDefinition Width="Auto"/>
+                    <ColumnDefinition Width="Auto"/>
                 </Grid.ColumnDefinitions>
                 <Button x:Name="BtnScan" Grid.Column="0" Content="Scan (12s)" Click="BtnScan_Click" IsEnabled="False"/>
                 <ComboBox x:Name="CmbDevices" Grid.Column="1" Height="34" Margin="0,0,8,0" VerticalContentAlignment="Center"
                           DisplayMemberPath="DeviceName"/>
                 <Button x:Name="BtnConnect" Grid.Column="2" Content="Connect" Click="BtnConnect_Click" IsEnabled="False"/>
-                <Button x:Name="BtnReauth" Grid.Column="3" Content="Re-auth" Click="BtnReauth_Click" IsEnabled="False"
+                <Button x:Name="BtnDisconnect" Grid.Column="3" Content="Disconnect" Click="BtnDisconnect_Click" IsEnabled="False"
                         Background="#334155"/>
-                <Border Grid.Column="4" CornerRadius="6" Padding="10,6" Background="#1E2A3C" VerticalAlignment="Center">
+                <Button x:Name="BtnReauth" Grid.Column="4" Content="Re-auth" Click="BtnReauth_Click" IsEnabled="False"
+                        Background="#334155"/>
+                <Border Grid.Column="5" CornerRadius="6" Padding="10,6" Background="#1E2A3C" VerticalAlignment="Center">
                     <StackPanel Orientation="Horizontal">
                         <Ellipse x:Name="AuthDot" Width="9" Height="9" Fill="{StaticResource Muted}" VerticalAlignment="Center" Margin="0,0,6,0"/>
                         <TextBlock x:Name="TxtAuth" Text="not authenticated" VerticalAlignment="Center" FontSize="12"/>
@@ -65,8 +68,19 @@
                     <Border Style="{StaticResource Card}">
                         <StackPanel>
                             <TextBlock Style="{StaticResource CardTitle}" Text="SESSION"/>
-                            <TextBlock Text="Pairing code — enter on the web frontend" Foreground="{StaticResource Muted2}" FontSize="11"/>
-                            <TextBlock x:Name="TxtPairing" Text="—" FontSize="30" FontWeight="Bold" Foreground="{StaticResource Accent}"/>
+                            <DockPanel>
+                                <TextBlock DockPanel.Dock="Left" Text="Pairing code — enter on the web frontend" Foreground="{StaticResource Muted2}" FontSize="11"/>
+                                <StackPanel DockPanel.Dock="Right" Orientation="Horizontal" HorizontalAlignment="Right">
+                                    <Ellipse x:Name="RecDot" Width="9" Height="9" Fill="{StaticResource Bad}" VerticalAlignment="Center"
+                                             Margin="0,0,5,0" Visibility="Collapsed"/>
+                                    <TextBlock x:Name="TxtElapsed" Text="" Foreground="{StaticResource Bad}" FontWeight="SemiBold" FontSize="11" VerticalAlignment="Center"/>
+                                </StackPanel>
+                            </DockPanel>
+                            <DockPanel>
+                                <Button x:Name="BtnCopyPairing" DockPanel.Dock="Right" Content="Copy" Click="BtnCopyPairing_Click"
+                                        IsEnabled="False" Background="#334155" Padding="10,4" VerticalAlignment="Center" Margin="8,0,0,0"/>
+                                <TextBlock x:Name="TxtPairing" Text="—" FontSize="30" FontWeight="Bold" Foreground="{StaticResource Accent}"/>
+                            </DockPanel>
                             <Grid Margin="0,8,0,0">
                                 <Grid.ColumnDefinitions>
                                     <ColumnDefinition Width="Auto"/><ColumnDefinition Width="*"/>

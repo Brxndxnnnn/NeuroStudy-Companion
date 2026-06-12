@@ -22,7 +22,7 @@ namespace NeuuroBridge.Wpf
         {
             InitializeComponent();
             Loaded += OnLoaded;
-            Closing += (_, __) => { try { _ctl.Dispose(); } catch { } };
+            Closing += OnWindowClosing;
         }
 
         private void OnLoaded(object sender, RoutedEventArgs e)
@@ -94,6 +94,25 @@ namespace NeuuroBridge.Wpf
             _ctl.Authenticate(force: true);
         }
 
+        private void BtnDisconnect_Click(object sender, RoutedEventArgs e)
+        {
+            if (_ctl.SessionActive &&
+                MessageBox.Show("A session is uploading. Stop it and disconnect?", "Disconnect",
+                    MessageBoxButton.YesNo, MessageBoxImage.Warning) != MessageBoxResult.Yes)
+                return;
+            Log("Disconnecting…");
+            _ctl.Disconnect();
+        }
+
+        private void BtnCopyPairing_Click(object sender, RoutedEventArgs e)
+        {
+            if (!string.IsNullOrEmpty(_ctl.PairingCode))
+            {
+                try { Clipboard.SetText(_ctl.PairingCode); Log($"Pairing code {_ctl.PairingCode} copied to clipboard."); }
+                catch (Exception ex) { Log("Copy failed: " + ex.Message); }
+            }
+        }
+
         private void BtnStartSession_Click(object sender, RoutedEventArgs e)
         {
             BtnStartSession.IsEnabled = false;
@@ -132,6 +151,11 @@ namespace NeuuroBridge.Wpf
         {
             ConnPill.Text = "Connected"; ConnDot.Fill = Good;
             Log($"Connected to {id} @ {addr}");
+            // Lock scanning/connecting while a device is held.
+            BtnScan.IsEnabled = false;
+            BtnConnect.IsEnabled = false;
+            CmbDevices.IsEnabled = false;
+            BtnDisconnect.IsEnabled = true;
             BtnReauth.IsEnabled = true;
             BtnStartSession.IsEnabled = true;
             BtnCapture.IsEnabled = true;
@@ -140,7 +164,30 @@ namespace NeuuroBridge.Wpf
         private void OnDisconnected(string addr)
         {
             ConnPill.Text = "Disconnected"; ConnDot.Fill = Bad;
+            AuthDot.Fill = Mut; TxtAuth.Text = "not authenticated";
             Log("Disconnected (" + addr + ")");
+            // Back to a scan/connect-ready state; reconnect without rescanning if devices remain.
+            BtnScan.IsEnabled = true;
+            CmbDevices.IsEnabled = true;
+            BtnConnect.IsEnabled = CmbDevices.Items.Count > 0;
+            BtnDisconnect.IsEnabled = false;
+            BtnReauth.IsEnabled = false;
+            BtnStartSession.IsEnabled = false;
+            BtnStopSession.IsEnabled = false;
+            BtnCapture.IsEnabled = false;
+            RecDot.Visibility = Visibility.Collapsed; TxtElapsed.Text = "";
+        }
+
+        private void OnWindowClosing(object sender, System.ComponentModel.CancelEventArgs e)
+        {
+            if (_ctl.SessionActive &&
+                MessageBox.Show("A session is still uploading. Stop it and exit?", "Exit",
+                    MessageBoxButton.YesNo, MessageBoxImage.Warning) != MessageBoxResult.Yes)
+            {
+                e.Cancel = true;
+                return;
+            }
+            try { _ctl.Dispose(); } catch { }
         }
 
         private void OnAuth(bool ok, string detail)
@@ -155,6 +202,7 @@ namespace NeuuroBridge.Wpf
             TxtPairing.Text = _ctl.PairingCode;
             TxtSessionId.Text = _ctl.SessionId;
             TxtStarted.Text = _ctl.SessionStartUtc.ToString("yyyy-MM-dd HH:mm:ss") + " UTC";
+            BtnCopyPairing.IsEnabled = true;
         }
 
         private void OnSessionStopped()
@@ -171,6 +219,20 @@ namespace NeuuroBridge.Wpf
         // ── Periodic refresh ─────────────────────────────────────────────────
         private void RefreshLiveState()
         {
+            // Recording indicator + elapsed (blink the dot for a "live" feel).
+            if (_ctl.SessionActive)
+            {
+                RecDot.Visibility = Visibility.Visible;
+                RecDot.Opacity = RecDot.Opacity > 0.6 ? 0.25 : 1.0;
+                var el = DateTime.UtcNow - _ctl.SessionStartUtc;
+                TxtElapsed.Text = $"REC {(int)el.TotalMinutes:D2}:{el.Seconds:D2}";
+            }
+            else
+            {
+                RecDot.Visibility = Visibility.Collapsed;
+                TxtElapsed.Text = "";
+            }
+
             // DB status
             var db = _ctl.Db;
             if (db == null) { TxtDbState.Text = "not started"; TxtDbState.Foreground = Mut; }

@@ -166,6 +166,17 @@ namespace NeuuroBridge
         public void Connect(string deviceId) => _svc.Connect(deviceId);
         public void Authenticate(bool force = false) => _svc.Authenticate(force);
 
+        /// <summary>Ends any active session, then disconnects the device but keeps the app/SDK
+        /// alive so the technician can scan/connect again. Fires <see cref="Disconnected"/>.</summary>
+        public void Disconnect()
+        {
+            StopSession();
+            string addr = _connAddress;
+            try { _svc.Disconnect(); } catch { /* ignore */ }
+            // Fire explicitly so the UI resets even if the SDK's own disconnect callback doesn't.
+            Disconnected?.Invoke(addr);
+        }
+
         /// <summary>
         /// Generates the session identity, connects + anchors the DB clock, creates the
         /// unclaimed session row, and starts streaming. Safe to call once connected (and ideally
