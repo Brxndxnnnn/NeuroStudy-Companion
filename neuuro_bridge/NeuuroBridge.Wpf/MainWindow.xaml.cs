@@ -37,6 +37,8 @@ namespace NeuuroBridge.Wpf
             _ctl.AuthChanged += (ok, detail) => Ui(() => OnAuth(ok, detail));
             _ctl.SessionStarted += () => Ui(OnSessionStarted);
             _ctl.SessionStopped += () => Ui(OnSessionStopped);
+            _ctl.RawFrame += f => Ui(() => LivePanel.PushRaw(f.IntSamples));
+            _ctl.FftBandPowers += p => Ui(() => LivePanel.PushBands(p));
 
             _refresh.Tick += (_, __) => RefreshLiveState();
             _refresh.Start();
@@ -176,6 +178,7 @@ namespace NeuuroBridge.Wpf
             BtnStopSession.IsEnabled = false;
             BtnCapture.IsEnabled = false;
             RecDot.Visibility = Visibility.Collapsed; TxtElapsed.Text = "";
+            LivePanel.Clear();
         }
 
         private void OnWindowClosing(object sender, System.ComponentModel.CancelEventArgs e)
@@ -272,6 +275,8 @@ namespace NeuuroBridge.Wpf
                 rows.Add($"{lbl,-4} contact={contact,-2}   {kTxt}");
             }
             ChannelList.ItemsSource = rows;
+
+            LivePanel.SetCognitive(s.Attention, s.Relaxation, s.MentalWorkload);
         }
 
         private void RefreshDeviceList()
