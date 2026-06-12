@@ -302,6 +302,11 @@ namespace NeuuroBridge
         {
             if (_rawQ.IsEmpty) return 0;
             long periodTicks = TimeSpan.TicksPerSecond / _sampleRate;   // 40000 ticks = 4 ms @ 250 Hz
+            // PostgreSQL timestamptz resolves to MICROSECONDS (10 ticks), not .NET's 100 ns tick.
+            // The monotonic guard must therefore step in whole microseconds: a sub-microsecond
+            // bump would round to a duplicate value in the DB and blow up the (session_id, time)
+            // PK — which, on a binary COPY, rejects the WHOLE batch (every queued sample lost).
+            const long ticksPerMicro = TimeSpan.TicksPerMillisecond / 1000;  // = 10
             int n = 0;
             using (var w = _conn.BeginBinaryImport(
                 "COPY eeg_raw_samples (session_id, time, fp1, fp2, t3, t4) FROM STDIN (FORMAT BINARY)"))
@@ -314,7 +319,8 @@ namespace NeuuroBridge
                     for (int i = 0; i < spc; i++)
                     {
                         long t = f.FrameEnd.Ticks - (long)(spc - 1 - i) * periodTicks;
-                        if (t <= _lastRawTicks) t = _lastRawTicks + 1;   // strict-monotonic, unique PK
+                        t -= t % ticksPerMicro;                             // snap to µs — DB stores no finer
+                        if (t <= _lastRawTicks) t = _lastRawTicks + ticksPerMicro;  // strict-monotonic at DB resolution
                         _lastRawTicks = t;
 
                         w.StartRow();
