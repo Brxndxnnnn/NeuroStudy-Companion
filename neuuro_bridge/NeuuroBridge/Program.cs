@@ -362,9 +362,11 @@ namespace NeuuroBridge
                 }
 
                 // Full-resolution raw → eeg_raw_samples: every frame, every sample (no decimation).
-                // Anchor each frame to DbNow at arrival; clone because the SDK reuses its buffer.
+                // Anchor each frame to its TRUE arrival instant (captured synchronously in the SDK
+                // callback), mapped onto the DB clock — not DbNow read here on the pooled handler,
+                // which lagged/jittered. frame.IntSamples is already a private clone (see OnRawInt).
                 if (_db != null && _db.Streaming)
-                    _db.EnqueueRaw(_db.DbNow, (int[])frame.IntSamples.Clone());
+                    _db.EnqueueRaw(_db.ToDbTime(frame.ArrivalUtc), frame.IntSamples);
 
                 // TS1.6: snapshot one eeg_readings row per ~500 ms window (batched, not per frame).
                 if (_db != null && _db.Streaming && _dbEegThrottle.ElapsedMilliseconds >= 500)

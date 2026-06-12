@@ -85,7 +85,12 @@ namespace NeuuroBridge
         private Timer _flushTimer;
         private Guid _sessionId;
         private int _sampleRate = 250;                  // true hardware rate (NOT EegProcessor.SampleRate=256)
-        private long _lastRawTicks;                     // strict-monotonic guard for per-sample timestamps
+        // Sample-counter clock (reconstructs a uniform 250 Hz timeline from a monotonic sample
+        // index rather than bursty BLE frame-arrival times — see CopyRaw).
+        private bool _rawAnchored;
+        private long _rawBaseTicks;                     // DB-time ticks of global sample index 0 (µs-aligned)
+        private long _rawSampleIndex;                   // monotonic 250 Hz sample counter
+        private long _rawResyncs;                       // dropped-frame resync events (diagnostic)
         private TimeSpan _clockOffset = TimeSpan.Zero;  // DbNow = UtcNow + offset
         private long _eegRowsSent;
         private long _bandRowsSent;
@@ -111,10 +116,16 @@ namespace NeuuroBridge
         public long RawFramesIn  => Interlocked.Read(ref _rawFramesIn);
         public long Dropped      => Interlocked.Read(ref _dropped);
         public long RawDropped   => Interlocked.Read(ref _rawDropped);
+        /// <summary>Times the sample-counter clock resynced to arrival time (≈ genuine upstream frame loss).</summary>
+        public long RawResyncs   => Interlocked.Read(ref _rawResyncs);
         public string LastError  => _lastError;
 
         /// <summary>Bridge clock mapped onto the DB timeline (see clock-sync note in the design doc).</summary>
         public DateTime DbNow => DateTime.UtcNow + _clockOffset;
+
+        /// <summary>Maps a UTC instant captured on the bridge clock (e.g. a frame's arrival time)
+        /// onto the DB timeline, applying the same anchor offset as <see cref="DbNow"/>.</summary>
+        public DateTime ToDbTime(DateTime utc) => utc + _clockOffset;
 
         /// <summary>
         /// Opens the connection and anchors the bridge clock to DB time once
@@ -293,20 +304,23 @@ namespace NeuuroBridge
 
         /// <summary>
         /// Expands every queued raw frame into one row per sample and bulk-COPYs them into
-        /// eeg_raw_samples. Per-sample time is derived from the frame's arrival time minus
-        /// (samplesRemaining / sampleRate), at the TRUE 250 Hz rate, and forced strictly
-        /// monotonic so the (session_id, time) PK can never collide. Channel columns map the
-        /// SDK frame order [0]=Fp1 [1]=Fp2 [2]=T4 [3]=T3 onto fp1,fp2,t3,t4 (note t3/t4 swap).
+        /// eeg_raw_samples. Per-sample time comes from a monotonic SAMPLE COUNTER
+        /// (base + index/sampleRate), NOT the frame's arrival time: the SenzeBand samples
+        /// continuously at a true 250 Hz but BLE delivers frames in uneven bursts, so anchoring
+        /// to arrival warps the timeline (a 38 s stream spread across 53 s). The counter
+        /// reconstructs a uniform 250 Hz axis with exact, µs-aligned, strictly-increasing
+        /// timestamps (so the (session_id, time) PK can never collide). A drift guard against
+        /// real arrival time resynchronises the counter when frames are GENUINELY lost, inserting
+        /// a real gap rather than silently compressing everything after it. Channel columns map
+        /// the SDK frame order [0]=Fp1 [1]=Fp2 [2]=T4 [3]=T3 onto fp1,fp2,t3,t4 (note t3/t4 swap).
         /// </summary>
         private int CopyRaw()
         {
             if (_rawQ.IsEmpty) return 0;
-            long periodTicks = TimeSpan.TicksPerSecond / _sampleRate;   // 40000 ticks = 4 ms @ 250 Hz
-            // PostgreSQL timestamptz resolves to MICROSECONDS (10 ticks), not .NET's 100 ns tick.
-            // The monotonic guard must therefore step in whole microseconds: a sub-microsecond
-            // bump would round to a duplicate value in the DB and blow up the (session_id, time)
-            // PK — which, on a binary COPY, rejects the WHOLE batch (every queued sample lost).
-            const long ticksPerMicro = TimeSpan.TicksPerMillisecond / 1000;  // = 10
+            long periodTicks = TimeSpan.TicksPerSecond / _sampleRate;   // 40000 ticks = 4 ms @ 250 Hz (µs-aligned)
+            // How far real (arrival) time may lead the counter before we treat the shortfall as
+            // genuine frame loss and resync. Must exceed normal burst latency (~1–2 s observed).
+            long maxDriftTicks = 3 * TimeSpan.TicksPerSecond;
             int n = 0;
             using (var w = _conn.BeginBinaryImport(
                 "COPY eeg_raw_samples (session_id, time, fp1, fp2, t3, t4) FROM STDIN (FORMAT BINARY)"))
@@ -316,12 +330,35 @@ namespace NeuuroBridge
                     var samples = f.Samples;
                     if (samples == null || samples.Length < ChannelCount) continue;
                     int spc = samples.Length / ChannelCount;   // samples per channel in this frame
+
+                    if (!_rawAnchored)
+                    {
+                        // Index 0 = the first sample of the first frame. Snap to µs so every derived
+                        // timestamp is µs-aligned (the DB stores no finer) and uniquely keyed.
+                        _rawBaseTicks = f.FrameEnd.Ticks - (long)(spc - 1) * periodTicks;
+                        _rawBaseTicks -= _rawBaseTicks % (TimeSpan.TicksPerMillisecond / 1000);
+                        _rawSampleIndex = 0;
+                        _rawAnchored = true;
+                    }
+
+                    // If arrival time has run far ahead of where the counter says this frame's last
+                    // sample should sit, frames were genuinely dropped upstream — jump the counter
+                    // forward (insert a real gap) so we don't compress the rest of the timeline.
+                    long counterLastTicks = _rawBaseTicks + (_rawSampleIndex + spc - 1) * periodTicks;
+                    if (f.FrameEnd.Ticks - counterLastTicks > maxDriftTicks)
+                    {
+                        long resyncIndex = (long)Math.Round((double)(f.FrameEnd.Ticks - _rawBaseTicks) / periodTicks) - (spc - 1);
+                        if (resyncIndex > _rawSampleIndex)
+                        {
+                            _rawSampleIndex = resyncIndex;
+                            Interlocked.Increment(ref _rawResyncs);
+                        }
+                    }
+
                     for (int i = 0; i < spc; i++)
                     {
-                        long t = f.FrameEnd.Ticks - (long)(spc - 1 - i) * periodTicks;
-                        t -= t % ticksPerMicro;                             // snap to µs — DB stores no finer
-                        if (t <= _lastRawTicks) t = _lastRawTicks + ticksPerMicro;  // strict-monotonic at DB resolution
-                        _lastRawTicks = t;
+                        long t = _rawBaseTicks + _rawSampleIndex * periodTicks;   // exact, uniform, µs-aligned
+                        _rawSampleIndex++;
 
                         w.StartRow();
                         w.Write(_sessionId, NpgsqlDbType.Uuid);
@@ -464,7 +501,8 @@ namespace NeuuroBridge
                  (Dropped > 0 || RawDropped > 0
                      ? $", dropped {Dropped} summary / {RawDropped} raw frames (queue overflow)."
                      : ".") +
-                 $"  Raw frames accepted: {RawFramesIn}.");
+                 $"  Raw frames accepted: {RawFramesIn}" +
+                 (RawResyncs > 0 ? $"; {RawResyncs} timeline resync(s) (upstream frame loss)." : "."));
         }
     }
 }

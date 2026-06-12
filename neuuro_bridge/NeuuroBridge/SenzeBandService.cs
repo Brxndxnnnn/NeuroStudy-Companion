@@ -23,6 +23,13 @@ namespace NeuuroBridge
         public int[] IntSamples { get; set; }
         /// <summary>Raw float samples in microvolts (assignRawDataFloatDelegate).</summary>
         public float[] FloatSamples { get; set; }
+        /// <summary>
+        /// UTC instant the SDK delivered this frame, captured SYNCHRONOUSLY on the SDK
+        /// callback thread — not when a thread-pool handler later runs it. The per-sample
+        /// timeline is anchored to this so it reflects true delivery timing rather than
+        /// dispatch jitter (which previously stretched a 38 s stream across 53 s).
+        /// </summary>
+        public DateTime ArrivalUtc { get; set; }
     }
 
     /// <summary>
@@ -268,14 +275,27 @@ namespace NeuuroBridge
         }
 
         // ── Raw / filtered EEG callbacks ────────────────────────────────────
+        // The SDK reuses its sample buffer for the next frame, and Post() runs the handler
+        // LATER on a thread-pool thread — so the buffer MUST be cloned and the arrival time
+        // captured here, synchronously, before we hand off. Cloning on the pooled handler
+        // (as before) raced the SDK overwriting the buffer.
         private void OnRawInt(int[] data)
-            => Post(() => OnRawEeg?.Invoke(new RawEegFrame { IntSamples = data }));
+        {
+            var frame = new RawEegFrame { IntSamples = (int[])data.Clone(), ArrivalUtc = DateTime.UtcNow };
+            Post(() => OnRawEeg?.Invoke(frame));
+        }
 
         private void OnRawFloat(float[] data)
-            => Post(() => OnRawEeg?.Invoke(new RawEegFrame { FloatSamples = data }));
+        {
+            var frame = new RawEegFrame { FloatSamples = (float[])data.Clone(), ArrivalUtc = DateTime.UtcNow };
+            Post(() => OnRawEeg?.Invoke(frame));
+        }
 
         private void OnFiltered(float[] data)
-            => Post(() => OnFilteredEeg?.Invoke(data));
+        {
+            var copy = (float[])data.Clone();   // same buffer-reuse race as raw; clone before the pooled handler
+            Post(() => OnFilteredEeg?.Invoke(copy));
+        }
 
         // ── Scan callbacks ──────────────────────────────────────────────────
         private void ReceiveScanResult(ScannedDeviceClass device, bool addDevice)
