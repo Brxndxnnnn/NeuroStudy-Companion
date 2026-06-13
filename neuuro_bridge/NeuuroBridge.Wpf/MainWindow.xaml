@@ -180,7 +180,7 @@
                 </Grid.RowDefinitions>
                 <Border Grid.Row="0" Style="{StaticResource Card}">
                     <DockPanel>
-                        <TextBlock DockPanel.Dock="Top" Style="{StaticResource CardTitle}" Text="LIVE EEG (raw waveform · 4s window)"/>
+                        <TextBlock DockPanel.Dock="Top" Style="{StaticResource CardTitle}" Text="LIVE SIGNALS"/>
                         <local:LiveEegPanel x:Name="LivePanel"/>
                     </DockPanel>
                 </Border>

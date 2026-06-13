@@ -8,78 +8,151 @@ using System.Windows.Threading;
 namespace NeuuroBridge.Wpf
 {
     /// <summary>
-    /// Dependency-free live EEG visuals: a rolling 4-channel raw waveform (auto-scaled per
-    /// channel to strip the large DC offset), FFT band-power bars (δ θ α β γ, averaged across
-    /// channels), and the SDK cognitive readouts. Fed from BridgeController.RawFrame /
-    /// FftBandPowers; the waveform redraws on an internal ~25 fps timer.
+    /// Dependency-free live EEG visuals styled after the Neeuro reference app's paper
+    /// strip charts (adapted to the dark theme): three tabs of stacked, labelled lanes
+    /// with thin scrolling lines.
+    ///   • EEG Waves      — 4 raw channels, auto-scaled per lane to strip the DC offset.
+    ///   • Frequency Bands — δ θ α β γ band power (avg of 4 channels) over time + current value.
+    ///   • Mental States   — Attention / Relaxation / Workload over time + current value.
+    /// Fed from BridgeController.RawFrame / FftBandPowers / cognitive; redraws on a ~25 fps timer.
     /// </summary>
     public partial class LiveEegPanel : UserControl
     {
         private const int Channels = 4;
-        private const int Window = 1000;     // ~4 s @ 250 Hz
-        private static readonly string[] ChLabels = { "Fp1", "Fp2", "T4", "T3" };
-        private static readonly string[] BandLabels = { "δ", "θ", "α", "β", "γ" };
-        private static readonly Brush[] ChBrush =
-        {
-            Brush("#60A5FA"), Brush("#34D399"), Brush("#FBBF24"), Brush("#F472B6")
-        };
-        private static readonly string[] CogNames = { "Attention", "Relaxation", "Workload" };
-        private static readonly Brush[] CogBrush = { Brush("#60A5FA"), Brush("#34D399"), Brush("#FBBF24") };
+        private const int RawWindow = 1000;   // ~4 s @ 250 Hz
+        private const int Bands = 5;
+        private const int BandSources = 5;    // [0] = avg of channels, [1..4] = Fp1, Fp2, T4, T3
+        private const int Cogs = 3;
+        private const int Hist = 200;         // rolling history for band / cognitive strips
+        private const double RightPad = 8;
 
-        private readonly double[][] _buf = new double[Channels][];
-        private int _head, _count;
+        private static readonly string[] EegLabels = { "Ch1\nFp1", "Ch2\nFp2", "Ch3\nT4", "Ch4\nT3" };
+        private static readonly string[] BandLabels =
+        {
+            "Delta\n(1–4 Hz)", "Theta\n(4–8 Hz)", "Alpha\n(8–12 Hz)",
+            "Beta\n(12–30 Hz)", "Gamma\n(30–40 Hz)"
+        };
+        private static readonly string[] CogLabels = { "Attention", "Relaxation", "Mental\nWorkload" };
+        private static readonly string[] SourceLabels = { "Avg", "Ch1", "Ch2", "Ch3", "Ch4" };
+
+        private static readonly Brush LineBrush   = Br("#B7C5D9");   // thin paper-style trace
+        private static readonly Brush SepBrush    = Br("#22303F");   // faint lane separator
+        private static readonly Brush LabelBrush  = Br("#92A2B8");
+        private static readonly Brush ValueBrush  = Br("#E6EDF6");
+        private static readonly Brush ChipBrush   = Br("#1E2A3C");   // unselected channel chip
+        private static readonly Brush AccentBrush = Br("#3B82F6");   // selected channel chip
+
+        // ── Rolling buffers ──────────────────────────────────────────────────
+        private readonly double[][] _raw = new double[Channels][];
+        private int _rawHead, _rawCount;
         private readonly object _lock = new object();
 
-        private readonly Polyline[] _waves = new Polyline[Channels];
-        private readonly TextBlock[] _waveLabels = new TextBlock[Channels];
-        private readonly Rectangle[] _bandRects = new Rectangle[5];
-        private readonly TextBlock[] _bandCaps = new TextBlock[5];
-        private readonly Border[] _cogBars = new Border[3];
-        private readonly TextBlock[] _cogVals = new TextBlock[3];
+        // Band history is kept per source: _bandHist[source][band][sample]. Source 0 is the
+        // 4-channel average; 1..4 are the individual channels (Fp1, Fp2, T4, T3).
+        private readonly double[][][] _bandHist = new double[BandSources][][];
+        private readonly double[][] _bandLatest = new double[BandSources][];
+        private int _bandHead, _bandCount;
+        private int _selectedSource;          // 0 = Avg
+        private Button[] _srcButtons;
 
-        private float[] _bandAvg;            // latest 5 band averages, for re-layout on resize
+        private readonly double[][] _cogHist = new double[Cogs][];
+        private int _cogHead, _cogCount;
+        private readonly double[] _cogLatest = { double.NaN, double.NaN, double.NaN };
+
+        // ── Lane visuals ─────────────────────────────────────────────────────
+        private sealed class Lane
+        {
+            public Polyline Wave;
+            public Line Baseline;
+            public TextBlock Label;
+            public TextBlock Value;   // null when the lane shows no numeric readout
+        }
+
+        private Lane[] _eegLanes, _bandLanes, _cogLanes;
         private readonly DispatcherTimer _render = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(40) };
 
         public LiveEegPanel()
         {
             InitializeComponent();
-            for (int ch = 0; ch < Channels; ch++) _buf[ch] = new double[Window];
 
-            for (int ch = 0; ch < Channels; ch++)
+            for (int ch = 0; ch < Channels; ch++) _raw[ch] = new double[RawWindow];
+            for (int s = 0; s < BandSources; s++)
             {
-                _waves[ch] = new Polyline { Stroke = ChBrush[ch], StrokeThickness = 1.2 };
-                WaveCanvas.Children.Add(_waves[ch]);
-                _waveLabels[ch] = new TextBlock { Text = ChLabels[ch], Foreground = ChBrush[ch], FontSize = 11, FontWeight = FontWeights.SemiBold };
-                WaveCanvas.Children.Add(_waveLabels[ch]);
+                _bandHist[s] = new double[Bands][];
+                _bandLatest[s] = new double[Bands];
+                for (int b = 0; b < Bands; b++) _bandHist[s][b] = new double[Hist];
             }
+            for (int c = 0; c < Cogs; c++) _cogHist[c] = new double[Hist];
 
-            for (int b = 0; b < 5; b++)
-            {
-                _bandRects[b] = new Rectangle { Fill = Brush("#3B82F6"), RadiusX = 2, RadiusY = 2 };
-                BandCanvas.Children.Add(_bandRects[b]);
-                _bandCaps[b] = new TextBlock { Text = BandLabels[b], Foreground = Brush("#C2CCDA"), FontSize = 12, TextAlignment = TextAlignment.Center };
-                BandCanvas.Children.Add(_bandCaps[b]);
-            }
+            _eegLanes  = BuildLanes(WaveCanvas, EegLabels, withValue: false);
+            _bandLanes = BuildLanes(BandCanvas, BandLabels, withValue: true);
+            _cogLanes  = BuildLanes(CogCanvas, CogLabels, withValue: true);
+            BuildChannelSelector();
 
-            for (int i = 0; i < 3; i++)
-            {
-                var row = new StackPanel { Margin = new Thickness(0, 0, 0, 8) };
-                var head = new DockPanel();
-                head.Children.Add(new TextBlock { Text = CogNames[i], Foreground = Brush("#C2CCDA"), FontSize = 11 });
-                _cogVals[i] = new TextBlock { Text = "—", Foreground = Brush("#92A2B8"), FontSize = 11, HorizontalAlignment = HorizontalAlignment.Right };
-                DockPanel.SetDock(_cogVals[i], Dock.Right);
-                head.Children.Add(_cogVals[i]);
-                row.Children.Add(head);
-                var track = new Border { Background = Brush("#22303F"), CornerRadius = new CornerRadius(3), Height = 6, Margin = new Thickness(0, 3, 0, 0) };
-                _cogBars[i] = new Border { Background = CogBrush[i], CornerRadius = new CornerRadius(3), Height = 6, HorizontalAlignment = HorizontalAlignment.Left, Width = 0 };
-                track.Child = _cogBars[i];
-                row.Children.Add(track);
-                CogPanel.Children.Add(row);
-            }
-
-            _render.Tick += (_, __) => DrawWaves();
+            _render.Tick += (_, __) => { DrawEeg(); DrawBands(); DrawCog(); };
             Loaded += (_, __) => _render.Start();
             Unloaded += (_, __) => _render.Stop();
+        }
+
+        private static Lane[] BuildLanes(Canvas canvas, string[] labels, bool withValue)
+        {
+            var lanes = new Lane[labels.Length];
+            for (int i = 0; i < labels.Length; i++)
+            {
+                var lane = new Lane
+                {
+                    Baseline = new Line { Stroke = SepBrush, StrokeThickness = 1 },
+                    Wave = new Polyline { Stroke = LineBrush, StrokeThickness = 1.1, StrokeLineJoin = PenLineJoin.Round },
+                    Label = new TextBlock
+                    {
+                        Text = labels[i], Foreground = LabelBrush, FontSize = 10,
+                        FontWeight = FontWeights.SemiBold, TextAlignment = TextAlignment.Center,
+                        LayoutTransform = new RotateTransform(-90)
+                    }
+                };
+                canvas.Children.Add(lane.Baseline);
+                canvas.Children.Add(lane.Wave);
+                canvas.Children.Add(lane.Label);
+                if (withValue)
+                {
+                    lane.Value = new TextBlock { Text = "—", Foreground = ValueBrush, FontSize = 15, FontWeight = FontWeights.Bold };
+                    canvas.Children.Add(lane.Value);
+                }
+                lanes[i] = lane;
+            }
+            return lanes;
+        }
+
+        // Channel selector for the Frequency Bands tab (Avg · Ch1 · Ch2 · Ch3 · Ch4).
+        private void BuildChannelSelector()
+        {
+            _srcButtons = new Button[BandSources];
+            for (int i = 0; i < BandSources; i++)
+            {
+                int idx = i;
+                var btn = new Button
+                {
+                    Content = SourceLabels[i],
+                    FontSize = 11,
+                    Padding = new Thickness(10, 3, 10, 3),
+                    Margin = new Thickness(0, 0, 6, 0)
+                };
+                btn.Click += (_, __) => { _selectedSource = idx; UpdateSelectorVisuals(); DrawBands(); };
+                _srcButtons[i] = btn;
+                BandChannelBar.Children.Add(btn);
+            }
+            UpdateSelectorVisuals();
+        }
+
+        private void UpdateSelectorVisuals()
+        {
+            for (int i = 0; i < BandSources; i++)
+            {
+                bool sel = i == _selectedSource;
+                _srcButtons[i].Background = sel ? AccentBrush : ChipBrush;
+                _srcButtons[i].Foreground = sel ? Brushes.White : LabelBrush;
+                _srcButtons[i].FontWeight = sel ? FontWeights.SemiBold : FontWeights.Normal;
+            }
         }
 
         // ── Data in ──────────────────────────────────────────────────────────
@@ -91,9 +164,9 @@ namespace NeuuroBridge.Wpf
             {
                 for (int i = 0; i < spc; i++)
                 {
-                    for (int ch = 0; ch < Channels; ch++) _buf[ch][_head] = frame[ch * spc + i];
-                    _head = (_head + 1) % Window;
-                    if (_count < Window) _count++;
+                    for (int ch = 0; ch < Channels; ch++) _raw[ch][_rawHead] = frame[ch * spc + i];
+                    _rawHead = (_rawHead + 1) % RawWindow;
+                    if (_rawCount < RawWindow) _rawCount++;
                 }
             }
         }
@@ -101,37 +174,56 @@ namespace NeuuroBridge.Wpf
         public void PushBands(BandPowers[] powers)
         {
             if (powers == null || powers.Length == 0) return;
-            // BandPowers order: Delta, Theta, Alpha, Beta, Gamma.
-            var sum = new float[5];
-            foreach (var p in powers) { sum[0] += p.Delta; sum[1] += p.Theta; sum[2] += p.Alpha; sum[3] += p.Beta; sum[4] += p.Gamma; }
-            for (int b = 0; b < 5; b++) sum[b] /= powers.Length;
-            _bandAvg = sum;
-            LayoutBands();
+            // powers is per channel (Fp1, Fp2, T4, T3), each with Delta/Theta/Alpha/Beta/Gamma.
+            int nch = Math.Min(powers.Length, BandSources - 1);
+            var avg = new double[Bands];
+            for (int c = 0; c < nch; c++)
+            {
+                var p = powers[c];
+                double[] vals = { p.Delta, p.Theta, p.Alpha, p.Beta, p.Gamma };
+                for (int b = 0; b < Bands; b++)
+                {
+                    _bandLatest[c + 1][b] = vals[b];
+                    _bandHist[c + 1][b][_bandHead] = vals[b];
+                    avg[b] += vals[b];
+                }
+            }
+            for (int b = 0; b < Bands; b++)
+            {
+                avg[b] /= nch;
+                _bandLatest[0][b] = avg[b];
+                _bandHist[0][b][_bandHead] = avg[b];
+            }
+            _bandHead = (_bandHead + 1) % Hist;
+            if (_bandCount < Hist) _bandCount++;
         }
 
         public void SetCognitive(float attention, float relaxation, float workload)
         {
-            float[] v = { attention, relaxation, workload };
-            for (int i = 0; i < 3; i++)
+            double[] v = { attention, relaxation, workload };
+            for (int c = 0; c < Cogs; c++)
             {
-                if (float.IsNaN(v[i])) { _cogVals[i].Text = "—"; _cogBars[i].Width = 0; continue; }
-                _cogVals[i].Text = v[i].ToString("F2");
-                double frac = v[i] > 1f ? Math.Min(v[i] / 100.0, 1.0) : Math.Max(0.0, Math.Min(v[i], 1.0));
-                double track = Math.Max(0, ((Border)_cogBars[i].Parent).ActualWidth);
-                _cogBars[i].Width = track * frac;
+                _cogLatest[c] = v[c];
+                _cogHist[c][_cogHead] = double.IsNaN(v[c]) ? 0 : v[c];   // keep the trace continuous
             }
+            _cogHead = (_cogHead + 1) % Hist;
+            if (_cogCount < Hist) _cogCount++;
         }
 
         public void Clear()
         {
-            lock (_lock) { _head = 0; _count = 0; }
-            _bandAvg = null;
-            for (int b = 0; b < 5; b++) _bandRects[b].Height = 0;
-            for (int ch = 0; ch < Channels; ch++) _waves[ch].Points = new PointCollection();
+            lock (_lock) { _rawHead = 0; _rawCount = 0; }
+            _bandHead = _bandCount = _cogHead = _cogCount = 0;
+            for (int s = 0; s < BandSources; s++)
+                for (int b = 0; b < Bands; b++) _bandLatest[s][b] = 0;
+            for (int c = 0; c < Cogs; c++) _cogLatest[c] = double.NaN;
+            foreach (var l in _eegLanes) l.Wave.Points = new PointCollection();
+            foreach (var l in _bandLanes) { l.Wave.Points = new PointCollection(); l.Value.Text = "—"; }
+            foreach (var l in _cogLanes) { l.Wave.Points = new PointCollection(); l.Value.Text = "—"; }
         }
 
         // ── Rendering ────────────────────────────────────────────────────────
-        private void DrawWaves()
+        private void DrawEeg()
         {
             double w = WaveCanvas.ActualWidth, h = WaveCanvas.ActualHeight;
             if (w < 4 || h < 4) return;
@@ -140,66 +232,111 @@ namespace NeuuroBridge.Wpf
             double[][] snap;
             lock (_lock)
             {
-                count = _count; head = _head;
-                if (count < 2) { for (int ch = 0; ch < Channels; ch++) _waves[ch].Points = new PointCollection(); return; }
+                count = _rawCount; head = _rawHead;
                 snap = new double[Channels][];
                 for (int ch = 0; ch < Channels; ch++)
                 {
                     snap[ch] = new double[count];
-                    for (int j = 0; j < count; j++)
-                        snap[ch][j] = _buf[ch][(head - count + j + Window) % Window];
+                    for (int j = 0; j < count; j++) snap[ch][j] = _raw[ch][(head - count + j + RawWindow) % RawWindow];
                 }
             }
 
-            double bandH = h / Channels;
+            double laneH = h / Channels, gutter = 26;
             for (int ch = 0; ch < Channels; ch++)
             {
-                double min = double.MaxValue, max = double.MinValue;
-                for (int j = 0; j < count; j++) { double v = snap[ch][j]; if (v < min) min = v; if (v > max) max = v; }
-                double mid = (min + max) / 2, half = Math.Max((max - min) / 2, 1);
-                double cy = bandH * ch + bandH / 2, amp = bandH * 0.42;
-
-                var pts = new PointCollection(count);
-                double stepX = count > 1 ? w / (count - 1) : w;
-                for (int j = 0; j < count; j++)
-                {
-                    double norm = (snap[ch][j] - mid) / half;       // −1 … 1
-                    pts.Add(new Point(j * stepX, cy - norm * amp));
-                }
-                _waves[ch].Points = pts;
-
-                Canvas.SetLeft(_waveLabels[ch], 6);
-                Canvas.SetTop(_waveLabels[ch], bandH * ch + 3);
+                double top = laneH * ch;
+                PositionChrome(_eegLanes[ch], top, laneH, gutter, w);
+                DrawWave(_eegLanes[ch].Wave, snap[ch], count, top, laneH, gutter, w);
             }
         }
 
-        private void LayoutBands()
+        private void DrawBands()
         {
             double w = BandCanvas.ActualWidth, h = BandCanvas.ActualHeight;
-            if (w < 4 || h < 4 || _bandAvg == null) return;
+            if (w < 4 || h < 4) return;
 
-            double maxv = 1e-9;
-            foreach (var v in _bandAvg) if (v > maxv) maxv = v;
-            double slot = w / 5, barW = slot * 0.6, capH = 16, plotH = h - capH;
-
-            for (int b = 0; b < 5; b++)
+            int src = _selectedSource;
+            double laneH = h / Bands, gutter = 64;
+            for (int b = 0; b < Bands; b++)
             {
-                double bh = Math.Max(1, plotH * (_bandAvg[b] / maxv));
-                _bandRects[b].Width = barW;
-                _bandRects[b].Height = bh;
-                Canvas.SetLeft(_bandRects[b], slot * b + (slot - barW) / 2);
-                Canvas.SetTop(_bandRects[b], plotH - bh);
-
-                _bandCaps[b].Width = slot;
-                Canvas.SetLeft(_bandCaps[b], slot * b);
-                Canvas.SetTop(_bandCaps[b], plotH + 1);
+                double top = laneH * b;
+                PositionChrome(_bandLanes[b], top, laneH, gutter, w);
+                DrawWave(_bandLanes[b].Wave, Snapshot(_bandHist[src][b], _bandHead, _bandCount), _bandCount, top, laneH, gutter, w);
+                _bandLanes[b].Value.Text = _bandCount == 0 ? "—" : Fmt(_bandLatest[src][b]);
             }
         }
 
-        private void WaveCanvas_SizeChanged(object sender, SizeChangedEventArgs e) => DrawWaves();
-        private void BandCanvas_SizeChanged(object sender, SizeChangedEventArgs e) => LayoutBands();
+        private void DrawCog()
+        {
+            double w = CogCanvas.ActualWidth, h = CogCanvas.ActualHeight;
+            if (w < 4 || h < 4) return;
 
-        private static SolidColorBrush Brush(string hex)
+            double laneH = h / Cogs, gutter = 64;
+            for (int c = 0; c < Cogs; c++)
+            {
+                double top = laneH * c;
+                PositionChrome(_cogLanes[c], top, laneH, gutter, w);
+                DrawWave(_cogLanes[c].Wave, Snapshot(_cogHist[c], _cogHead, _cogCount), _cogCount, top, laneH, gutter, w);
+                _cogLanes[c].Value.Text = double.IsNaN(_cogLatest[c]) ? "—" : Fmt(_cogLatest[c]);
+            }
+        }
+
+        private static double[] Snapshot(double[] ring, int head, int count)
+        {
+            var outp = new double[count];
+            int cap = ring.Length;
+            for (int j = 0; j < count; j++) outp[j] = ring[(head - count + j + cap) % cap];
+            return outp;
+        }
+
+        /// <summary>Positions the lane separator, rotated label and (optional) value readout.</summary>
+        private static void PositionChrome(Lane lane, double top, double laneH, double gutter, double w)
+        {
+            lane.Baseline.X1 = gutter;
+            lane.Baseline.X2 = w - RightPad;
+            lane.Baseline.Y1 = lane.Baseline.Y2 = top + laneH - 0.5;
+
+            lane.Label.Measure(new Size(double.PositiveInfinity, double.PositiveInfinity));
+            double lblH = lane.Label.DesiredSize.Height;   // rotated bounding box height
+            Canvas.SetLeft(lane.Label, lane.Value != null ? 32 : 6);
+            Canvas.SetTop(lane.Label, top + Math.Max(0, (laneH - lblH) / 2));
+
+            if (lane.Value != null)
+            {
+                lane.Value.Measure(new Size(double.PositiveInfinity, double.PositiveInfinity));
+                Canvas.SetLeft(lane.Value, 6);
+                Canvas.SetTop(lane.Value, top + Math.Max(0, (laneH - lane.Value.DesiredSize.Height) / 2));
+            }
+        }
+
+        /// <summary>Draws one auto-scaled (min..max over the window) trace within a lane.</summary>
+        private static void DrawWave(Polyline wave, double[] data, int count, double top, double laneH, double gutter, double w)
+        {
+            if (count < 2) { wave.Points = new PointCollection(); return; }
+
+            double min = double.MaxValue, max = double.MinValue;
+            for (int j = 0; j < count; j++) { double v = data[j]; if (v < min) min = v; if (v > max) max = v; }
+            double range = max - min, mid = (min + max) / 2;
+            double cy = top + laneH / 2, amp = laneH * 0.38;
+            double plotW = (w - RightPad) - gutter;
+            double stepX = count > 1 ? plotW / (count - 1) : plotW;
+
+            var pts = new PointCollection(count);
+            for (int j = 0; j < count; j++)
+            {
+                double norm = range > 1e-9 ? (data[j] - mid) / (range / 2) : 0;   // flat → centered
+                pts.Add(new Point(gutter + j * stepX, cy - norm * amp));
+            }
+            wave.Points = pts;
+        }
+
+        private static string Fmt(double v) => Math.Abs(v) >= 10 ? v.ToString("F0") : v.ToString("0.#");
+
+        private void WaveCanvas_SizeChanged(object sender, SizeChangedEventArgs e) => DrawEeg();
+        private void BandCanvas_SizeChanged(object sender, SizeChangedEventArgs e) => DrawBands();
+        private void CogCanvas_SizeChanged(object sender, SizeChangedEventArgs e) => DrawCog();
+
+        private static SolidColorBrush Br(string hex)
         {
             var b = (SolidColorBrush)new BrushConverter().ConvertFromString(hex);
             b.Freeze();

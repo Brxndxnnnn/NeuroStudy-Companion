@@ -1,30 +1,76 @@
 <UserControl x:Class="NeuuroBridge.Wpf.LiveEegPanel"
              xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
              xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml">
-    <Grid>
-        <Grid.RowDefinitions>
-            <RowDefinition Height="*"/>
-            <RowDefinition Height="Auto"/>
-        </Grid.RowDefinitions>
+    <UserControl.Resources>
+        <!-- Paper-style strip-chart tabs, adapted to the app's dark theme. -->
+        <Style x:Key="ChartTabItem" TargetType="TabItem">
+            <Setter Property="Foreground" Value="#92A2B8"/>
+            <Setter Property="FontSize" Value="12"/>
+            <Setter Property="FontWeight" Value="SemiBold"/>
+            <Setter Property="Template">
+                <Setter.Value>
+                    <ControlTemplate TargetType="TabItem">
+                        <Border x:Name="bd" BorderBrush="Transparent" BorderThickness="0,0,0,2" Padding="14,7">
+                            <ContentPresenter ContentSource="Header" HorizontalAlignment="Center" VerticalAlignment="Center"/>
+                        </Border>
+                        <ControlTemplate.Triggers>
+                            <Trigger Property="IsSelected" Value="True">
+                                <Setter TargetName="bd" Property="BorderBrush" Value="#3B82F6"/>
+                                <Setter Property="Foreground" Value="#E6EDF6"/>
+                            </Trigger>
+                            <Trigger Property="IsMouseOver" Value="True">
+                                <Setter Property="Foreground" Value="#C2CCDA"/>
+                            </Trigger>
+                        </ControlTemplate.Triggers>
+                    </ControlTemplate>
+                </Setter.Value>
+            </Setter>
+        </Style>
 
-        <!-- Rolling raw-EEG waveform (4 channels) -->
-        <Border Grid.Row="0" Background="#0B121C" CornerRadius="6" ClipToBounds="True">
-            <Canvas x:Name="WaveCanvas" SizeChanged="WaveCanvas_SizeChanged"/>
-        </Border>
+        <Style x:Key="ChartTabs" TargetType="TabControl">
+            <Setter Property="Background" Value="Transparent"/>
+            <Setter Property="BorderThickness" Value="0"/>
+            <Setter Property="Template">
+                <Setter.Value>
+                    <ControlTemplate TargetType="TabControl">
+                        <Grid>
+                            <Grid.RowDefinitions>
+                                <RowDefinition Height="Auto"/>
+                                <RowDefinition Height="*"/>
+                            </Grid.RowDefinitions>
+                            <Border Grid.Row="0" BorderBrush="#26344A" BorderThickness="0,0,0,1">
+                                <TabPanel IsItemsHost="True" Background="Transparent" HorizontalAlignment="Left"/>
+                            </Border>
+                            <ContentPresenter Grid.Row="1" ContentSource="SelectedContent"/>
+                        </Grid>
+                    </ControlTemplate>
+                </Setter.Value>
+            </Setter>
+        </Style>
+    </UserControl.Resources>
 
-        <!-- Band powers + cognitive -->
-        <Grid Grid.Row="1" Margin="0,10,0,0">
-            <Grid.ColumnDefinitions>
-                <ColumnDefinition Width="*"/>
-                <ColumnDefinition Width="240"/>
-            </Grid.ColumnDefinitions>
-            <StackPanel Grid.Column="0">
-                <TextBlock Text="FFT BAND POWERS (avg of 4 channels)" Foreground="#92A2B8" FontSize="10" FontWeight="SemiBold" Margin="0,0,0,4"/>
-                <Canvas x:Name="BandCanvas" Height="96" SizeChanged="BandCanvas_SizeChanged"/>
-            </StackPanel>
-            <StackPanel Grid.Column="1" x:Name="CogPanel" Margin="14,0,0,0">
-                <TextBlock Text="SDK COGNITIVE" Foreground="#92A2B8" FontSize="10" FontWeight="SemiBold" Margin="0,0,0,6"/>
-            </StackPanel>
-        </Grid>
-    </Grid>
+    <TabControl Style="{StaticResource ChartTabs}">
+        <TabItem Header="EEG Waves" Style="{StaticResource ChartTabItem}">
+            <Border Background="#0B121C" CornerRadius="6" ClipToBounds="True" Margin="0,8,0,0">
+                <Canvas x:Name="WaveCanvas" SizeChanged="WaveCanvas_SizeChanged"/>
+            </Border>
+        </TabItem>
+        <TabItem Header="Frequency Bands" Style="{StaticResource ChartTabItem}">
+            <Grid Margin="0,8,0,0">
+                <Grid.RowDefinitions>
+                    <RowDefinition Height="Auto"/>
+                    <RowDefinition Height="*"/>
+                </Grid.RowDefinitions>
+                <StackPanel x:Name="BandChannelBar" Grid.Row="0" Orientation="Horizontal" Margin="0,0,0,6"/>
+                <Border Grid.Row="1" Background="#0B121C" CornerRadius="6" ClipToBounds="True">
+                    <Canvas x:Name="BandCanvas" SizeChanged="BandCanvas_SizeChanged"/>
+                </Border>
+            </Grid>
+        </TabItem>
+        <TabItem Header="Mental States" Style="{StaticResource ChartTabItem}">
+            <Border Background="#0B121C" CornerRadius="6" ClipToBounds="True" Margin="0,8,0,0">
+                <Canvas x:Name="CogCanvas" SizeChanged="CogCanvas_SizeChanged"/>
+            </Border>
+        </TabItem>
+    </TabControl>
 </UserControl>
