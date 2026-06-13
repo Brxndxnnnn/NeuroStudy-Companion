@@ -313,6 +313,8 @@ namespace NeuuroBridge.Wpf
             BarQuality.Foreground = q >= 75 ? Good : q >= 40 ? Warn : Bad;
             TxtSignal.Text = s.SignalReady == null ? "(no data)" : s.SignalReady.Value ? "READY" : "settling…";
             TxtBattery.Text = s.Battery == null ? "(no data)" : s.Battery + "%";
+            TxtHeartRate.Text = s.HeartRate == null ? "—" : s.HeartRate.Value + " bpm";
+            TxtSpo2.Text = s.Spo2 == null ? "—" : s.Spo2.Value + " %";
 
             var rows = new List<string>();
             for (int ch = 0; ch < BridgeController.ChannelCount; ch++)

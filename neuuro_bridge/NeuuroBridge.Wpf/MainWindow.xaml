@@ -180,7 +180,15 @@
                 </Grid.RowDefinitions>
                 <Border Grid.Row="0" Style="{StaticResource Card}">
                     <DockPanel>
-                        <TextBlock DockPanel.Dock="Top" Style="{StaticResource CardTitle}" Text="LIVE SIGNALS"/>
+                        <DockPanel DockPanel.Dock="Top" Margin="0,0,0,8">
+                            <TextBlock Style="{StaticResource CardTitle}" Text="LIVE SIGNALS" Margin="0" VerticalAlignment="Center"/>
+                            <StackPanel Orientation="Horizontal" HorizontalAlignment="Right">
+                                <TextBlock Text="Heart rate" Foreground="{StaticResource Muted2}" FontSize="11" VerticalAlignment="Center"/>
+                                <TextBlock x:Name="TxtHeartRate" Text="—" Foreground="{StaticResource Ink}" FontSize="13" FontWeight="SemiBold" Margin="6,0,18,0" VerticalAlignment="Center"/>
+                                <TextBlock Text="SpO₂" Foreground="{StaticResource Muted2}" FontSize="11" VerticalAlignment="Center"/>
+                                <TextBlock x:Name="TxtSpo2" Text="—" Foreground="{StaticResource Ink}" FontSize="13" FontWeight="SemiBold" Margin="6,0,0,0" VerticalAlignment="Center"/>
+                            </StackPanel>
+                        </DockPanel>
                         <local:LiveEegPanel x:Name="LivePanel"/>
                     </DockPanel>
                 </Border>

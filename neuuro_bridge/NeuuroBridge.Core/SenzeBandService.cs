@@ -78,6 +78,7 @@ namespace NeuuroBridge
         public event Action<bool[]> OnChannelStatus;
         public event Action<float[]> OnImpedance;                      // per-electrode impedance (Fp1, Fp2, T4, T3)
         public event Action<string> OnBattery;
+        public event Action<int[]> OnSpo2HeartRate;                    // PPG-derived [SpO2, heartRate] (order/validity UNVERIFIED)
         public event Action<RawEegFrame> OnRawEeg;                     // raw ADC EEG (DC offset present)
         public event Action<float[]> OnFilteredEeg;                    // band-passed, zero-centered EEG
         public event Action<bool, string> OnAuthStatus;               // STANDARD-tier server auth (ok, detail)
@@ -204,7 +205,8 @@ namespace NeuuroBridge
             sbci.assignDirectionDelegate(_ => { });
             sbci.assignImpedanceDelegate(v => Post(() => OnImpedance?.Invoke(v)));
             sbci.assignCalParamsDelegate(_ => { });
-            sbci.assignSPO2HeartRateDelegate(_ => { });
+            // SDK reuses its buffer; clone synchronously before the pooled handler (same race as raw).
+            sbci.assignSPO2HeartRateDelegate(v => { var c = (int[])v.Clone(); Post(() => OnSpo2HeartRate?.Invoke(c)); });
             sbci.assignRawData200msDelegate(_ => { });
             sbci.assignFilteredDataDelegate(OnFiltered);   // band-passed, zero-centered EEG
             sbci.assignPPGDataDelegate(_ => { });     // must be assigned: PPG packets NPE grabCharacteristic otherwise

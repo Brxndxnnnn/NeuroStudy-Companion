@@ -51,6 +51,8 @@ namespace NeuuroBridge
         private bool[] _channels;
         private float[] _impedance;
         private string _battery;
+        private int? _heartRate;
+        private int? _spo2;
 
         // Session identity.
         private string _connAddress = "", _connDeviceID = "";
@@ -129,6 +131,8 @@ namespace NeuuroBridge
                     Channels = _channels,
                     Impedance = _impedance,
                     Battery = _battery,
+                    HeartRate = _heartRate,
+                    Spo2 = _spo2,
                 };
             }
         }
@@ -173,12 +177,21 @@ namespace NeuuroBridge
                 StopSyncPoll();
                 _prepared = false;
                 SetSyncStatus("");
+                lock (_stateLock) { _heartRate = null; _spo2 = null; }
                 Disconnected?.Invoke(addr);
             };
             _svc.OnSignalReady += ready => { lock (_stateLock) _signalReady = ready; SignalStateChanged?.Invoke(); };
             _svc.OnChannelStatus += ch => { lock (_stateLock) _channels = ch; SignalStateChanged?.Invoke(); };
             _svc.OnImpedance += imp => { lock (_stateLock) _impedance = imp; SignalStateChanged?.Invoke(); };
             _svc.OnBattery += b => { lock (_stateLock) _battery = b; SignalStateChanged?.Invoke(); };
+            _svc.OnSpo2HeartRate += v =>
+            {
+                if (v == null || v.Length < 2) return;
+                // Delegate name order assumed [SpO2, heartRate]; ORDER + VALIDITY UNVERIFIED on hardware
+                // (the Neeuro reference itself showed an implausible 23% SpO2). Swap indices here if HR/O2 read swapped.
+                lock (_stateLock) { _spo2 = v[0]; _heartRate = v[1]; }
+                SignalStateChanged?.Invoke();
+            };
             _svc.OnRawEeg += HandleRawEeg;
             _svc.OnFilteredEeg += f => { lock (_stateLock) _lastFiltered = f; };
             _svc.OnFilteredEeg += f => _processor.AddFilteredFrame(f);
@@ -507,5 +520,7 @@ namespace NeuuroBridge
         public bool[] Channels;
         public float[] Impedance;
         public string Battery;
+        public int? HeartRate;
+        public int? Spo2;
     }
 }
