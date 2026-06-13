@@ -99,6 +99,7 @@ namespace NeuuroBridge
         private long _dropped;
         private long _rawDropped;
         private volatile bool _disposed;
+        private volatile bool _markCompletedOnDispose;
         private volatile string _lastError;
 
         public DbUploader(string connString, Action<string> log)
@@ -234,6 +235,39 @@ namespace NeuuroBridge
                     return false;
                 }
             }
+        }
+
+        /// <summary>
+        /// Requests that the session row be marked <c>'completed'</c> when this uploader is
+        /// disposed — i.e. the technician explicitly ended the session via Stop. Deferring it to
+        /// <see cref="Dispose"/> guarantees the status flip happens AFTER the final data flush, so
+        /// a frontend polling sync_status never sees 'completed' before the last batch has landed.
+        /// (Plain app shutdown disposes WITHOUT this, leaving the session in its prior state.)
+        /// </summary>
+        public void RequestComplete() => _markCompletedOnDispose = true;
+
+        /// <summary>
+        /// Reads this session's current <c>sync_status</c> for advisory display only — the frontend
+        /// flips it to <c>'claimed'</c> when it pairs. Read-only and non-blocking: returns null if a
+        /// flush is in progress (skips rather than contend) or on any error, so it can never delay or
+        /// disturb the write path. This is the one place the bridge reads the DB; it never gates uploads.
+        /// </summary>
+        public string TryReadSyncStatus()
+        {
+            if (_disposed || _sessionId == Guid.Empty) return null;
+            if (!Monitor.TryEnter(_ioLock)) return null;   // a flush holds the lock — try again next tick
+            try
+            {
+                EnsureOpen();
+                using (var cmd = new NpgsqlCommand("SELECT sync_status FROM sessions WHERE session_id = @sid", _conn))
+                {
+                    cmd.Parameters.AddWithValue("sid", NpgsqlDbType.Uuid, _sessionId);
+                    var v = cmd.ExecuteScalar();
+                    return v == null || v is DBNull ? null : v.ToString();
+                }
+            }
+            catch (Exception ex) { _lastError = ex.Message; return null; }
+            finally { Monitor.Exit(_ioLock); }
         }
 
         public void EnqueueEeg(EegReadingRow row)
@@ -461,6 +495,32 @@ namespace NeuuroBridge
             else w.Write(v, NpgsqlDbType.Real);
         }
 
+        /// <summary>
+        /// Flips sessions.sync_status to 'completed' for this session. Caller must hold
+        /// <see cref="_ioLock"/>. Best-effort: a DB hiccup is logged, not thrown, so it can never
+        /// break disposal. Only narrows from a non-completed state (won't disturb an already-final row).
+        /// </summary>
+        private void MarkCompletedInternal()
+        {
+            try
+            {
+                EnsureOpen();
+                using (var cmd = new NpgsqlCommand(
+                    "UPDATE sessions SET sync_status = 'completed' " +
+                    "WHERE session_id = @sid AND sync_status IS DISTINCT FROM 'completed'", _conn))
+                {
+                    cmd.Parameters.AddWithValue("sid", NpgsqlDbType.Uuid, _sessionId);
+                    int rows = cmd.ExecuteNonQuery();
+                    _log(rows > 0 ? "Session marked 'completed'." : "Session already 'completed' (no change).");
+                }
+            }
+            catch (Exception ex)
+            {
+                _lastError = ex.Message;
+                _log("Mark-completed failed: " + ex.Message);
+            }
+        }
+
         // ── Connection plumbing ──────────────────────────────────────────────
         private void EnsureOpen()
         {
@@ -495,6 +555,7 @@ namespace NeuuroBridge
             {
                 try { Flush(); }   // final drain
                 catch (Exception ex) { _log("Final flush error: " + ex.Message); }
+                if (_markCompletedOnDispose) MarkCompletedInternal();   // after the drain, before close
                 ResetConnection();
             }
             _log($"DB uploader stopped. Sent {EegRowsSent} eeg + {BandRowsSent} band + {RawRowsSent} raw rows" +

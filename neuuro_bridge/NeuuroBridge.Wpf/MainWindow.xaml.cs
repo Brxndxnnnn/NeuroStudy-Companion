@@ -35,6 +35,9 @@ namespace NeuuroBridge.Wpf
             _ctl.Connected += (addr, id) => Ui(() => OnConnected(addr, id));
             _ctl.Disconnected += addr => Ui(() => OnDisconnected(addr));
             _ctl.AuthChanged += (ok, detail) => Ui(() => OnAuth(ok, detail));
+            _ctl.StreamingChanged += () => Ui(OnStreamingChanged);
+            _ctl.SessionPrepared += () => Ui(OnSessionPrepared);
+            _ctl.SyncStatusChanged += () => Ui(OnSyncStatusChanged);
             _ctl.SessionStarted += () => Ui(OnSessionStarted);
             _ctl.SessionStopped += () => Ui(OnSessionStopped);
             _ctl.RawFrame += f => Ui(() => LivePanel.PushRaw(f.IntSamples));
@@ -117,6 +120,18 @@ namespace NeuuroBridge.Wpf
 
         private void BtnStartSession_Click(object sender, RoutedEventArgs e)
         {
+            // Warn if the frontend hasn't claimed this session yet — starting now uploads EEG that
+            // no client record is linked to (stray data) until/unless someone pairs the code.
+            if (_ctl.SyncStatus != "claimed")
+            {
+                string s = string.IsNullOrEmpty(_ctl.SyncStatus) ? "unknown" : _ctl.SyncStatus;
+                var r = MessageBox.Show(
+                    $"This session has not been claimed on the web frontend yet (status: {s}).\n\n" +
+                    "Enter the pairing code on the frontend first so the readings link to a client. " +
+                    "Starting now may leave stray, unclaimed data in the database.\n\nStart anyway?",
+                    "Session not claimed", MessageBoxButton.YesNo, MessageBoxImage.Warning);
+                if (r != MessageBoxResult.Yes) return;
+            }
             BtnStartSession.IsEnabled = false;
             bool dbOk = _ctl.StartSession();
             BtnStopSession.IsEnabled = true;
@@ -178,6 +193,10 @@ namespace NeuuroBridge.Wpf
             BtnStopSession.IsEnabled = false;
             BtnCapture.IsEnabled = false;
             RecDot.Visibility = Visibility.Collapsed; TxtElapsed.Text = "";
+            // Clear the session card — a reconnect prepares a fresh session/code.
+            TxtPairing.Text = "—"; TxtSessionId.Text = "—"; TxtStarted.Text = "—";
+            BtnCopyPairing.IsEnabled = false;
+            TxtSyncStatus.Text = "—"; SyncDot.Fill = Mut;
             LivePanel.Clear();
         }
 
@@ -200,12 +219,38 @@ namespace NeuuroBridge.Wpf
             Log(ok ? $"Authenticated ({detail}) — raw EEG unlocked." : $"Authentication failed ({detail}).");
         }
 
-        private void OnSessionStarted()
+        private void OnStreamingChanged()
         {
+            if (_ctl.IsStreaming)
+                Log("Live preview started — signal/contact now, waveform once authenticated. " +
+                    "Press “Start session” to begin uploading to the database.");
+        }
+
+        private void OnSessionPrepared()
+        {
+            // Session row + pairing code now exist (created on connect) — show them so the frontend
+            // can claim before the technician records. Recording is still gated behind Start.
             TxtPairing.Text = _ctl.PairingCode;
             TxtSessionId.Text = _ctl.SessionId;
             TxtStarted.Text = _ctl.SessionStartUtc.ToString("yyyy-MM-dd HH:mm:ss") + " UTC";
             BtnCopyPairing.IsEnabled = true;
+            BtnStartSession.IsEnabled = _ctl.IsConnected;
+            OnSyncStatusChanged();
+        }
+
+        private void OnSyncStatusChanged()
+        {
+            string s = _ctl.SyncStatus;
+            if (string.IsNullOrEmpty(s)) { TxtSyncStatus.Text = "—"; SyncDot.Fill = Mut; return; }
+            TxtSyncStatus.Text = s;
+            // unclaimed = amber (waiting on frontend), claimed = green, completed = muted (done).
+            SyncDot.Fill = s == "claimed" ? Good : s == "completed" ? Mut : Warn;
+        }
+
+        private void OnSessionStarted()
+        {
+            BtnStartSession.IsEnabled = false;
+            BtnStopSession.IsEnabled = true;
         }
 
         private void OnSessionStopped()
@@ -227,7 +272,7 @@ namespace NeuuroBridge.Wpf
             {
                 RecDot.Visibility = Visibility.Visible;
                 RecDot.Opacity = RecDot.Opacity > 0.6 ? 0.25 : 1.0;
-                var el = DateTime.UtcNow - _ctl.SessionStartUtc;
+                var el = DateTime.UtcNow - _ctl.RecordingStartUtc;
                 TxtElapsed.Text = $"REC {(int)el.TotalMinutes:D2}:{el.Seconds:D2}";
             }
             else
@@ -241,7 +286,12 @@ namespace NeuuroBridge.Wpf
             if (db == null) { TxtDbState.Text = "not started"; TxtDbState.Foreground = Mut; }
             else
             {
-                if (!_ctl.SessionActive) { TxtDbState.Text = "stopped"; TxtDbState.Foreground = Mut; }
+                if (!_ctl.SessionActive)
+                {
+                    // Prepared on connect but not recording yet vs. after a stop.
+                    TxtDbState.Text = db.RawRowsSent > 0 ? "stopped" : "ready — not recording";
+                    TxtDbState.Foreground = Mut;
+                }
                 else { TxtDbState.Text = db.ClockAnchored ? "clock-synced — streaming" : "NOT connected"; TxtDbState.Foreground = db.ClockAnchored ? Good : Bad; }
                 TxtRawRows.Text = db.RawRowsSent.ToString("N0");
                 TxtEegRows.Text = db.EegRowsSent.ToString("N0");

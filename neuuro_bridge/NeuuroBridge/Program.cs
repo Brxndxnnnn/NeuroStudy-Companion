@@ -171,10 +171,12 @@ namespace NeuuroBridge
             // 8) Interactive menu
             RunMenu();
 
-            // 7) Shut down
+            // 7) Shut down. Exiting the console ends the session, so mark it 'completed'
+            //    (flag flips sync_status after the final flush — see DbUploader.RequestComplete).
             Print("\nStopping...");
             _svc.StopStream();
-            _db?.Dispose();   // flush the final EEG/band batch before exit
+            _db?.RequestComplete();
+            _db?.Dispose();   // flush the final EEG/band batch, then mark completed, before exit
             _svc.Shutdown();
             Print("Done.");
         }
