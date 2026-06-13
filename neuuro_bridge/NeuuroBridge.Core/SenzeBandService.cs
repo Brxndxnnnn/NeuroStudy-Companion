@@ -52,6 +52,18 @@ namespace NeuuroBridge
         private bool _initialized;
         private volatile bool _isAuthenticated;
 
+        // ── Connect auto-retry ──────────────────────────────────────────────
+        // The Neeuro Windows SDK's first connectBT after a scan routinely times out
+        // (~2 s) on a cold BLE radio; the next attempt succeeds because the stack is
+        // now warm. We retry transparently so the technician only clicks Connect once
+        // and only surface a real failure (OnDisconnected) once retries are exhausted.
+        private volatile bool _connecting;
+        private int _connectAttempts;
+        private string _connectTargetId;
+        private Timer _retryTimer;
+        private const int MaxConnectAttempts = 3;
+        private const int RetryDelayMs = 700;
+
         public bool IsConnected => !string.IsNullOrEmpty(_connectedAddress);
         public bool IsInitialized => _initialized;
         public bool IsAuthenticated => _isAuthenticated;
@@ -112,16 +124,35 @@ namespace NeuuroBridge
         // ── Step 3: Connect ─────────────────────────────────────────────────
         public void Connect(string deviceID)
         {
-            Log("Connecting to " + deviceID + " ...");
-            SenzeBandWindowsInterface.getSBWIHandler().connectBT(deviceID);
+            _connectTargetId = deviceID;
+            _connectAttempts = 0;
+            _connecting = true;
+            AttemptConnect();
+        }
+
+        private void AttemptConnect()
+        {
+            _connectAttempts++;
+            if (_connectAttempts == 1) Log("Connecting to " + _connectTargetId + " ...");
+            else Log("Retrying connect to " + _connectTargetId + " (attempt " + _connectAttempts + "/" + MaxConnectAttempts + ")...");
+            try { SenzeBandWindowsInterface.getSBWIHandler().connectBT(_connectTargetId); }
+            catch (Exception ex) { Log("connectBT error: " + ex.Message); }
         }
 
         public void Disconnect()
         {
+            CancelConnectRetry();
             if (string.IsNullOrEmpty(_connectedAddress)) return;
             SenzeBandWindowsInterface.getSBWIHandler().disconnectBT(_connectedAddress);
             _connectedAddress = "";
             _connectedDeviceID = "";
+        }
+
+        private void CancelConnectRetry()
+        {
+            _connecting = false;
+            var t = _retryTimer; _retryTimer = null;
+            try { t?.Dispose(); } catch { }
         }
 
         // ── Step 4: Stream ──────────────────────────────────────────────────
@@ -310,6 +341,7 @@ namespace NeuuroBridge
         private void ConnectedCallback(string address, string id, bool hasExistingConnection)
         {
             if (hasExistingConnection) return;
+            CancelConnectRetry();   // connect succeeded — stop the retry machinery
             _connectedAddress = address;
             _connectedDeviceID = id;
             _isAuthenticated = false;
@@ -321,6 +353,18 @@ namespace NeuuroBridge
 
         private void ConnectFailCallback(string address)
         {
+            // A cold-radio connect attempt that still has retries left: re-issue
+            // connectBT after a short settle delay and DON'T report failure yet.
+            if (_connecting && _connectAttempts < MaxConnectAttempts)
+            {
+                Log("Connect attempt " + _connectAttempts + " failed; retrying in " + RetryDelayMs + " ms...");
+                var t = new Timer(_ => Post(AttemptConnect), null, RetryDelayMs, Timeout.Infinite);
+                var old = _retryTimer; _retryTimer = t;
+                try { old?.Dispose(); } catch { }
+                return;
+            }
+
+            _connecting = false;
             _connectedAddress = "";
             _connectedDeviceID = "";
             _mcuId = null;
@@ -362,6 +406,7 @@ namespace NeuuroBridge
         public void Shutdown()
         {
             Log("Shutdown()");
+            CancelConnectRetry();
             try
             {
                 if (!string.IsNullOrEmpty(_connectedAddress))
