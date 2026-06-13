@@ -6,6 +6,7 @@ using System.Linq;
 using System.Security.Cryptography;
 using System.Text;
 using System.Threading;
+using System.Threading.Tasks;
 
 namespace NeuuroBridge
 {
@@ -244,12 +245,23 @@ namespace NeuuroBridge
         public void PrepareSession()
         {
             if (_prepared) return;
-            GenerateSession(_connAddress);   // local: session_id + pairing code + created time
+            _prepared = true;
+            GenerateSession(_connAddress);   // local + instant: session_id + pairing code + created time
             SetSyncStatus("unclaimed");      // optimistic; the poll confirms/updates from the DB
             SessionPrepared?.Invoke();       // UI shows the pairing code immediately
-            bool dbOk = StartDbUpload();     // connect + anchor + INSERT unclaimed row + start flush timer
-            _prepared = true;
-            if (dbOk) StartSyncPoll();
+
+            // The DB connect + INSERT is a cold TLS round-trip to the droplet. It MUST NOT run on the
+            // caller's thread: on connect that's the SDK callback/UI thread, and blocking it for the
+            // first (un-pooled) connection starved the BLE connect handshake and made early connects
+            // fail until a retry warmed the pool. Run it off-thread; uploads stay gated behind Start.
+            Task.Run(() =>
+            {
+                try
+                {
+                    if (StartDbUpload()) StartSyncPoll();   // connect + anchor + INSERT unclaimed row + flush timer
+                }
+                catch (Exception ex) { Log?.Invoke("[db] prepare failed: " + ex.Message); }
+            });
         }
 
         /// <summary>
