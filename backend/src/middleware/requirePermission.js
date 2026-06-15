@@ -4,6 +4,9 @@ const requirePermission = (permissionName) => async (req, res, next) => {
     if (!req.user)
         return res.status(401).json({ error: 'Not authenticated.' })
 
+    if (req.user.role === 'admin' || req.user.role === 'superadmin')
+        return next()  // Admins bypass permission checks. TEMP FIX FOR NOW. Will implement more granular admin permissions later.
+
     const { rows } = await pool.query(
         `SELECT 1 FROM role_permissions rp
          JOIN permissions p ON rp.permission_id = p.permission_id
