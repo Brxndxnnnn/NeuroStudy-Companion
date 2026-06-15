@@ -10,7 +10,6 @@ const findByEmail = async (email, client = pool) => {
          WHERE u.email = $1`,
         [email]
     )
-    console.log('findByEmail result:', rows[0])
     return rows[0] ?? null
 }
 

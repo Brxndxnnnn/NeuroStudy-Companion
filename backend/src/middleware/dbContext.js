@@ -4,8 +4,6 @@ const dbContext = async (req, res, next) => {
   const client = await pool.connect();
   req.dbClient = client;
 
-  console.log('DB context initialized for user:', req.user?.email || 'unknown');
-
   try {
     const clinicId = req.user?.clinic_id ?? null;
     const isAdmin = req.user?.role === 'admin' || req.user?.role === 'superadmin' || false;
