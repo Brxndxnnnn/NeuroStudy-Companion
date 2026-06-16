@@ -1,17 +1,6 @@
-import os
-from dotenv import load_dotenv
 from sqlalchemy import create_engine
+from app.core.config import settings
 
-load_dotenv()
-
-DATABASE_URL = (
-    f"postgresql://{os.getenv('DB_USER')}:"
-    f"{os.getenv('DB_PASSWORD')}@"
-    f"{os.getenv('DB_HOST')}:"
-    f"{os.getenv('DB_PORT')}/"
-    f"{os.getenv('DB_NAME')}"
-)
-
-print("Connecting to:", DATABASE_URL)
-
-engine = create_engine(DATABASE_URL)
+# Single engine instance shared across the app.
+# Uses DB_* env vars via settings — matches .env.docker naming.
+engine = create_engine(settings.DATABASE_URL, pool_pre_ping=True)
