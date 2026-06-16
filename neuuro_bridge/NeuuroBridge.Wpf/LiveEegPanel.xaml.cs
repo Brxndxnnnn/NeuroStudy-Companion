@@ -3,7 +3,6 @@ using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Media;
 using System.Windows.Shapes;
-using System.Windows.Threading;
 
 namespace NeuuroBridge.Wpf
 {
@@ -66,10 +65,14 @@ namespace NeuuroBridge.Wpf
             public Line Baseline;
             public TextBlock Label;
             public TextBlock Value;   // null when the lane shows no numeric readout
+
+            // Envelope-smoothed auto-scale so the trace doesn't "breathe" each time a
+            // spike scrolls out of the window. Fast attack, slow release (see DrawWave).
+            public double SmMid, SmRange;
+            public bool ScaleInit;
         }
 
         private Lane[] _eegLanes, _bandLanes, _cogLanes;
-        private readonly DispatcherTimer _render = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(40) };
 
         public LiveEegPanel()
         {
@@ -89,9 +92,17 @@ namespace NeuuroBridge.Wpf
             _cogLanes  = BuildLanes(CogCanvas, CogLabels, withValue: true);
             BuildChannelSelector();
 
-            _render.Tick += (_, __) => { DrawEeg(); DrawBands(); DrawCog(); };
-            Loaded += (_, __) => _render.Start();
-            Unloaded += (_, __) => _render.Stop();
+            // Drive redraws off the composition clock (vsync, ~60 fps and frame-synced)
+            // instead of a 25 fps timer, so the trace scrolls continuously and evenly.
+            Loaded += (_, __) => CompositionTarget.Rendering += OnRendering;
+            Unloaded += (_, __) => CompositionTarget.Rendering -= OnRendering;
+        }
+
+        private void OnRendering(object sender, EventArgs e)
+        {
+            DrawEeg();
+            DrawBands();
+            DrawCog();
         }
 
         private static Lane[] BuildLanes(Canvas canvas, string[] labels, bool withValue)
@@ -217,9 +228,9 @@ namespace NeuuroBridge.Wpf
             for (int s = 0; s < BandSources; s++)
                 for (int b = 0; b < Bands; b++) _bandLatest[s][b] = 0;
             for (int c = 0; c < Cogs; c++) _cogLatest[c] = double.NaN;
-            foreach (var l in _eegLanes) l.Wave.Points = new PointCollection();
-            foreach (var l in _bandLanes) { l.Wave.Points = new PointCollection(); l.Value.Text = "—"; }
-            foreach (var l in _cogLanes) { l.Wave.Points = new PointCollection(); l.Value.Text = "—"; }
+            foreach (var l in _eegLanes) { l.Wave.Points = new PointCollection(); l.ScaleInit = false; }
+            foreach (var l in _bandLanes) { l.Wave.Points = new PointCollection(); l.Value.Text = "—"; l.ScaleInit = false; }
+            foreach (var l in _cogLanes) { l.Wave.Points = new PointCollection(); l.Value.Text = "—"; l.ScaleInit = false; }
         }
 
         // ── Rendering ────────────────────────────────────────────────────────
@@ -246,7 +257,7 @@ namespace NeuuroBridge.Wpf
             {
                 double top = laneH * ch;
                 PositionChrome(_eegLanes[ch], top, laneH, gutter, w);
-                DrawWave(_eegLanes[ch].Wave, snap[ch], count, top, laneH, gutter, w);
+                DrawWave(_eegLanes[ch], snap[ch], count, top, laneH, gutter, w);
             }
         }
 
@@ -261,7 +272,7 @@ namespace NeuuroBridge.Wpf
             {
                 double top = laneH * b;
                 PositionChrome(_bandLanes[b], top, laneH, gutter, w);
-                DrawWave(_bandLanes[b].Wave, Snapshot(_bandHist[src][b], _bandHead, _bandCount), _bandCount, top, laneH, gutter, w);
+                DrawWave(_bandLanes[b], Snapshot(_bandHist[src][b], _bandHead, _bandCount), _bandCount, top, laneH, gutter, w);
                 _bandLanes[b].Value.Text = _bandCount == 0 ? "—" : Fmt(_bandLatest[src][b]);
             }
         }
@@ -276,7 +287,7 @@ namespace NeuuroBridge.Wpf
             {
                 double top = laneH * c;
                 PositionChrome(_cogLanes[c], top, laneH, gutter, w);
-                DrawWave(_cogLanes[c].Wave, Snapshot(_cogHist[c], _cogHead, _cogCount), _cogCount, top, laneH, gutter, w);
+                DrawWave(_cogLanes[c], Snapshot(_cogHist[c], _cogHead, _cogCount), _cogCount, top, laneH, gutter, w);
                 _cogLanes[c].Value.Text = double.IsNaN(_cogLatest[c]) ? "—" : Fmt(_cogLatest[c]);
             }
         }
@@ -309,14 +320,28 @@ namespace NeuuroBridge.Wpf
             }
         }
 
-        /// <summary>Draws one auto-scaled (min..max over the window) trace within a lane.</summary>
-        private static void DrawWave(Polyline wave, double[] data, int count, double top, double laneH, double gutter, double w)
+        /// <summary>Draws one auto-scaled trace within a lane. The min..max window scale is
+        /// envelope-smoothed (fast attack / slow release) so a spike shows immediately but the
+        /// gain doesn't snap — and thus the whole trace doesn't visibly jump — each time that
+        /// spike later scrolls out of the window.</summary>
+        private static void DrawWave(Lane lane, double[] data, int count, double top, double laneH, double gutter, double w)
         {
+            var wave = lane.Wave;
             if (count < 2) { wave.Points = new PointCollection(); return; }
 
             double min = double.MaxValue, max = double.MinValue;
             for (int j = 0; j < count; j++) { double v = data[j]; if (v < min) min = v; if (v > max) max = v; }
-            double range = max - min, mid = (min + max) / 2;
+            double tMid = (min + max) / 2, tRange = max - min;
+
+            if (!lane.ScaleInit) { lane.SmMid = tMid; lane.SmRange = tRange; lane.ScaleInit = true; }
+            else
+            {
+                lane.SmMid += (tMid - lane.SmMid) * 0.2;
+                double aRange = tRange > lane.SmRange ? 0.35 : 0.03;   // grow fast, shrink slow
+                lane.SmRange += (tRange - lane.SmRange) * aRange;
+            }
+
+            double mid = lane.SmMid, range = lane.SmRange;
             double cy = top + laneH / 2, amp = laneH * 0.38;
             double plotW = (w - RightPad) - gutter;
             double stepX = count > 1 ? plotW / (count - 1) : plotW;
@@ -325,6 +350,7 @@ namespace NeuuroBridge.Wpf
             for (int j = 0; j < count; j++)
             {
                 double norm = range > 1e-9 ? (data[j] - mid) / (range / 2) : 0;   // flat → centered
+                if (norm > 1.25) norm = 1.25; else if (norm < -1.25) norm = -1.25; // clamp attack overshoot
                 pts.Add(new Point(gutter + j * stepX, cy - norm * amp));
             }
             wave.Points = pts;

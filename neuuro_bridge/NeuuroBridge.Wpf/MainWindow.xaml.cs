@@ -320,11 +320,12 @@ namespace NeuuroBridge.Wpf
             for (int ch = 0; ch < BridgeController.ChannelCount; ch++)
             {
                 string lbl = BridgeController.ChannelLabels[ch];
+                string loc = ch < BridgeController.ChannelLocations.Length ? BridgeController.ChannelLocations[ch] : "";
                 bool? ok = s.Channels != null && ch < s.Channels.Length ? s.Channels[ch] : (bool?)null;
                 float k = s.Impedance != null && ch < s.Impedance.Length ? s.Impedance[ch] : float.NaN;
                 string contact = ok == null ? "?" : ok.Value ? "OK" : "--";
                 string kTxt = float.IsNaN(k) ? "n/a" : $"{k:F1} kΩ ({SignalQuality.GradeImpedance(k)})";
-                rows.Add($"{lbl,-4} contact={contact,-2}   {kTxt}");
+                rows.Add($"{lbl} · {loc}  —  contact={contact,-2}   {kTxt}");
             }
             ChannelList.ItemsSource = rows;
 

@@ -26,6 +26,8 @@ namespace NeuuroBridge
     {
         public const int ChannelCount = 4;
         public static readonly string[] ChannelLabels = { "Fp1", "Fp2", "T4", "T3" };
+        // Where each electrode sits on the head (10-20 system), in ChannelLabels order.
+        public static readonly string[] ChannelLocations = { "Left forehead", "Right forehead", "Right temple", "Left temple" };
 
         private readonly SenzeBandService _svc = SenzeBandService.Instance;
         private readonly EegProcessor _processor = new EegProcessor();
