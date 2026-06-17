@@ -33,6 +33,19 @@ namespace NeuuroBridge
     }
 
     /// <summary>
+    /// One whole raw-EEG frame queued for the <c>eeg_raw_samples</c> hypertable. Unlike
+    /// the decimated <c>eeg_readings</c> path, every sample is preserved: <see cref="Samples"/>
+    /// is the SDK's int frame ([ch0 block][ch1][ch2][ch3], frame order Fp1,Fp2,T4,T3) and
+    /// <see cref="FrameEnd"/> is DbNow captured at frame arrival — the time of the LAST sample.
+    /// Per-sample timestamps are derived from these at flush time (see CopyRaw).
+    /// </summary>
+    public struct RawEegFrameRecord
+    {
+        public DateTime FrameEnd;
+        public int[] Samples;
+    }
+
+    /// <summary>
     /// Write-only bridge → TimescaleDB sink (TS1.6). Owns the session row, anchors the
     /// bridge clock to DB time once, then streams batched EEG and per-second band powers
     /// via binary COPY. Fire-and-forget: a DB hiccup never blocks or crashes streaming —
@@ -47,9 +60,18 @@ namespace NeuuroBridge
         // lands — see docs/session-data-flow.md "open contract points #1".)
         private const string PlaceholderClientId = "11111111-1111-1111-1111-111111111111";
         private const string PlaceholderUserId   = "22222222-2222-2222-2222-222222222222";
+        // The placeholder client/user reference these so the NOT-NULL FKs
+        // (clients.clinic_id, users.role_id) are satisfied on a fresh DB without the dev seed.
+        private const string PlaceholderClinicId = "33333333-3333-3333-3333-333333333333";
+        private const string PlaceholderRoleId   = "44444444-4444-4444-4444-444444444444";
 
+        private const int ChannelCount    = 4;        // Fp1, Fp2, T4, T3 (SDK frame order)
         private const int FlushIntervalMs = 500;     // batch window for eeg_readings (~2 flushes/s)
-        private const int MaxQueued       = 20000;    // bound each queue so a dead DB can't OOM us
+        private const int MaxQueued       = 20000;    // bound each summary queue so a dead DB can't OOM us
+        // Raw is 250 rows/s, and ML cannot tolerate gaps — give it a much deeper buffer
+        // (~10 min of frames) before it is forced to drop. Durable spool-to-disk is the
+        // planned follow-up that removes the drop entirely.
+        private const int MaxRawFramesQueued = 200000;
 
         private readonly string _connString;
         private readonly Action<string> _log;
@@ -57,15 +79,27 @@ namespace NeuuroBridge
 
         private readonly ConcurrentQueue<EegReadingRow> _eegQ = new ConcurrentQueue<EegReadingRow>();
         private readonly ConcurrentQueue<BandPowerRow>  _bandQ = new ConcurrentQueue<BandPowerRow>();
+        private readonly ConcurrentQueue<RawEegFrameRecord> _rawQ = new ConcurrentQueue<RawEegFrameRecord>();
 
         private NpgsqlConnection _conn;
         private Timer _flushTimer;
         private Guid _sessionId;
+        private int _sampleRate = 250;                  // true hardware rate (NOT EegProcessor.SampleRate=256)
+        // Sample-counter clock (reconstructs a uniform 250 Hz timeline from a monotonic sample
+        // index rather than bursty BLE frame-arrival times — see CopyRaw).
+        private bool _rawAnchored;
+        private long _rawBaseTicks;                     // DB-time ticks of global sample index 0 (µs-aligned)
+        private long _rawSampleIndex;                   // monotonic 250 Hz sample counter
+        private long _rawResyncs;                       // dropped-frame resync events (diagnostic)
         private TimeSpan _clockOffset = TimeSpan.Zero;  // DbNow = UtcNow + offset
         private long _eegRowsSent;
         private long _bandRowsSent;
+        private long _rawRowsSent;
+        private long _rawFramesIn;                      // frames accepted into the raw queue (for reconciliation)
         private long _dropped;
+        private long _rawDropped;
         private volatile bool _disposed;
+        private volatile bool _markCompletedOnDispose;
         private volatile string _lastError;
 
         public DbUploader(string connString, Action<string> log)
@@ -79,11 +113,20 @@ namespace NeuuroBridge
         public bool Streaming { get; private set; }
         public long EegRowsSent  => Interlocked.Read(ref _eegRowsSent);
         public long BandRowsSent => Interlocked.Read(ref _bandRowsSent);
+        public long RawRowsSent  => Interlocked.Read(ref _rawRowsSent);
+        public long RawFramesIn  => Interlocked.Read(ref _rawFramesIn);
         public long Dropped      => Interlocked.Read(ref _dropped);
+        public long RawDropped   => Interlocked.Read(ref _rawDropped);
+        /// <summary>Times the sample-counter clock resynced to arrival time (≈ genuine upstream frame loss).</summary>
+        public long RawResyncs   => Interlocked.Read(ref _rawResyncs);
         public string LastError  => _lastError;
 
         /// <summary>Bridge clock mapped onto the DB timeline (see clock-sync note in the design doc).</summary>
         public DateTime DbNow => DateTime.UtcNow + _clockOffset;
+
+        /// <summary>Maps a UTC instant captured on the bridge clock (e.g. a frame's arrival time)
+        /// onto the DB timeline, applying the same anchor offset as <see cref="DbNow"/>.</summary>
+        public DateTime ToDbTime(DateTime utc) => utc + _clockOffset;
 
         /// <summary>
         /// Opens the connection and anchors the bridge clock to DB time once
@@ -126,6 +169,7 @@ namespace NeuuroBridge
         public bool CreateSession(Guid sessionId, string deviceMac, string pairingCode, int sampleRate, DateTime startUtc)
         {
             _sessionId = sessionId;
+            if (sampleRate == 125 || sampleRate == 250) _sampleRate = sampleRate;
             lock (_ioLock)
             {
                 try
@@ -133,19 +177,38 @@ namespace NeuuroBridge
                     EnsureOpen();
                     using (var tx = _conn.BeginTransaction())
                     {
+                        // Placeholder clinic + role first, so the FK/NOT-NULL constraints on
+                        // clients.clinic_id and users.role_id are always satisfiable.
                         Exec(tx,
-                            "INSERT INTO clients (client_id, name, notes) VALUES (@id, @name, @notes) " +
+                            "INSERT INTO clinics (clinic_id, name) VALUES (@id, @name) " +
+                            "ON CONFLICT (clinic_id) DO NOTHING",
+                            ("id", NpgsqlDbType.Uuid, Guid.Parse(PlaceholderClinicId)),
+                            ("name", NpgsqlDbType.Text, "⟨Unclaimed⟩ — bridge placeholder clinic"));
+
+                        // requires_clinic=false lets the placeholder user keep a NULL clinic_id
+                        // (the enforce_clinic_membership trigger only fires for clinic-requiring roles).
+                        Exec(tx,
+                            "INSERT INTO roles (role_id, name, requires_clinic, description) " +
+                            "VALUES (@id, @name, false, @desc) ON CONFLICT (role_id) DO NOTHING",
+                            ("id", NpgsqlDbType.Uuid, Guid.Parse(PlaceholderRoleId)),
+                            ("name", NpgsqlDbType.Text, "bridge_placeholder"),
+                            ("desc", NpgsqlDbType.Text, "Non-login placeholder role for the bridge system user."));
+
+                        Exec(tx,
+                            "INSERT INTO clients (client_id, clinic_id, name, notes) VALUES (@id, @clinic, @name, @notes) " +
                             "ON CONFLICT (client_id) DO NOTHING",
                             ("id", NpgsqlDbType.Uuid, Guid.Parse(PlaceholderClientId)),
+                            ("clinic", NpgsqlDbType.Uuid, Guid.Parse(PlaceholderClinicId)),
                             ("name", NpgsqlDbType.Text, "⟨Unclaimed⟩ — pending pairing"),
                             ("notes", NpgsqlDbType.Text, "Placeholder client for bridge-created sessions awaiting frontend claim."));
 
                         Exec(tx,
-                            "INSERT INTO users (user_id, email, password_hash, clinic_id, display_name) " +
-                            "VALUES (@id, @email, @pw, NULL, @name) ON CONFLICT (user_id) DO NOTHING",
+                            "INSERT INTO users (user_id, email, password_hash, role_id, clinic_id, display_name) " +
+                            "VALUES (@id, @email, @pw, @role, NULL, @name) ON CONFLICT (user_id) DO NOTHING",
                             ("id", NpgsqlDbType.Uuid, Guid.Parse(PlaceholderUserId)),
                             ("email", NpgsqlDbType.Text, "bridge-system@neurostudy.local"),
                             ("pw", NpgsqlDbType.Text, "!"),   // non-bcrypt sentinel: can never authenticate
+                            ("role", NpgsqlDbType.Uuid, Guid.Parse(PlaceholderRoleId)),
                             ("name", NpgsqlDbType.Text, "Neuuro Bridge (system)"));
 
                         Exec(tx,
@@ -174,6 +237,39 @@ namespace NeuuroBridge
             }
         }
 
+        /// <summary>
+        /// Requests that the session row be marked <c>'completed'</c> when this uploader is
+        /// disposed — i.e. the technician explicitly ended the session via Stop. Deferring it to
+        /// <see cref="Dispose"/> guarantees the status flip happens AFTER the final data flush, so
+        /// a frontend polling sync_status never sees 'completed' before the last batch has landed.
+        /// (Plain app shutdown disposes WITHOUT this, leaving the session in its prior state.)
+        /// </summary>
+        public void RequestComplete() => _markCompletedOnDispose = true;
+
+        /// <summary>
+        /// Reads this session's current <c>sync_status</c> for advisory display only — the frontend
+        /// flips it to <c>'claimed'</c> when it pairs. Read-only and non-blocking: returns null if a
+        /// flush is in progress (skips rather than contend) or on any error, so it can never delay or
+        /// disturb the write path. This is the one place the bridge reads the DB; it never gates uploads.
+        /// </summary>
+        public string TryReadSyncStatus()
+        {
+            if (_disposed || _sessionId == Guid.Empty) return null;
+            if (!Monitor.TryEnter(_ioLock)) return null;   // a flush holds the lock — try again next tick
+            try
+            {
+                EnsureOpen();
+                using (var cmd = new NpgsqlCommand("SELECT sync_status FROM sessions WHERE session_id = @sid", _conn))
+                {
+                    cmd.Parameters.AddWithValue("sid", NpgsqlDbType.Uuid, _sessionId);
+                    var v = cmd.ExecuteScalar();
+                    return v == null || v is DBNull ? null : v.ToString();
+                }
+            }
+            catch (Exception ex) { _lastError = ex.Message; return null; }
+            finally { Monitor.Exit(_ioLock); }
+        }
+
         public void EnqueueEeg(EegReadingRow row)
         {
             if (_disposed || !Streaming) return;
@@ -186,6 +282,21 @@ namespace NeuuroBridge
             if (_disposed || !Streaming) return;
             _bandQ.Enqueue(row);
             Trim(_bandQ, MaxQueued);
+        }
+
+        /// <summary>
+        /// Queue one full raw frame for the eeg_raw_samples table. <paramref name="frameEnd"/>
+        /// must be DbNow captured at frame arrival (the last sample's time); <paramref name="samples"/>
+        /// must be a private copy — the SDK reuses its buffer. Cheap: just enqueue; the per-sample
+        /// expansion + COPY happens on the flush thread.
+        /// </summary>
+        public void EnqueueRaw(DateTime frameEnd, int[] samples)
+        {
+            if (_disposed || !Streaming || samples == null) return;
+            _rawQ.Enqueue(new RawEegFrameRecord { FrameEnd = frameEnd, Samples = samples });
+            Interlocked.Increment(ref _rawFramesIn);
+            while (_rawQ.Count > MaxRawFramesQueued && _rawQ.TryDequeue(out _))
+                Interlocked.Increment(ref _rawDropped);
         }
 
         private void Trim<T>(ConcurrentQueue<T> q, int cap)
@@ -211,16 +322,91 @@ namespace NeuuroBridge
             finally { Monitor.Exit(_ioLock); }
         }
 
-        /// <summary>Drains both queues to the DB. Caller must hold <see cref="_ioLock"/>.</summary>
+        /// <summary>Drains all queues to the DB. Caller must hold <see cref="_ioLock"/>.</summary>
         private void Flush()
         {
-            if (_eegQ.IsEmpty && _bandQ.IsEmpty) return;
+            if (_eegQ.IsEmpty && _bandQ.IsEmpty && _rawQ.IsEmpty) return;
             EnsureOpen();
 
             int eeg = CopyEeg();
             int band = CopyBand();
+            int raw = CopyRaw();
             if (eeg > 0)  Interlocked.Add(ref _eegRowsSent, eeg);
             if (band > 0) Interlocked.Add(ref _bandRowsSent, band);
+            if (raw > 0)  Interlocked.Add(ref _rawRowsSent, raw);
+        }
+
+        /// <summary>
+        /// Expands every queued raw frame into one row per sample and bulk-COPYs them into
+        /// eeg_raw_samples. Per-sample time comes from a monotonic SAMPLE COUNTER
+        /// (base + index/sampleRate), NOT the frame's arrival time: the SenzeBand samples
+        /// continuously at a true 250 Hz but BLE delivers frames in uneven bursts, so anchoring
+        /// to arrival warps the timeline (a 38 s stream spread across 53 s). The counter
+        /// reconstructs a uniform 250 Hz axis with exact, µs-aligned, strictly-increasing
+        /// timestamps (so the (session_id, time) PK can never collide). A drift guard against
+        /// real arrival time resynchronises the counter when frames are GENUINELY lost, inserting
+        /// a real gap rather than silently compressing everything after it. Channel columns map
+        /// the SDK frame order [0]=Fp1 [1]=Fp2 [2]=T4 [3]=T3 onto fp1,fp2,t3,t4 (note t3/t4 swap).
+        /// </summary>
+        private int CopyRaw()
+        {
+            if (_rawQ.IsEmpty) return 0;
+            long periodTicks = TimeSpan.TicksPerSecond / _sampleRate;   // 40000 ticks = 4 ms @ 250 Hz (µs-aligned)
+            // How far real (arrival) time may lead the counter before we treat the shortfall as
+            // genuine frame loss and resync. Must exceed normal burst latency (~1–2 s observed).
+            long maxDriftTicks = 3 * TimeSpan.TicksPerSecond;
+            int n = 0;
+            using (var w = _conn.BeginBinaryImport(
+                "COPY eeg_raw_samples (session_id, time, fp1, fp2, t3, t4) FROM STDIN (FORMAT BINARY)"))
+            {
+                while (_rawQ.TryDequeue(out var f))
+                {
+                    var samples = f.Samples;
+                    if (samples == null || samples.Length < ChannelCount) continue;
+                    int spc = samples.Length / ChannelCount;   // samples per channel in this frame
+
+                    if (!_rawAnchored)
+                    {
+                        // Index 0 = the first sample of the first frame. Snap to µs so every derived
+                        // timestamp is µs-aligned (the DB stores no finer) and uniquely keyed.
+                        _rawBaseTicks = f.FrameEnd.Ticks - (long)(spc - 1) * periodTicks;
+                        _rawBaseTicks -= _rawBaseTicks % (TimeSpan.TicksPerMillisecond / 1000);
+                        _rawSampleIndex = 0;
+                        _rawAnchored = true;
+                    }
+
+                    // If arrival time has run far ahead of where the counter says this frame's last
+                    // sample should sit, frames were genuinely dropped upstream — jump the counter
+                    // forward (insert a real gap) so we don't compress the rest of the timeline.
+                    long counterLastTicks = _rawBaseTicks + (_rawSampleIndex + spc - 1) * periodTicks;
+                    if (f.FrameEnd.Ticks - counterLastTicks > maxDriftTicks)
+                    {
+                        long resyncIndex = (long)Math.Round((double)(f.FrameEnd.Ticks - _rawBaseTicks) / periodTicks) - (spc - 1);
+                        if (resyncIndex > _rawSampleIndex)
+                        {
+                            _rawSampleIndex = resyncIndex;
+                            Interlocked.Increment(ref _rawResyncs);
+                        }
+                    }
+
+                    for (int i = 0; i < spc; i++)
+                    {
+                        long t = _rawBaseTicks + _rawSampleIndex * periodTicks;   // exact, uniform, µs-aligned
+                        _rawSampleIndex++;
+
+                        w.StartRow();
+                        w.Write(_sessionId, NpgsqlDbType.Uuid);
+                        w.Write(new DateTime(t, DateTimeKind.Utc), NpgsqlDbType.TimestampTz);
+                        w.Write(samples[0 * spc + i], NpgsqlDbType.Integer);  // fp1 = frame ch0
+                        w.Write(samples[1 * spc + i], NpgsqlDbType.Integer);  // fp2 = frame ch1
+                        w.Write(samples[3 * spc + i], NpgsqlDbType.Integer);  // t3  = frame ch3
+                        w.Write(samples[2 * spc + i], NpgsqlDbType.Integer);  // t4  = frame ch2
+                        n++;
+                    }
+                }
+                w.Complete();
+            }
+            return n;
         }
 
         private int CopyEeg()
@@ -309,6 +495,32 @@ namespace NeuuroBridge
             else w.Write(v, NpgsqlDbType.Real);
         }
 
+        /// <summary>
+        /// Flips sessions.sync_status to 'completed' for this session. Caller must hold
+        /// <see cref="_ioLock"/>. Best-effort: a DB hiccup is logged, not thrown, so it can never
+        /// break disposal. Only narrows from a non-completed state (won't disturb an already-final row).
+        /// </summary>
+        private void MarkCompletedInternal()
+        {
+            try
+            {
+                EnsureOpen();
+                using (var cmd = new NpgsqlCommand(
+                    "UPDATE sessions SET sync_status = 'completed' " +
+                    "WHERE session_id = @sid AND sync_status IS DISTINCT FROM 'completed'", _conn))
+                {
+                    cmd.Parameters.AddWithValue("sid", NpgsqlDbType.Uuid, _sessionId);
+                    int rows = cmd.ExecuteNonQuery();
+                    _log(rows > 0 ? "Session marked 'completed'." : "Session already 'completed' (no change).");
+                }
+            }
+            catch (Exception ex)
+            {
+                _lastError = ex.Message;
+                _log("Mark-completed failed: " + ex.Message);
+            }
+        }
+
         // ── Connection plumbing ──────────────────────────────────────────────
         private void EnsureOpen()
         {
@@ -343,10 +555,15 @@ namespace NeuuroBridge
             {
                 try { Flush(); }   // final drain
                 catch (Exception ex) { _log("Final flush error: " + ex.Message); }
+                if (_markCompletedOnDispose) MarkCompletedInternal();   // after the drain, before close
                 ResetConnection();
             }
-            _log($"DB uploader stopped. Sent {EegRowsSent} eeg + {BandRowsSent} band rows" +
-                 (Dropped > 0 ? $", dropped {Dropped} (queue overflow)." : "."));
+            _log($"DB uploader stopped. Sent {EegRowsSent} eeg + {BandRowsSent} band + {RawRowsSent} raw rows" +
+                 (Dropped > 0 || RawDropped > 0
+                     ? $", dropped {Dropped} summary / {RawDropped} raw frames (queue overflow)."
+                     : ".") +
+                 $"  Raw frames accepted: {RawFramesIn}" +
+                 (RawResyncs > 0 ? $"; {RawResyncs} timeline resync(s) (upstream frame loss)." : "."));
         }
     }
 }

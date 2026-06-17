@@ -1,0 +1,365 @@
+using System;
+using System.Collections.Generic;
+using System.Linq;
+using System.Windows;
+using System.Windows.Media;
+using System.Windows.Threading;
+
+namespace NeuuroBridge.Wpf
+{
+    public partial class MainWindow : Window
+    {
+        private readonly BridgeController _ctl = new BridgeController();
+        private readonly DispatcherTimer _refresh = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(500) };
+        private DispatcherTimer _scanTimer;
+
+        private static readonly Brush Good = (Brush)new BrushConverter().ConvertFromString("#22C55E");
+        private static readonly Brush Warn = (Brush)new BrushConverter().ConvertFromString("#F59E0B");
+        private static readonly Brush Bad  = (Brush)new BrushConverter().ConvertFromString("#EF4444");
+        private static readonly Brush Mut  = (Brush)new BrushConverter().ConvertFromString("#6B7A90");
+
+        public MainWindow()
+        {
+            InitializeComponent();
+            Loaded += OnLoaded;
+            Closing += OnWindowClosing;
+        }
+
+        private void OnLoaded(object sender, RoutedEventArgs e)
+        {
+            // Controller events marshal to whatever thread is current at Initialize() — the UI
+            // thread here — but guard with Ui() anyway in case a callback slips in off-thread.
+            _ctl.Log += m => Ui(() => AppendLog(m));
+            _ctl.Initialized += () => Ui(() => { Log("SDK initialized."); BtnScan.IsEnabled = true; });
+            _ctl.DevicesChanged += () => Ui(RefreshDeviceList);
+            _ctl.Connected += (addr, id) => Ui(() => OnConnected(addr, id));
+            _ctl.Disconnected += addr => Ui(() => OnDisconnected(addr));
+            _ctl.AuthChanged += (ok, detail) => Ui(() => OnAuth(ok, detail));
+            _ctl.StreamingChanged += () => Ui(OnStreamingChanged);
+            _ctl.SessionPrepared += () => Ui(OnSessionPrepared);
+            _ctl.SyncStatusChanged += () => Ui(OnSyncStatusChanged);
+            _ctl.SessionStarted += () => Ui(OnSessionStarted);
+            _ctl.SessionStopped += () => Ui(OnSessionStopped);
+            _ctl.RawFrame += f => Ui(() => LivePanel.PushRaw(f.IntSamples));
+            _ctl.FftBandPowers += p => Ui(() => LivePanel.PushBands(p));
+
+            _refresh.Tick += (_, __) => RefreshLiveState();
+            _refresh.Start();
+
+            string license = EnvConfig.ResolveLicense();
+            if (string.IsNullOrWhiteSpace(license))
+                Log("WARNING: no NEUURO_LICENSE_KEY in .env — authentication (and raw EEG) will not work.");
+            else
+                Log("License loaded from .env.");
+
+            Log("Initializing SDK…");
+            _ctl.Initialize(license);
+        }
+
+        // ── Buttons ──────────────────────────────────────────────────────────
+        private void BtnScan_Click(object sender, RoutedEventArgs e)
+        {
+            CmbDevices.ItemsSource = null;
+            BtnScan.IsEnabled = false;
+            BtnScan.Content = "Scanning…";
+            Log("Scanning for SenzeBands (12s)… make sure the band is ON.");
+            if (!_ctl.StartScan())
+            {
+                Log("ERROR: scan failed to start (is Bluetooth ON?).");
+                BtnScan.IsEnabled = true; BtnScan.Content = "Scan (12s)";
+                return;
+            }
+            _scanTimer = new DispatcherTimer { Interval = TimeSpan.FromSeconds(12) };
+            _scanTimer.Tick += (_, __) =>
+            {
+                _scanTimer.Stop();
+                _ctl.StopScan();
+                RefreshDeviceList();
+                int n = CmbDevices.Items.Count;
+                Log(n == 0 ? "No devices found. Make sure the band is on and in range." : $"Scan complete — {n} device(s).");
+                BtnScan.IsEnabled = true; BtnScan.Content = "Scan (12s)";
+                BtnConnect.IsEnabled = n > 0;
+                if (n > 0 && CmbDevices.SelectedIndex < 0) CmbDevices.SelectedIndex = 0;
+            };
+            _scanTimer.Start();
+        }
+
+        private void BtnConnect_Click(object sender, RoutedEventArgs e)
+        {
+            if (!(CmbDevices.SelectedItem is SenzeBandDeviceInfo dev)) { Log("Select a device first."); return; }
+            Log($"Connecting to {dev.DeviceName}…");
+            BtnConnect.IsEnabled = false;
+            ConnPill.Text = "Connecting…"; ConnDot.Fill = Warn;
+            _ctl.Connect(dev.DeviceID);
+        }
+
+        private void BtnReauth_Click(object sender, RoutedEventArgs e)
+        {
+            Log("Re-attempting authentication…");
+            _ctl.Authenticate(force: true);
+        }
+
+        private void BtnDisconnect_Click(object sender, RoutedEventArgs e)
+        {
+            if (_ctl.SessionActive &&
+                MessageBox.Show("A session is uploading. Stop it and disconnect?", "Disconnect",
+                    MessageBoxButton.YesNo, MessageBoxImage.Warning) != MessageBoxResult.Yes)
+                return;
+            Log("Disconnecting…");
+            _ctl.Disconnect();
+        }
+
+        private void BtnCopyPairing_Click(object sender, RoutedEventArgs e)
+        {
+            if (!string.IsNullOrEmpty(_ctl.PairingCode))
+            {
+                try { Clipboard.SetText(_ctl.PairingCode); Log($"Pairing code {_ctl.PairingCode} copied to clipboard."); }
+                catch (Exception ex) { Log("Copy failed: " + ex.Message); }
+            }
+        }
+
+        private void BtnStartSession_Click(object sender, RoutedEventArgs e)
+        {
+            // Warn if the frontend hasn't claimed this session yet — starting now uploads EEG that
+            // no client record is linked to (stray data) until/unless someone pairs the code.
+            if (_ctl.SyncStatus != "claimed")
+            {
+                string s = string.IsNullOrEmpty(_ctl.SyncStatus) ? "unknown" : _ctl.SyncStatus;
+                var r = MessageBox.Show(
+                    $"This session has not been claimed on the web frontend yet (status: {s}).\n\n" +
+                    "Enter the pairing code on the frontend first so the readings link to a client. " +
+                    "Starting now may leave stray, unclaimed data in the database.\n\nStart anyway?",
+                    "Session not claimed", MessageBoxButton.YesNo, MessageBoxImage.Warning);
+                if (r != MessageBoxResult.Yes) return;
+            }
+            BtnStartSession.IsEnabled = false;
+            bool dbOk = _ctl.StartSession();
+            BtnStopSession.IsEnabled = true;
+            Log(dbOk ? "Session started — uploading to database." :
+                       "Session started — DB unreachable, NOT uploading (capture still works).");
+        }
+
+        private void BtnStopSession_Click(object sender, RoutedEventArgs e)
+        {
+            BtnStopSession.IsEnabled = false;
+            _ctl.StopSession();   // flushes + closes upload; device stays connected
+        }
+
+        private void BtnCapture_Click(object sender, RoutedEventArgs e)
+        {
+            if (!_ctl.IsCapturing)
+            {
+                _ctl.StartCapture();
+                BtnCapture.Content = "Stop & save";
+                TxtCapture.Text = "capturing…";
+            }
+            else
+            {
+                int frames = _ctl.StopCapture();
+                string path = _ctl.WriteCsv();
+                BtnCapture.Content = "Start capture";
+                TxtCapture.Text = path == null ? "no frames captured" : $"saved {frames} frames";
+                if (path != null) Log("Capture saved → " + path);
+            }
+        }
+
+        // ── Controller event handlers ────────────────────────────────────────
+        private void OnConnected(string addr, string id)
+        {
+            ConnPill.Text = "Connected"; ConnDot.Fill = Good;
+            Log($"Connected to {id} @ {addr}");
+            // Lock scanning/connecting while a device is held.
+            BtnScan.IsEnabled = false;
+            BtnConnect.IsEnabled = false;
+            CmbDevices.IsEnabled = false;
+            BtnDisconnect.IsEnabled = true;
+            BtnReauth.IsEnabled = true;
+            BtnStartSession.IsEnabled = true;
+            BtnCapture.IsEnabled = true;
+        }
+
+        private void OnDisconnected(string addr)
+        {
+            ConnPill.Text = "Disconnected"; ConnDot.Fill = Bad;
+            AuthDot.Fill = Mut; TxtAuth.Text = "not authenticated";
+            Log("Disconnected (" + addr + ")");
+            // Back to a scan/connect-ready state; reconnect without rescanning if devices remain.
+            BtnScan.IsEnabled = true;
+            CmbDevices.IsEnabled = true;
+            BtnConnect.IsEnabled = CmbDevices.Items.Count > 0;
+            BtnDisconnect.IsEnabled = false;
+            BtnReauth.IsEnabled = false;
+            BtnStartSession.IsEnabled = false;
+            BtnStopSession.IsEnabled = false;
+            BtnCapture.IsEnabled = false;
+            RecDot.Visibility = Visibility.Collapsed; TxtElapsed.Text = "";
+            // Clear the session card — a reconnect prepares a fresh session/code.
+            TxtPairing.Text = "—"; TxtSessionId.Text = "—"; TxtStarted.Text = "—";
+            BtnCopyPairing.IsEnabled = false;
+            TxtSyncStatus.Text = "—"; SyncDot.Fill = Mut;
+            LivePanel.Clear();
+        }
+
+        private void OnWindowClosing(object sender, System.ComponentModel.CancelEventArgs e)
+        {
+            if (_ctl.SessionActive &&
+                MessageBox.Show("A session is still uploading. Stop it and exit?", "Exit",
+                    MessageBoxButton.YesNo, MessageBoxImage.Warning) != MessageBoxResult.Yes)
+            {
+                e.Cancel = true;
+                return;
+            }
+            try { _ctl.Dispose(); } catch { }
+        }
+
+        private void OnAuth(bool ok, string detail)
+        {
+            AuthDot.Fill = ok ? Good : Bad;
+            TxtAuth.Text = ok ? "authenticated" : "auth failed";
+            Log(ok ? $"Authenticated ({detail}) — raw EEG unlocked." : $"Authentication failed ({detail}).");
+        }
+
+        private void OnStreamingChanged()
+        {
+            if (_ctl.IsStreaming)
+                Log("Live preview started — signal/contact now, waveform once authenticated. " +
+                    "Press “Start session” to begin uploading to the database.");
+        }
+
+        private void OnSessionPrepared()
+        {
+            // Session row + pairing code now exist (created on connect) — show them so the frontend
+            // can claim before the technician records. Recording is still gated behind Start.
+            TxtPairing.Text = _ctl.PairingCode;
+            TxtSessionId.Text = _ctl.SessionId;
+            TxtStarted.Text = _ctl.SessionStartUtc.ToString("yyyy-MM-dd HH:mm:ss") + " UTC";
+            BtnCopyPairing.IsEnabled = true;
+            BtnStartSession.IsEnabled = _ctl.IsConnected;
+            OnSyncStatusChanged();
+        }
+
+        private void OnSyncStatusChanged()
+        {
+            string s = _ctl.SyncStatus;
+            if (string.IsNullOrEmpty(s)) { TxtSyncStatus.Text = "—"; SyncDot.Fill = Mut; return; }
+            TxtSyncStatus.Text = s;
+            // unclaimed = amber (waiting on frontend), claimed = green, completed = muted (done).
+            SyncDot.Fill = s == "claimed" ? Good : s == "completed" ? Mut : Warn;
+        }
+
+        private void OnSessionStarted()
+        {
+            BtnStartSession.IsEnabled = false;
+            BtnStopSession.IsEnabled = true;
+        }
+
+        private void OnSessionStopped()
+        {
+            // Device stays connected — allow starting a fresh session.
+            BtnStartSession.IsEnabled = _ctl.IsConnected;
+            BtnStopSession.IsEnabled = false;
+            var db = _ctl.Db;
+            Log(db != null
+                ? $"Session stopped — {db.RawRowsSent:N0} raw rows uploaded this session."
+                : "Session stopped.");
+        }
+
+        // ── Periodic refresh ─────────────────────────────────────────────────
+        private void RefreshLiveState()
+        {
+            // Recording indicator + elapsed (blink the dot for a "live" feel).
+            if (_ctl.SessionActive)
+            {
+                RecDot.Visibility = Visibility.Visible;
+                RecDot.Opacity = RecDot.Opacity > 0.6 ? 0.25 : 1.0;
+                var el = DateTime.UtcNow - _ctl.RecordingStartUtc;
+                TxtElapsed.Text = $"REC {(int)el.TotalMinutes:D2}:{el.Seconds:D2}";
+            }
+            else
+            {
+                RecDot.Visibility = Visibility.Collapsed;
+                TxtElapsed.Text = "";
+            }
+
+            // DB status
+            var db = _ctl.Db;
+            if (db == null) { TxtDbState.Text = "not started"; TxtDbState.Foreground = Mut; }
+            else
+            {
+                if (!_ctl.SessionActive)
+                {
+                    // Prepared on connect but not recording yet vs. after a stop.
+                    TxtDbState.Text = db.RawRowsSent > 0 ? "stopped" : "ready — not recording";
+                    TxtDbState.Foreground = Mut;
+                }
+                else { TxtDbState.Text = db.ClockAnchored ? "clock-synced — streaming" : "NOT connected"; TxtDbState.Foreground = db.ClockAnchored ? Good : Bad; }
+                TxtRawRows.Text = db.RawRowsSent.ToString("N0");
+                TxtEegRows.Text = db.EegRowsSent.ToString("N0");
+                TxtBandRows.Text = db.BandRowsSent.ToString("N0");
+                var extra = new List<string>();
+                if (db.RawResyncs > 0) extra.Add($"{db.RawResyncs} resync(s)");
+                long drops = db.Dropped + db.RawDropped;
+                if (drops > 0) extra.Add($"{drops} dropped");
+                extra.Add($"{db.RawFramesIn} frames in");
+                TxtDbExtra.Text = string.Join("  ·  ", extra);
+                TxtDbError.Text = string.IsNullOrEmpty(db.LastError) ? "" : "last error: " + db.LastError;
+            }
+
+            // Signal & contact
+            var s = _ctl.Snapshot();
+            int q = SignalQuality.Compute(s.SignalReady, s.Channels);
+            TxtQuality.Text = $"{q}/100 · {SignalQuality.Label(q)}";
+            BarQuality.Value = q;
+            BarQuality.Foreground = q >= 75 ? Good : q >= 40 ? Warn : Bad;
+            TxtSignal.Text = s.SignalReady == null ? "(no data)" : s.SignalReady.Value ? "READY" : "settling…";
+            TxtBattery.Text = s.Battery == null ? "(no data)" : s.Battery + "%";
+            TxtHeartRate.Text = s.HeartRate == null ? "—" : s.HeartRate.Value + " bpm";
+            TxtSpo2.Text = s.Spo2 == null ? "—" : s.Spo2.Value + " %";
+
+            var rows = new List<string>();
+            for (int ch = 0; ch < BridgeController.ChannelCount; ch++)
+            {
+                string lbl = BridgeController.ChannelLabels[ch];
+                string loc = ch < BridgeController.ChannelLocations.Length ? BridgeController.ChannelLocations[ch] : "";
+                bool? ok = s.Channels != null && ch < s.Channels.Length ? s.Channels[ch] : (bool?)null;
+                float k = s.Impedance != null && ch < s.Impedance.Length ? s.Impedance[ch] : float.NaN;
+                string contact = ok == null ? "?" : ok.Value ? "OK" : "--";
+                string kTxt = float.IsNaN(k) ? "n/a" : $"{k:F1} kΩ ({SignalQuality.GradeImpedance(k)})";
+                rows.Add($"{lbl} · {loc}  —  contact={contact,-2}   {kTxt}");
+            }
+            ChannelList.ItemsSource = rows;
+
+            LivePanel.SetCognitive(s.Attention, s.Relaxation, s.MentalWorkload);
+        }
+
+        private void RefreshDeviceList()
+        {
+            var selectedId = (CmbDevices.SelectedItem as SenzeBandDeviceInfo)?.DeviceID;
+            var devices = _ctl.SnapshotDevices();
+            CmbDevices.ItemsSource = null;
+            CmbDevices.ItemsSource = devices;
+            if (selectedId != null)
+            {
+                var match = devices.FirstOrDefault(d => d.DeviceID == selectedId);
+                if (match != null) CmbDevices.SelectedItem = match;
+            }
+            else if (devices.Count > 0 && CmbDevices.SelectedIndex < 0)
+                CmbDevices.SelectedIndex = 0;
+        }
+
+        // ── Helpers ──────────────────────────────────────────────────────────
+        private void Ui(Action a)
+        {
+            if (Dispatcher.CheckAccess()) a();
+            else Dispatcher.BeginInvoke(a);
+        }
+
+        private void AppendLog(string m)
+        {
+            LogBox.AppendText($"[{DateTime.Now:HH:mm:ss}] {m}{Environment.NewLine}");
+            LogBox.ScrollToEnd();
+        }
+
+        private void Log(string m) => AppendLog(m);
+    }
+}

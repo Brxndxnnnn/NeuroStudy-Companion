@@ -171,10 +171,12 @@ namespace NeuuroBridge
             // 8) Interactive menu
             RunMenu();
 
-            // 7) Shut down
+            // 7) Shut down. Exiting the console ends the session, so mark it 'completed'
+            //    (flag flips sync_status after the final flush — see DbUploader.RequestComplete).
             Print("\nStopping...");
             _svc.StopStream();
-            _db?.Dispose();   // flush the final EEG/band batch before exit
+            _db?.RequestComplete();
+            _db?.Dispose();   // flush the final EEG/band batch, then mark completed, before exit
             _svc.Shutdown();
             Print("Done.");
         }
@@ -318,8 +320,9 @@ namespace NeuuroBridge
             if (_db == null) return "(not started)";
             string clock = _db.ClockAnchored ? "clock-synced" : "NOT connected";
             string err = string.IsNullOrEmpty(_db.LastError) ? "" : $"  last error: {_db.LastError}";
-            string drop = _db.Dropped > 0 ? $", {_db.Dropped} dropped" : "";
-            return $"{clock} — {_db.EegRowsSent} eeg + {_db.BandRowsSent} band rows sent{drop}{err}";
+            long drops = _db.Dropped + _db.RawDropped;
+            string drop = drops > 0 ? $", {drops} dropped" : "";
+            return $"{clock} — {_db.EegRowsSent} eeg + {_db.BandRowsSent} band + {_db.RawRowsSent} raw rows sent{drop}{err}";
         }
 
         // ── SDK callbacks ───────────────────────────────────────────────────
@@ -359,6 +362,13 @@ namespace NeuuroBridge
                     lock (_captureLock)
                         _captureBuf.Add((ms, fn, (int[])frame.IntSamples.Clone()));
                 }
+
+                // Full-resolution raw → eeg_raw_samples: every frame, every sample (no decimation).
+                // Anchor each frame to its TRUE arrival instant (captured synchronously in the SDK
+                // callback), mapped onto the DB clock — not DbNow read here on the pooled handler,
+                // which lagged/jittered. frame.IntSamples is already a private clone (see OnRawInt).
+                if (_db != null && _db.Streaming)
+                    _db.EnqueueRaw(_db.ToDbTime(frame.ArrivalUtc), frame.IntSamples);
 
                 // TS1.6: snapshot one eeg_readings row per ~500 ms window (batched, not per frame).
                 if (_db != null && _db.Streaming && _dbEegThrottle.ElapsedMilliseconds >= 500)

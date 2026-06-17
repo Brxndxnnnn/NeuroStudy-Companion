@@ -1,0 +1,38 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net48</TargetFramework>
+    <!-- SenzeBandCore.dll is native x64 (mixed-mode), so everything that loads it must be x64. -->
+    <Platforms>x64</Platforms>
+    <PlatformTarget>x64</PlatformTarget>
+    <LangVersion>latest</LangVersion>
+    <RootNamespace>NeuuroBridge</RootNamespace>
+    <AssemblyName>NeuuroBridge.Core</AssemblyName>
+    <Nullable>disable</Nullable>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <!-- PostgreSQL/TimescaleDB client. 6.0.x is the last line targeting netstandard2.0,
+         so it runs on .NET Framework 4.8. -->
+    <PackageReference Include="Npgsql" Version="6.0.13" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- Neeuro SenzeBand SDK (STANDARD tier). DLLs live in lib\. -->
+    <!-- SenzeBandSDK is managed; it flows to consumers' output as a normal reference. -->
+    <Reference Include="SenzeBandSDK">
+      <HintPath>lib\SenzeBandSDK.dll</HintPath>
+      <Private>true</Private>
+    </Reference>
+    <!-- SenzeBandCore is the native x64 (mixed-mode) backend. Referenced for compile only
+         (Private=false), then shipped as Content so it copies to EVERY consuming project's
+         output dir (console, WPF) — a plain reference's native dependency does NOT flow
+         transitively through a ProjectReference. -->
+    <Reference Include="SenzeBandCore">
+      <HintPath>lib\SenzeBandCore.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Content Include="lib\SenzeBandCore.dll" Link="SenzeBandCore.dll" CopyToOutputDirectory="PreserveNewest" Visible="false" />
+  </ItemGroup>
+
+</Project>

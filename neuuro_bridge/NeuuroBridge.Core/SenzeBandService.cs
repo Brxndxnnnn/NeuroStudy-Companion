@@ -23,6 +23,13 @@ namespace NeuuroBridge
         public int[] IntSamples { get; set; }
         /// <summary>Raw float samples in microvolts (assignRawDataFloatDelegate).</summary>
         public float[] FloatSamples { get; set; }
+        /// <summary>
+        /// UTC instant the SDK delivered this frame, captured SYNCHRONOUSLY on the SDK
+        /// callback thread — not when a thread-pool handler later runs it. The per-sample
+        /// timeline is anchored to this so it reflects true delivery timing rather than
+        /// dispatch jitter (which previously stretched a 38 s stream across 53 s).
+        /// </summary>
+        public DateTime ArrivalUtc { get; set; }
     }
 
     /// <summary>
@@ -45,6 +52,18 @@ namespace NeuuroBridge
         private bool _initialized;
         private volatile bool _isAuthenticated;
 
+        // ── Connect auto-retry ──────────────────────────────────────────────
+        // The Neeuro Windows SDK's first connectBT after a scan routinely times out
+        // (~2 s) on a cold BLE radio; the next attempt succeeds because the stack is
+        // now warm. We retry transparently so the technician only clicks Connect once
+        // and only surface a real failure (OnDisconnected) once retries are exhausted.
+        private volatile bool _connecting;
+        private int _connectAttempts;
+        private string _connectTargetId;
+        private Timer _retryTimer;
+        private const int MaxConnectAttempts = 3;
+        private const int RetryDelayMs = 700;
+
         public bool IsConnected => !string.IsNullOrEmpty(_connectedAddress);
         public bool IsInitialized => _initialized;
         public bool IsAuthenticated => _isAuthenticated;
@@ -59,6 +78,7 @@ namespace NeuuroBridge
         public event Action<bool[]> OnChannelStatus;
         public event Action<float[]> OnImpedance;                      // per-electrode impedance (Fp1, Fp2, T4, T3)
         public event Action<string> OnBattery;
+        public event Action<int[]> OnSpo2HeartRate;                    // PPG-derived [SpO2, heartRate] (order/validity UNVERIFIED)
         public event Action<RawEegFrame> OnRawEeg;                     // raw ADC EEG (DC offset present)
         public event Action<float[]> OnFilteredEeg;                    // band-passed, zero-centered EEG
         public event Action<bool, string> OnAuthStatus;               // STANDARD-tier server auth (ok, detail)
@@ -105,16 +125,35 @@ namespace NeuuroBridge
         // ── Step 3: Connect ─────────────────────────────────────────────────
         public void Connect(string deviceID)
         {
-            Log("Connecting to " + deviceID + " ...");
-            SenzeBandWindowsInterface.getSBWIHandler().connectBT(deviceID);
+            _connectTargetId = deviceID;
+            _connectAttempts = 0;
+            _connecting = true;
+            AttemptConnect();
+        }
+
+        private void AttemptConnect()
+        {
+            _connectAttempts++;
+            if (_connectAttempts == 1) Log("Connecting to " + _connectTargetId + " ...");
+            else Log("Retrying connect to " + _connectTargetId + " (attempt " + _connectAttempts + "/" + MaxConnectAttempts + ")...");
+            try { SenzeBandWindowsInterface.getSBWIHandler().connectBT(_connectTargetId); }
+            catch (Exception ex) { Log("connectBT error: " + ex.Message); }
         }
 
         public void Disconnect()
         {
+            CancelConnectRetry();
             if (string.IsNullOrEmpty(_connectedAddress)) return;
             SenzeBandWindowsInterface.getSBWIHandler().disconnectBT(_connectedAddress);
             _connectedAddress = "";
             _connectedDeviceID = "";
+        }
+
+        private void CancelConnectRetry()
+        {
+            _connecting = false;
+            var t = _retryTimer; _retryTimer = null;
+            try { t?.Dispose(); } catch { }
         }
 
         // ── Step 4: Stream ──────────────────────────────────────────────────
@@ -166,7 +205,8 @@ namespace NeuuroBridge
             sbci.assignDirectionDelegate(_ => { });
             sbci.assignImpedanceDelegate(v => Post(() => OnImpedance?.Invoke(v)));
             sbci.assignCalParamsDelegate(_ => { });
-            sbci.assignSPO2HeartRateDelegate(_ => { });
+            // SDK reuses its buffer; clone synchronously before the pooled handler (same race as raw).
+            sbci.assignSPO2HeartRateDelegate(v => { var c = (int[])v.Clone(); Post(() => OnSpo2HeartRate?.Invoke(c)); });
             sbci.assignRawData200msDelegate(_ => { });
             sbci.assignFilteredDataDelegate(OnFiltered);   // band-passed, zero-centered EEG
             sbci.assignPPGDataDelegate(_ => { });     // must be assigned: PPG packets NPE grabCharacteristic otherwise
@@ -268,14 +308,27 @@ namespace NeuuroBridge
         }
 
         // ── Raw / filtered EEG callbacks ────────────────────────────────────
+        // The SDK reuses its sample buffer for the next frame, and Post() runs the handler
+        // LATER on a thread-pool thread — so the buffer MUST be cloned and the arrival time
+        // captured here, synchronously, before we hand off. Cloning on the pooled handler
+        // (as before) raced the SDK overwriting the buffer.
         private void OnRawInt(int[] data)
-            => Post(() => OnRawEeg?.Invoke(new RawEegFrame { IntSamples = data }));
+        {
+            var frame = new RawEegFrame { IntSamples = (int[])data.Clone(), ArrivalUtc = DateTime.UtcNow };
+            Post(() => OnRawEeg?.Invoke(frame));
+        }
 
         private void OnRawFloat(float[] data)
-            => Post(() => OnRawEeg?.Invoke(new RawEegFrame { FloatSamples = data }));
+        {
+            var frame = new RawEegFrame { FloatSamples = (float[])data.Clone(), ArrivalUtc = DateTime.UtcNow };
+            Post(() => OnRawEeg?.Invoke(frame));
+        }
 
         private void OnFiltered(float[] data)
-            => Post(() => OnFilteredEeg?.Invoke(data));
+        {
+            var copy = (float[])data.Clone();   // same buffer-reuse race as raw; clone before the pooled handler
+            Post(() => OnFilteredEeg?.Invoke(copy));
+        }
 
         // ── Scan callbacks ──────────────────────────────────────────────────
         private void ReceiveScanResult(ScannedDeviceClass device, bool addDevice)
@@ -290,6 +343,7 @@ namespace NeuuroBridge
         private void ConnectedCallback(string address, string id, bool hasExistingConnection)
         {
             if (hasExistingConnection) return;
+            CancelConnectRetry();   // connect succeeded — stop the retry machinery
             _connectedAddress = address;
             _connectedDeviceID = id;
             _isAuthenticated = false;
@@ -301,6 +355,18 @@ namespace NeuuroBridge
 
         private void ConnectFailCallback(string address)
         {
+            // A cold-radio connect attempt that still has retries left: re-issue
+            // connectBT after a short settle delay and DON'T report failure yet.
+            if (_connecting && _connectAttempts < MaxConnectAttempts)
+            {
+                Log("Connect attempt " + _connectAttempts + " failed; retrying in " + RetryDelayMs + " ms...");
+                var t = new Timer(_ => Post(AttemptConnect), null, RetryDelayMs, Timeout.Infinite);
+                var old = _retryTimer; _retryTimer = t;
+                try { old?.Dispose(); } catch { }
+                return;
+            }
+
+            _connecting = false;
             _connectedAddress = "";
             _connectedDeviceID = "";
             _mcuId = null;
@@ -342,6 +408,7 @@ namespace NeuuroBridge
         public void Shutdown()
         {
             Log("Shutdown()");
+            CancelConnectRetry();
             try
             {
                 if (!string.IsNullOrEmpty(_connectedAddress))
