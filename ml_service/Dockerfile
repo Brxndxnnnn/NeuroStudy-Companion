@@ -2,6 +2,9 @@ FROM python:3.11-slim
 
 WORKDIR /app
 
+# Set PYTHONPATH so that 'from app.x import y' resolves correctly
+ENV PYTHONPATH=/app
+
 # Install Python dependencies first (better caching)
 COPY requirements.txt .
 
