@@ -169,4 +169,32 @@ router.patch(
     sessionController.endSession
 )
 
+/**
+ * @openapi
+ * /api/sessions/{session_id}/results:
+ *   get:
+ *     summary: Retrieve the results for a specific session
+ *     description: |
+ *       This endpoint allows you to retrieve the results for a specific session. You must provide the session_id in the URL.
+ * 
+ *       **Note**: The `session_id` must be a valid UUID. If the provided ID does not exist in the database, an error will be returned.
+ *     tags: [Sessions]
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - in: path
+ *         name: session_id
+ *         required: true
+ *     responses:
+ *       200:
+ *         description: Results retrieved successfully
+ *       404:
+ *         description: Could not find session with the provided session_id
+ */
+router.get(
+    '/:session_id/results',
+    requirePermission(PERMS.SESSIONS_READ_OWN_CLINIC),
+    sessionController.getSessionResult
+)
+
 export default router
