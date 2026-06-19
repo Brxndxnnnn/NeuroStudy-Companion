@@ -132,7 +132,6 @@ const logout = catchAsync(async (req, res) => {
 })
 
 const me = catchAsync(async (req, res) => {
-    console.log('req.user:', JSON.stringify(req.user))
     const user = await userModel.findById(req.user.sub, req.dbClient)
     if (!user) return res.status(404).json({ error: 'User not found.' })
     res.json(user)

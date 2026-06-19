@@ -36,7 +36,13 @@ INSERT INTO permissions (name, description) VALUES
     -- Clinics
     ('clinics:read:own',            'Read own clinic record'),
     ('clinics:read:all',            'Read all clinic records'),
-    ('clinics:write:all',           'Create and update clinic records');
+    ('clinics:write:all',           'Create and update clinic records'),
+
+    -- Events
+    ('events:read:own_clinic',      'Read events for own clinic sessions'),
+    ('events:read:all',             'Read all events'),
+    ('events:write:own_clinic',     'Create events for own clinic sessions'),
+    ('events:write:all',            'Create events for any session');
 
 -- ─── Seed: Role → Permission assignments ──────────────────────────────────────
 INSERT INTO role_permissions (role_id, permission_id)
@@ -52,7 +58,9 @@ WHERE r.name = 'admin'
     'users:write:all',
     'insights:read:all',
     'clinics:read:all',
-    'clinics:write:all'
+    'clinics:write:all',
+    'events:read:all',
+    'events:write:all'
 );
 
 INSERT INTO role_permissions (role_id, permission_id)
@@ -65,7 +73,9 @@ WHERE r.name = 'technician'
     'clients:read:own_clinic',
     'clients:write:own_clinic',
     'insights:read:own_clinic',
-    'clinics:read:own'
+    'clinics:read:own',
+    'events:read:own_clinic',
+    'events:write:own_clinic'
 );
 
 -- ─── Clinics ─────────────────────────────────────────────────────────────────
