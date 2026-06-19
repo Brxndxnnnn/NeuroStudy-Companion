@@ -7,6 +7,16 @@ const listSessions = catchAsync(async (req, res) => {
     return res.json(sessions)
 })
 
+// ── GET /api/sessions/:session_id ─────────────────────────────────────────────
+const getSessionById = catchAsync(async (req, res) => {
+    const { session_id } = req.params
+    const session = await sessionModel.findById(session_id, req.dbClient)
+    if (!session || session.length === 0) {
+        return res.status(404).json({ error: 'Session not found' })
+    }
+    return res.json(session[0])
+})
+
 // ── PATCH /api/sessions/pair ────────────────────────────────────────────────────
 const pairSessions = catchAsync(async (req, res) => {
     const { pairing_code, client_id } = req.body
@@ -32,5 +42,47 @@ const pairSessions = catchAsync(async (req, res) => {
     return res.status(200).json(session)
 })
 
+// ── PATCH /api/sessions/:session_id/start ────────────────────────────────────────────
+const startSession = catchAsync(async (req, res) => {
+    const { session_id } = req.params
+    const session = await sessionModel.startSession(session_id, req.dbClient).then(session => {
+        return session
+    }).catch(err => {
+        if (err.code === '22P02') { // invalid input syntax for uuid
+            if (err.position === '8') // session_id
+                return res.status(400).json({ error: 'Invalid session_id format' })
+        }
+        return res.status(500).json({ error: 'Internal server error' })
+    })
+    if (!session) {
+        return res.status(404).json({ error: 'Session not found' })
+    }
+    return res.json(session)
+})
 
-export default { listSessions, pairSessions }
+// ── PATCH /api/sessions/:session_id/end ────────────────────────────────────────────
+const endSession = catchAsync(async (req, res) => {
+    const { session_id } = req.params
+    const session = await sessionModel.endSession(session_id, req.dbClient).catch(err => {
+        if (err.code === '22P02') { // invalid input syntax for uuid
+            if (err.position === '8') // session_id
+                return res.status(400).json({ error: 'Invalid session_id format' })
+        }
+        return res.status(500).json({ error: 'Internal server error' })
+    })
+    if (!session) {
+        return res.status(404).json({ error: 'Session not found' })
+    }
+    return res.json(session)
+})
+
+// ── GET /api/sessions/:session_id/results ────────────────────────────────────────────
+const getSessionResult = catchAsync(async (req, res) => {
+    const { session_id } = req.params
+    const results = await sessionModel.getSessionResult(session_id, req.dbClient)
+    if (!results || results.length === 0) {
+        return res.status(404).json({ error: 'No results found for the given session_id' })
+    }
+    return res.json(results)
+})
+export default { listSessions, getSessionById, pairSessions, startSession, endSession, getSessionResult}
