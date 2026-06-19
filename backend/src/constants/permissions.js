@@ -24,6 +24,12 @@ const PERMS = Object.freeze({
   CLINICS_READ_OWN:  'clinics:read:own',
   CLINICS_READ_ALL:  'clinics:read:all',
   CLINICS_WRITE_ALL: 'clinics:write:all',
+
+  // Events
+  EVENTS_READ_OWN_CLINIC: 'events:read:own_clinic',
+  EVENTS_READ_ALL:        'events:read:all',
+  EVENTS_WRITE_OWN_CLINIC: 'events:write:own_clinic',
+  EVENTS_WRITE_ALL:        'events:write:all',
 })
 
 export default PERMS
