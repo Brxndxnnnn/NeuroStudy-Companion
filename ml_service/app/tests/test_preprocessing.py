@@ -211,6 +211,19 @@ class TestBandpass:
             f"Alpha band attenuated too much: in={rms_in:.2f}, out={rms_out:.2f}"
         )
 
+    def test_bandpass_on_real_session(self, db_conn, session_id):
+        """Real data: apply bandpass to all four real channels, show before/after RMS."""
+        from app.data_access.queries import fetch_raw_samples
+        samples = fetch_raw_samples(db_conn, session_id)[:1000]
+        print(f"\n  [REAL] Bandpass RMS per channel:")
+        for ch in settings.CHANNELS:
+            raw_uv   = np.array([s[ch] for s in samples], dtype=np.float64) * settings.ADC_SCALE
+            filtered = apply_bandpass(raw_uv)
+            rms_in   = np.sqrt(np.mean(raw_uv**2))
+            rms_out  = np.sqrt(np.mean(filtered**2))
+            print(f"    {ch}: in={rms_in:.2f} µV out={rms_out:.2f} µV")
+            assert len(filtered) == len(raw_uv)
+
     def test_attenuates_high_freq(self):
         """
         100 Hz signal (above 45 Hz cutoff) is significantly attenuated.
@@ -287,6 +300,19 @@ class TestNotch:
         assert abs(rms_out - rms_in) / rms_in < 0.05, (
             "Alpha band distorted by notch filter"
         )
+
+    def test_notch_on_real_session(self, db_conn, session_id):
+        """Real data: apply notch to all four real channels, show before/after RMS."""
+        from app.data_access.queries import fetch_raw_samples
+        samples = fetch_raw_samples(db_conn, session_id)[:1000]
+        print(f"\n  [REAL] Notch RMS per channel:")
+        for ch in settings.CHANNELS:
+            raw_uv   = np.array([s[ch] for s in samples], dtype=np.float64) * settings.ADC_SCALE
+            filtered = apply_notch(raw_uv)
+            rms_in   = np.sqrt(np.mean(raw_uv**2))
+            rms_out  = np.sqrt(np.mean(filtered**2))
+            print(f"    {ch}: in={rms_in:.2f} µV out={rms_out:.2f} µV")
+            assert len(filtered) == len(raw_uv)
 
     def test_notch_above_nyquist_raises(self):
         with pytest.raises(ValueError, match="Nyquist"):
@@ -442,3 +468,45 @@ class TestPipeline:
         """Non-existent session raises ValueError, not an unhandled exception."""
         with pytest.raises(ValueError):
             run_pipeline(db_conn, "00000000-0000-0000-0000-000000000000")
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# 7. End-to-end summary on real session — full chain in one place
+# ══════════════════════════════════════════════════════════════════════════════
+
+class TestPreprocessingSummary:
+    def test_full_preprocessing_chain_on_real_session(self, db_conn, session_id):
+        """
+        Walk the entire preprocessing journey on the real session in one consolidated
+        view: raw ADC counts -> quality gate -> bandpass -> notch -> clean signal.
+        Shown for all four channels.
+        """
+        from app.data_access.queries import fetch_raw_samples
+
+        # Step 1: raw ADC counts, all channels
+        samples = fetch_raw_samples(db_conn, session_id)
+        print(f"\n  [SUMMARY] Raw samples       : {len(samples)} rows")
+        for ch in settings.CHANNELS:
+            raw_counts = np.array([s[ch] for s in samples], dtype=np.float64)
+            raw_uv     = raw_counts * settings.ADC_SCALE
+            print(f"  [SUMMARY] {ch} raw (ADC)     : min={raw_counts.min():.0f} max={raw_counts.max():.0f}")
+            print(f"  [SUMMARY] {ch} raw (µV)      : min={raw_uv.min():.2f} max={raw_uv.max():.2f}")
+
+        # Step 2: quality gate
+        frames = fetch_eeg_readings(db_conn, session_id)
+        _, _, results = gate_frames(frames)
+        report = quality_report(results)
+        print(f"  [SUMMARY] Quality gate      : {report['accepted_frames']}/{report['total_frames']} "
+              f"accepted ({report['rejection_rate']*100:.1f}% rejected)")
+
+        # Step 3 + 4: full pipeline (bandpass + notch on clean windows), all channels
+        result = run_pipeline(db_conn, session_id)
+        window = result["windows"][0]
+        print(f"  [SUMMARY] Windows produced  : {result['n_windows']}")
+        for ch in settings.CHANNELS:
+            clean_sig = window["signals"][ch]
+            print(f"  [SUMMARY] {ch} clean signal  : min={clean_sig.min():.2f} µV "
+                  f"max={clean_sig.max():.2f} µV mean={clean_sig.mean():.2f} µV")
+
+        assert result["n_windows"] > 0
+        assert all(isinstance(window["signals"][ch], np.ndarray) for ch in settings.CHANNELS)
