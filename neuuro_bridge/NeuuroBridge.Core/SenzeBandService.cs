@@ -64,6 +64,21 @@ namespace NeuuroBridge
         private const int MaxConnectAttempts = 3;
         private const int RetryDelayMs = 700;
 
+        // ── Mid-session auto-reconnect (TS1.7) ──────────────────────────────
+        // A drop AFTER a successful connect (band slips off the head, BLE link lost) is distinct
+        // from a cold-connect failure. We transparently re-issue connectBT to the SAME device for
+        // up to ReconnectBudgetMs before declaring the link truly gone — so an in-progress recording
+        // resumes into the same session instead of being torn down. The technician's own Disconnect/
+        // Shutdown sets _intentionalDisconnect so it is never treated as a recoverable drop.
+        private volatile bool _intentionalDisconnect;
+        private volatile bool _reconnecting;
+        private string _reconnectDeviceId;
+        private string _reconnectAddress;
+        private Timer _reconnectTimer;
+        private readonly Stopwatch _reconnectClock = new Stopwatch();
+        private const int ReconnectBudgetMs = 60_000;   // give up after ~60 s of a missing band
+        private const int ReconnectDelayMs = 1500;      // backoff between reconnect attempts
+
         public bool IsConnected => !string.IsNullOrEmpty(_connectedAddress);
         public bool IsInitialized => _initialized;
         public bool IsAuthenticated => _isAuthenticated;
@@ -73,7 +88,9 @@ namespace NeuuroBridge
         public event Action<SenzeBandDeviceInfo, bool> OnDeviceFound;   // info, added(true)/removed(false)
         public event Action<SenzeBandDeviceInfo> OnDeviceUpdated;
         public event Action<string, string> OnConnected;               // address, deviceID
-        public event Action<string> OnDisconnected;                    // address
+        public event Action<string> OnConnectionInterrupted;           // address; transient link loss, reconnecting (session preserved)
+        public event Action<string, string> OnReconnected;             // address, deviceID; link restored, same session resumes
+        public event Action<string> OnDisconnected;                    // address; terminal (intentional or reconnect gave up)
         public event Action<bool> OnSignalReady;
         public event Action<bool[]> OnChannelStatus;
         public event Action<float[]> OnImpedance;                      // per-electrode impedance (Fp1, Fp2, T4, T3)
@@ -125,6 +142,8 @@ namespace NeuuroBridge
         // ── Step 3: Connect ─────────────────────────────────────────────────
         public void Connect(string deviceID)
         {
+            CancelReconnect();              // a deliberate new connect supersedes any drop recovery
+            _intentionalDisconnect = false; // arm auto-reconnect for the connection we're about to open
             _connectTargetId = deviceID;
             _connectAttempts = 0;
             _connecting = true;
@@ -142,7 +161,9 @@ namespace NeuuroBridge
 
         public void Disconnect()
         {
+            _intentionalDisconnect = true;  // a drop callback from this teardown must NOT auto-reconnect
             CancelConnectRetry();
+            CancelReconnect();
             if (string.IsNullOrEmpty(_connectedAddress)) return;
             SenzeBandWindowsInterface.getSBWIHandler().disconnectBT(_connectedAddress);
             _connectedAddress = "";
@@ -154,6 +175,64 @@ namespace NeuuroBridge
             _connecting = false;
             var t = _retryTimer; _retryTimer = null;
             try { t?.Dispose(); } catch { }
+        }
+
+        private void CancelReconnect()
+        {
+            _reconnecting = false;
+            var t = _reconnectTimer; _reconnectTimer = null;
+            try { t?.Dispose(); } catch { }
+            _reconnectClock.Reset();
+        }
+
+        // ── Mid-session reconnect loop ──────────────────────────────────────
+        private void BeginReconnect(string droppedAddress)
+        {
+            _reconnecting = true;
+            _reconnectDeviceId = _connectedDeviceID;
+            _reconnectAddress = droppedAddress;
+            _connectedAddress = "";          // link is down — block stream commands until restored
+            _isAuthenticated = false;
+            _reconnectClock.Restart();
+            Log("Link dropped — reconnecting to " + _reconnectDeviceId + " (up to " + (ReconnectBudgetMs / 1000) + " s)...");
+            Post(() => OnConnectionInterrupted?.Invoke(droppedAddress));
+            ScheduleReconnectAttempt();
+        }
+
+        private void ScheduleReconnectAttempt()
+        {
+            var t = new Timer(_ => Post(ReconnectAttempt), null, ReconnectDelayMs, Timeout.Infinite);
+            var old = _reconnectTimer; _reconnectTimer = t;
+            try { old?.Dispose(); } catch { }
+        }
+
+        private void ReconnectAttempt()
+        {
+            if (!_reconnecting) return;
+            if (_reconnectClock.ElapsedMilliseconds > ReconnectBudgetMs)
+            {
+                Log("Reconnect budget exhausted — link is gone.");
+                FinishReconnectFailed();
+                return;
+            }
+            Log("Reconnect attempt to " + _reconnectDeviceId + " ...");
+            try { SenzeBandWindowsInterface.getSBWIHandler().connectBT(_reconnectDeviceId); }
+            catch (Exception ex) { Log("reconnect connectBT error: " + ex.Message); }
+            // A failed attempt re-enters ConnectFailCallback, which queues the next try (until budget).
+        }
+
+        private void FinishReconnectFailed()
+        {
+            string addr = _reconnectAddress;
+            CancelReconnect();
+            _connectedAddress = "";
+            _connectedDeviceID = "";
+            _mcuId = null;
+            _isAuthenticated = false;
+            _authAttempted = false;
+            try { DeviceAuthentication.instance.OnDisconnect(); } catch { }
+            Log("Disconnected (reconnect failed): " + addr);
+            Post(() => OnDisconnected?.Invoke(addr));
         }
 
         // ── Step 4: Stream ──────────────────────────────────────────────────
@@ -343,20 +422,30 @@ namespace NeuuroBridge
         private void ConnectedCallback(string address, string id, bool hasExistingConnection)
         {
             if (hasExistingConnection) return;
+            bool wasReconnecting = _reconnecting;
             CancelConnectRetry();   // connect succeeded — stop the retry machinery
+            CancelReconnect();      // ...and the drop-recovery loop, if this was a resume
             _connectedAddress = address;
             _connectedDeviceID = id;
             _isAuthenticated = false;
             _authAttempted = false;
-            Log("Connected: " + id + " @ " + address);
-            Post(() => OnConnected?.Invoke(address, id));
-            Authenticate();   // attempt now if MCU ID is already available
+            if (wasReconnecting)
+            {
+                Log("Reconnected: " + id + " @ " + address);
+                Post(() => OnReconnected?.Invoke(address, id));   // resume the SAME session, no fresh prepare
+            }
+            else
+            {
+                Log("Connected: " + id + " @ " + address);
+                Post(() => OnConnected?.Invoke(address, id));
+            }
+            Authenticate();   // attempt now if MCU ID is already available (re-auth on resume too)
         }
 
         private void ConnectFailCallback(string address)
         {
-            // A cold-radio connect attempt that still has retries left: re-issue
-            // connectBT after a short settle delay and DON'T report failure yet.
+            // 1) Cold-radio connect attempt that still has retries left: re-issue connectBT after a
+            //    short settle delay and DON'T report failure yet.
             if (_connecting && _connectAttempts < MaxConnectAttempts)
             {
                 Log("Connect attempt " + _connectAttempts + " failed; retrying in " + RetryDelayMs + " ms...");
@@ -366,6 +455,24 @@ namespace NeuuroBridge
                 return;
             }
 
+            // 2) Already recovering a drop: a reconnect attempt failed — queue the next one
+            //    (ReconnectAttempt enforces the overall time budget and gives up if exceeded).
+            if (_reconnecting)
+            {
+                ScheduleReconnectAttempt();
+                return;
+            }
+
+            // 3) A live link dropped unexpectedly — not a cold connect, not technician-initiated.
+            //    Transparently reconnect to the same device so an in-progress session survives.
+            if (!_connecting && !_intentionalDisconnect && !string.IsNullOrEmpty(_connectedDeviceID)
+                && !string.IsNullOrEmpty(_connectedAddress))
+            {
+                BeginReconnect(address);
+                return;
+            }
+
+            // 4) Terminal: cold-connect exhausted, technician-initiated, or nothing to recover.
             _connecting = false;
             _connectedAddress = "";
             _connectedDeviceID = "";
@@ -408,7 +515,9 @@ namespace NeuuroBridge
         public void Shutdown()
         {
             Log("Shutdown()");
+            _intentionalDisconnect = true;
             CancelConnectRetry();
+            CancelReconnect();
             try
             {
                 if (!string.IsNullOrEmpty(_connectedAddress))

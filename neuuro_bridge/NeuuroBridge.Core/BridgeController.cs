@@ -74,6 +74,8 @@ namespace NeuuroBridge
         public event Action Initialized;
         public event Action DevicesChanged;
         public event Action<string, string> Connected;       // address, deviceId
+        public event Action ConnectionInterrupted;           // transient BLE drop; reconnecting, session preserved
+        public event Action Reconnected;                     // BLE link restored; same session resumed
         public event Action<string> Disconnected;
         public event Action<bool, string> AuthChanged;       // ok, detail
         public event Action StreamingChanged;                // live preview started/stopped (no DB session)
@@ -171,10 +173,34 @@ namespace NeuuroBridge
                 // before the technician starts recording. No EEG is uploaded until StartSession.
                 PrepareSession();
             };
+            _svc.OnConnectionInterrupted += addr =>
+            {
+                // Transient link loss during a live connection (band slipped, BLE glitch). The SDK is
+                // auto-reconnecting to the SAME device, so DO NOT tear anything down: keep _db, the
+                // prepared/active session, session_id and pairing code intact so recording resumes into
+                // the same session. No frames arrive while down — the raw pipeline stamps the missing
+                // seconds as a normal resync gap. Flag streaming off so OnReconnected re-issues StartStream.
+                _streaming = false;
+                Log?.Invoke("[reconnect] link dropped — reconnecting, session preserved");
+                ConnectionInterrupted?.Invoke();
+            };
+            _svc.OnReconnected += (addr, id) =>
+            {
+                // Link restored to the same device. Re-issue the SDK stream (raw EEG re-unlocks once the
+                // device re-authenticates via OnMcu). Deliberately NO PrepareSession() — same session_id,
+                // same _db, same pairing code; the recording simply continues.
+                _connAddress = addr; _connDeviceID = id;
+                Log?.Invoke("[reconnect] link restored — resuming session");
+                StartStreaming();
+                Reconnected?.Invoke();
+            };
             _svc.OnDisconnected += addr =>
             {
-                // Reset stream/session state on an SDK-initiated drop (band off / link lost) so a
-                // later reconnect re-arms the auto-preview + a fresh session prepare.
+                // Terminal disconnect: technician-initiated, or the reconnect budget was exhausted. If a
+                // recording was active, flush + mark the session 'completed' so it closes cleanly rather
+                // than dangling on 'recording' (StopSession is a no-op when nothing was recording). A later
+                // reconnect re-arms the auto-preview + a fresh session prepare.
+                if (SessionActive) StopSession();
                 _streaming = false;
                 SessionActive = false;
                 StopSyncPoll();

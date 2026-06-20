@@ -33,6 +33,8 @@ namespace NeuuroBridge.Wpf
             _ctl.Initialized += () => Ui(() => { Log("SDK initialized."); BtnScan.IsEnabled = true; });
             _ctl.DevicesChanged += () => Ui(RefreshDeviceList);
             _ctl.Connected += (addr, id) => Ui(() => OnConnected(addr, id));
+            _ctl.ConnectionInterrupted += () => Ui(OnConnectionInterrupted);
+            _ctl.Reconnected += () => Ui(OnReconnected);
             _ctl.Disconnected += addr => Ui(() => OnDisconnected(addr));
             _ctl.AuthChanged += (ok, detail) => Ui(() => OnAuth(ok, detail));
             _ctl.StreamingChanged += () => Ui(OnStreamingChanged);
@@ -176,6 +178,21 @@ namespace NeuuroBridge.Wpf
             BtnReauth.IsEnabled = true;
             BtnStartSession.IsEnabled = true;
             BtnCapture.IsEnabled = true;
+        }
+
+        // Transient BLE drop — the bridge is auto-reconnecting to the same device, session preserved.
+        private void OnConnectionInterrupted()
+        {
+            ConnPill.Text = "Reconnecting…"; ConnDot.Fill = Warn;
+            AuthDot.Fill = Mut; TxtAuth.Text = "reconnecting…";
+            Log("Link dropped — reconnecting (session preserved)…");
+        }
+
+        // Link restored — recording continues in the same session; auth re-arms via OnAuth.
+        private void OnReconnected()
+        {
+            ConnPill.Text = "Connected"; ConnDot.Fill = Good;
+            Log("Reconnected — session resumed.");
         }
 
         private void OnDisconnected(string addr)
