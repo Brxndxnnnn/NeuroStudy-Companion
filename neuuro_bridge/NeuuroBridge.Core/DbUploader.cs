@@ -270,6 +270,33 @@ namespace NeuuroBridge
             finally { Monitor.Exit(_ioLock); }
         }
 
+        /// <summary>
+        /// Stamps sessions.bridge_recording_at = now() (DB clock) to confirm to the frontend that the
+        /// bridge has actually begun recording — the web gates its first image on this. Written ONCE
+        /// per session (only while still NULL), so calling it every poll tick is harmless. Non-blocking:
+        /// skips if a flush holds the lock, returns false on any error so the caller retries next tick.
+        /// Returns true only when the column is confirmed set (already-set counts as confirmed).
+        /// </summary>
+        public bool MarkRecordingStarted()
+        {
+            if (_disposed || _sessionId == Guid.Empty) return false;
+            if (!Monitor.TryEnter(_ioLock)) return false;   // a flush holds the lock — try again next tick
+            try
+            {
+                EnsureOpen();
+                using (var cmd = new NpgsqlCommand(
+                    "UPDATE sessions SET bridge_recording_at = now() " +
+                    "WHERE session_id = @sid AND bridge_recording_at IS NULL", _conn))
+                {
+                    cmd.Parameters.AddWithValue("sid", NpgsqlDbType.Uuid, _sessionId);
+                    cmd.ExecuteNonQuery();   // 0 rows = already stamped earlier; still "confirmed"
+                    return true;
+                }
+            }
+            catch (Exception ex) { _lastError = ex.Message; return false; }
+            finally { Monitor.Exit(_ioLock); }
+        }
+
         public void EnqueueEeg(EegReadingRow row)
         {
             if (_disposed || !Streaming) return;

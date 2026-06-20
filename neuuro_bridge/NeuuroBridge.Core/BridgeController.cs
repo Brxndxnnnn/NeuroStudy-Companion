@@ -40,7 +40,8 @@ namespace NeuuroBridge
         private long _rawFrameCount;
         private bool _streaming;
         private bool _prepared;                 // unclaimed session row + pairing code exist (created on connect)
-        private Timer _syncPoll;                // advisory poll of sessions.sync_status (read-only)
+        private bool _recordingConfirmed;       // bridge_recording_at written for the active session (handshake ack)
+        private Timer _syncPoll;                // advisory poll of sessions.sync_status (read-only + lifecycle react)
         private readonly Stopwatch _dbEegThrottle = Stopwatch.StartNew();
 
         // Live snapshots (guarded by _stateLock).
@@ -261,6 +262,7 @@ namespace NeuuroBridge
         {
             if (_prepared) return;
             _prepared = true;
+            _recordingConfirmed = false;
             GenerateSession(_connAddress);   // local + instant: session_id + pairing code + created time
             SetSyncStatus("unclaimed");      // optimistic; the poll confirms/updates from the DB
             SessionPrepared?.Invoke();       // UI shows the pairing code immediately
@@ -312,6 +314,7 @@ namespace NeuuroBridge
             try { _db?.RequestComplete(); } catch { /* ignore */ }
             try { _db?.Dispose(); } catch { /* ignore */ }
             _prepared = false;               // next Start prepares a new session row + pairing code
+            _recordingConfirmed = false;
             SetSyncStatus("completed");
             SessionStopped?.Invoke();
         }
@@ -323,11 +326,13 @@ namespace NeuuroBridge
             PairingCode = BuildPairingCode(bleAddress, SessionStartUtc);
         }
 
-        // ── Advisory sync-status poll (read-only; never gates the pipeline) ──
+        // ── Sync-status poll: reads sessions.sync_status and drives the coordinated-start
+        //    handshake. ~1 s cadence so the web's Start/End is detected near-instantly; the read
+        //    itself is non-blocking (Monitor.TryEnter) so it never contends with the write path. ──
         private void StartSyncPoll()
         {
             if (_syncPoll != null) return;
-            _syncPoll = new Timer(_ => PollSyncStatus(), null, 3000, 3000);
+            _syncPoll = new Timer(_ => PollSyncStatus(), null, 1000, 1000);
         }
 
         private void StopSyncPoll()
@@ -339,7 +344,34 @@ namespace NeuuroBridge
         private void PollSyncStatus()
         {
             var s = _db?.TryReadSyncStatus();
-            if (!string.IsNullOrEmpty(s)) SetSyncStatus(s);
+            if (string.IsNullOrEmpty(s)) return;
+            SetSyncStatus(s);
+
+            // Coordinated-start handshake (request → confirm). The frontend drives the lifecycle by
+            // writing sync_status; the bridge reacts here. This is advisory display PLUS control, but
+            // it still never gates the raw write path (that's behind SessionActive, set below).
+            if (s == "recording" && !SessionActive)
+            {
+                // Web pressed "Start session" → auto-begin recording on this machine. No technician click.
+                Log?.Invoke("[handshake] frontend requested recording → auto-starting session");
+                StartSession();
+            }
+            else if (s == "completed" && SessionActive)
+            {
+                // Web ended the session → flush + close locally so both sides stop together.
+                Log?.Invoke("[handshake] frontend ended session → auto-stopping session");
+                StopSession();
+                return;                       // poll is torn down by StopSession; nothing left to confirm
+            }
+
+            // Confirm to the frontend that EEG is actually flowing, once the upload is live. Idempotent
+            // (DbUploader only writes bridge_recording_at while it's still NULL). Covers BOTH the auto
+            // path above and a manual GUI Start — the web gates its first image on this timestamp, so it
+            // can never show a stimulus before the bridge is recording. Retried each tick until it lands.
+            if (SessionActive && !_recordingConfirmed && _db != null && _db.Streaming)
+            {
+                if (_db.MarkRecordingStarted()) _recordingConfirmed = true;
+            }
         }
 
         private void SetSyncStatus(string status)
