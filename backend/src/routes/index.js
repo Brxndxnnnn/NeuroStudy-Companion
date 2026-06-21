@@ -4,6 +4,7 @@ import usersRouter from './users.routes.js'
 import clinicsRouter from './clinics.routes.js'
 import sessionsRouter from './sessions.routes.js'
 import eventsRouter from './events.routes.js'
+import imagesRouter from './images.routes.js'
 import authenticate from '../middleware/authenticate.js'
 import dbContext from '../middleware/dbContext.js'
 
@@ -15,5 +16,6 @@ router.use('/users', authenticate, dbContext, usersRouter)
 router.use('/clinics', authenticate, dbContext, clinicsRouter)
 router.use('/sessions', authenticate, dbContext, sessionsRouter)
 router.use('/events', authenticate, dbContext, eventsRouter)
+router.use('/images', authenticate, dbContext, imagesRouter)
 
 export default router
