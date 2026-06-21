@@ -10,7 +10,7 @@ const listSessions = catchAsync(async (req, res) => {
 // ── GET /api/sessions/:session_id ─────────────────────────────────────────────
 const getSessionById = catchAsync(async (req, res) => {
     const { session_id } = req.params
-    let results;
+    let results
 
     try {
         results = await sessionModel.findById(session_id, req.dbClient)
