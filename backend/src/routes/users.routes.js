@@ -1,5 +1,5 @@
 import { Router } from 'express'
-import userController from '../controllers/users.controller.js'
+import userController from '../controllers/user.controller.js'
 import requirePermission from '../middleware/requirePermission.js'
 import PERMS from '../constants/permissions.js'
 
