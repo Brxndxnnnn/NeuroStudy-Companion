@@ -46,3 +46,4 @@ GRANT EXECUTE ON FUNCTION claim_session(text, uuid, uuid, uuid) TO app_user;
 
 ALTER TABLE sessions ADD COLUMN bridge_recording_at timestamptz;
 ALTER TABLE sessions ADD CONSTRAINT sessions_sync_status_chk CHECK (sync_status IN ('unclaimed','claimed','recording','completed'));
+ALTER TABLE images ADD COLUMN created_at timestamptz DEFAULT NOW();
