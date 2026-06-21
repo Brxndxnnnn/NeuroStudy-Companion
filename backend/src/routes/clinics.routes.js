@@ -1,5 +1,5 @@
 import { Router } from 'express'
-import clinicsController from '../controllers/clinics.controller.js'
+import clinicController from '../controllers/clinic.controller.js'
 import requirePermission from '../middleware/requirePermission.js'
 import PERMS from '../constants/permissions.js'
 
@@ -30,7 +30,7 @@ const router = Router()
 router.post(
     '/',
     requirePermission(PERMS.CLINICS_WRITE_ALL),
-    clinicsController.createClinic
+    clinicController.createClinic
 )
 
 /**
@@ -48,7 +48,7 @@ router.post(
 router.get(
     '/',
     requirePermission(PERMS.CLINICS_READ_ALL),
-    clinicsController.listClinics
+    clinicController.listClinics
 )
 
 /**
@@ -73,7 +73,7 @@ router.get(
 router.get(
     '/:id',
     requirePermission(PERMS.CLINICS_READ_ALL),
-    clinicsController.getClinic
+    clinicController.getClinic
 )
 
 /**
@@ -106,7 +106,7 @@ router.get(
 router.patch(
     '/:id',
     requirePermission(PERMS.CLINICS_WRITE_ALL),
-    clinicsController.updateClinic
+    clinicController.updateClinic
 )
 
 export default router
