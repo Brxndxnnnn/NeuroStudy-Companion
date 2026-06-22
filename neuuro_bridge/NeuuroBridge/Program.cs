@@ -82,6 +82,8 @@ namespace NeuuroBridge
             _svc.OnDeviceFound += HandleDeviceFound;
             _svc.OnDeviceUpdated += d => { lock (_devLock) _devices[d.DeviceID] = d; };
             _svc.OnConnected += HandleConnected;
+            _svc.OnConnectionInterrupted += addr => Print($"\n[~] Link dropped ({addr}) — reconnecting…");
+            _svc.OnReconnected += (addr, id) => Print($"\n[+] Reconnected to {id} @ {addr}");
             _svc.OnDisconnected += addr => Print($"\n[!] Disconnected ({addr})");
             _svc.OnSignalReady += ready => { lock (_stateLock) _signalReady = ready; };
             _svc.OnChannelStatus += ch => { lock (_stateLock) _channels = ch; };
