@@ -15,4 +15,13 @@ const findById = async (client_id, client = pool) => {
     return rows
 }
 
-export default { findAll, findById }
+const create = async ({ name, dob, gender, race, notes, clinic_id }, client = pool) => {
+    const { rows } = await query(client,
+        `INSERT INTO clients (name, dob, gender, race, notes, clinic_id)
+         VALUES ($1, $2, $3, $4, $5, $6)
+         RETURNING *`, [name, dob, gender, race, notes, clinic_id]
+    )
+    return rows[0]
+}
+
+export default { findAll, findById, create }
