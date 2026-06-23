@@ -7,6 +7,7 @@ import eventsRouter from './events.routes.js'
 import imagesRouter from './images.routes.js'
 import clientsRouter from './clients.routes.js'
 import questionsRouter from './questions.routes.js'
+import questionnairesRouter from './questionnaires.routes.js'
 import authenticate from '../middleware/authenticate.js'
 import dbContext from '../middleware/dbContext.js'
 
@@ -21,5 +22,6 @@ router.use('/events', authenticate, dbContext, eventsRouter)
 router.use('/images', authenticate, dbContext, imagesRouter)
 router.use('/clients', authenticate, dbContext, clientsRouter)
 router.use('/questions', authenticate, dbContext, questionsRouter)
+router.use('/questionnaires', authenticate, dbContext, questionnairesRouter)
 
 export default router
