@@ -147,7 +147,16 @@ npm install
 npm run dev
 ```
 
+**Step 3 — Run the frontend locally:**
+```bash
+cd frontend
+npm install
+npm run dev
+```
+
 The backend reads `.env` (not `.env.docker`) when run this way. Make sure `.env` has `POSTGRES_HOST=localhost` and `POSTGRES_PORT=5433`.
+
+
 
 **Why `localhost:5433` and not `localhost:5432`?**
 
