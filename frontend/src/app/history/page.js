@@ -1,104 +1,138 @@
 "use client";
+import { useState } from "react";
 import { useRouter } from "next/navigation";
 
-export default function History() {
+export default function ClinicalDashboard() {
   const router = useRouter();
+  
+  // MOCK DATA: Replace with GET /api/clients later
+  const [clients, setClients] = useState([
+    { id: "c0000000-0000-0000-0000-000000000001", name: "Eleanor Vance", age: 42, gender: "Female", lastSession: "Oct 12, 2023" },
+    { id: "c0000000-0000-0000-0000-000000000002", name: "Marcus Thorne", age: 28, gender: "Male", lastSession: "Oct 12, 2023" },
+    { id: "c0000000-0000-0000-0000-000000000003", name: "Sarah Connor", age: 35, gender: "Female", lastSession: "Oct 11, 2023" },
+  ]);
 
-  // Mock data for the table
-  const mockSessions = [
-    { id: 1, date: "2026-06-05", time: "09:15 AM", duration: "15 min", score: "86%" },
-    { id: 2, date: "2026-06-04", time: "02:30 PM", duration: "15 min", score: "74%" },
-    { id: 3, date: "2026-06-03", time: "10:00 AM", duration: "10 min", score: "92%" },
-    { id: 4, date: "2026-06-02", time: "08:45 PM", duration: "15 min", score: "81%" },
-  ];
+  // Form State
+  const [newName, setNewName] = useState("");
+  const [newAge, setNewAge] = useState("");
+  const [newGender, setNewGender] = useState("");
+  const [feedback, setFeedback] = useState("");
+
+  const handleRegisterClient = (e) => {
+    e.preventDefault();
+    if (!newName || !newAge || !newGender) {
+      setFeedback("Please fill out all fields.");
+      return;
+    }
+
+    // MOCK SUBMIT: Replace with POST /api/clients later
+    const newClient = {
+      id: `mock-id-${Math.random()}`,
+      name: newName,
+      age: newAge,
+      gender: newGender,
+      lastSession: "No sessions yet"
+    };
+    
+    setClients([newClient, ...clients]);
+    setNewName(""); setNewAge(""); setNewGender("");
+    setFeedback("Client successfully registered!");
+    setTimeout(() => setFeedback(""), 3000);
+  };
 
   return (
-    <main className="min-h-screen bg-slate-50 p-8 font-sans text-slate-800">
-      {/* Top Navigation */}
-      <div className="w-full max-w-6xl mx-auto flex justify-between items-center mb-8 border-b border-slate-200 pb-4">
+    <main className="min-h-screen bg-slate-100 p-8 font-sans text-slate-800">
+      {/* Top Header */}
+      <div className="max-w-7xl mx-auto flex justify-between items-center mb-8 bg-white p-4 rounded-xl shadow-sm border border-slate-200">
         <div className="flex items-center gap-3">
-          <div className="bg-teal-400 w-8 h-8 rounded-lg flex items-center justify-center text-white font-bold">🧠</div>
-          <div>
-            <span className="font-bold text-lg block leading-none">NeuroStudy Companion</span>
-            <span className="text-xs text-slate-500">Track your focus, improve your study habits</span>
-          </div>
+          <div className="bg-blue-600 w-8 h-8 rounded-lg flex items-center justify-center text-white font-bold">NP</div>
+          <span className="font-bold text-xl text-blue-900 tracking-tight">NeuroPrecise</span>
+          <span className="text-slate-400 ml-2">Clinical Portal</span>
         </div>
-        <div className="flex gap-6 text-sm font-medium">
-          <button onClick={() => router.push("/session")} className="text-slate-500 hover:text-blue-500">~ Session</button>
-          <button className="text-blue-500 border-b-2 border-blue-500 pb-1">↺ History</button>
-          <button onClick={() => router.push("/insights")} className="text-slate-500 hover:text-blue-500">💡 Insights</button>
-          <button onClick={() => router.push("/login")} className="text-slate-400 hover:text-slate-600">Logout</button>
-        </div>
+        <button onClick={() => router.push("/session")} className="bg-blue-50 hover:bg-blue-100 text-blue-600 px-4 py-2 rounded-lg font-bold text-sm transition-colors">
+          Go to EEG Pairing →
+        </button>
       </div>
 
-      <div className="w-full max-w-6xl mx-auto">
-        <h1 className="text-3xl font-bold mb-1">Session History</h1>
-        <p className="text-slate-500 mb-8">Track your focus performance over time</p>
+      <div className="max-w-7xl mx-auto grid grid-cols-1 md:grid-cols-3 gap-8">
         
-        {/* Trend Chart Placeholder */}
-        <div className="bg-white rounded-xl shadow-sm border border-slate-100 p-6 mb-6">
-          <div className="flex justify-between items-start mb-6">
+        {/* Left Column: Registration Form */}
+        <div className="bg-white p-6 rounded-xl shadow-sm border border-slate-200 h-fit">
+          <div className="flex justify-between items-center mb-6">
+            <h2 className="font-bold text-lg text-slate-800">Client Registration</h2>
+            <span className="text-blue-500">👤+</span>
+          </div>
+
+          {feedback && <div className={`mb-4 p-3 rounded text-sm font-medium ${feedback.includes('success') ? 'bg-green-50 text-green-700' : 'bg-red-50 text-red-700'}`}>{feedback}</div>}
+
+          <form onSubmit={handleRegisterClient} className="space-y-4">
             <div>
-              <h2 className="font-bold text-lg">15-Day Focus Trend</h2>
-              <p className="text-sm text-slate-500">Average focus score across recent sessions</p>
+              <label className="block text-xs font-bold text-slate-500 uppercase mb-1">Full Name</label>
+              <input type="text" value={newName} onChange={(e) => setNewName(e.target.value)} className="w-full p-2.5 border border-slate-200 rounded-lg text-sm focus:ring-2 focus:ring-blue-500" placeholder="e.g. Johnathan Doe" />
             </div>
-            <span className="bg-green-50 text-green-600 text-xs font-bold px-3 py-1 rounded-full border border-green-100">
-              ↗ +8% this week
-            </span>
-          </div>
-          <div className="w-full h-48 bg-slate-50 rounded border border-dashed border-slate-200 flex items-center justify-center">
-            <span className="text-slate-400 font-medium">[ Recharts Line Graph Will Render Here ]</span>
-          </div>
+            <div className="grid grid-cols-2 gap-4">
+              <div>
+                <label className="block text-xs font-bold text-slate-500 uppercase mb-1">Age</label>
+                <input type="number" value={newAge} onChange={(e) => setNewAge(e.target.value)} className="w-full p-2.5 border border-slate-200 rounded-lg text-sm focus:ring-2 focus:ring-blue-500" placeholder="e.g. 34" />
+              </div>
+              <div>
+                <label className="block text-xs font-bold text-slate-500 uppercase mb-1">Gender</label>
+                <select value={newGender} onChange={(e) => setNewGender(e.target.value)} className="w-full p-2.5 border border-slate-200 rounded-lg text-sm focus:ring-2 focus:ring-blue-500 bg-white">
+                  <option value="">Select</option>
+                  <option value="Male">Male</option>
+                  <option value="Female">Female</option>
+                  <option value="Other">Other</option>
+                </select>
+              </div>
+            </div>
+            
+            <div className="pt-4 flex gap-3">
+              <button type="submit" className="flex-1 bg-blue-600 hover:bg-blue-700 text-white font-bold py-2.5 rounded-lg text-sm transition-colors shadow-sm">
+                Register Patient
+              </button>
+              <button type="button" onClick={() => {setNewName(""); setNewAge(""); setNewGender("");}} className="px-4 py-2.5 border border-slate-200 hover:bg-slate-50 text-slate-600 font-medium rounded-lg text-sm transition-colors">
+                Clear
+              </button>
+            </div>
+          </form>
         </div>
 
-        {/* Summary Cards */}
-        <div className="grid grid-cols-4 gap-6 mb-6">
-          <div className="bg-white p-6 rounded-xl shadow-sm border border-slate-100">
-            <p className="text-sm text-slate-500 mb-1">Total Sessions</p>
-            <p className="text-3xl font-bold">47</p>
+        {/* Right Column: Client Directory */}
+        <div className="md:col-span-2 bg-white rounded-xl shadow-sm border border-slate-200 overflow-hidden">
+          <div className="p-6 border-b border-slate-100 flex justify-between items-center bg-slate-50/50">
+            <div>
+              <h2 className="font-bold text-lg text-slate-800">Client Directory</h2>
+              <p className="text-xs text-slate-500">Select a client from the EEG Setup page to begin a session.</p>
+            </div>
           </div>
-          <div className="bg-white p-6 rounded-xl shadow-sm border border-slate-100">
-            <p className="text-sm text-slate-500 mb-1">Avg Focus Score</p>
-            <p className="text-3xl font-bold text-blue-500">82%</p>
-          </div>
-          <div className="bg-white p-6 rounded-xl shadow-sm border border-slate-100">
-            <p className="text-sm text-slate-500 mb-1">Total Study Time</p>
-            <p className="text-3xl font-bold">11.75h</p>
-          </div>
-          <div className="bg-white p-6 rounded-xl shadow-sm border border-slate-100">
-            <p className="text-sm text-slate-500 mb-1">Best Session</p>
-            <p className="text-3xl font-bold text-green-500">94%</p>
-          </div>
-        </div>
-
-        {/* Session Log Table */}
-        <div className="bg-white rounded-xl shadow-sm border border-slate-100 overflow-hidden">
-          <h2 className="font-bold text-lg p-6 border-b border-slate-50">All Sessions</h2>
-          <table className="w-full text-left border-collapse">
-            <thead>
-              <tr className="bg-slate-50 border-b border-slate-100 text-xs text-slate-500 uppercase tracking-wider">
-                <th className="p-4 font-semibold">📅 Date</th>
-                <th className="p-4 font-semibold">🕒 Time</th>
-                <th className="p-4 font-semibold">Duration</th>
-                <th className="p-4 font-semibold">Focus Score</th>
+          
+          <table className="w-full text-left">
+            <thead className="bg-slate-50 border-b border-slate-100 text-xs text-slate-500 uppercase font-bold tracking-wide">
+              <tr>
+                <th className="p-4">Patient Name</th>
+                <th className="p-4">Demographics</th>
+                <th className="p-4">Last Session Date</th>
+                <th className="p-4"></th>
               </tr>
             </thead>
             <tbody>
-              {mockSessions.map((session) => (
-                <tr key={session.id} className="border-b border-slate-50 hover:bg-slate-50 transition-colors text-sm">
-                  <td className="p-4 font-medium">{session.date}</td>
-                  <td className="p-4 text-slate-600">{session.time}</td>
-                  <td className="p-4 text-slate-600">{session.duration}</td>
+              {clients.map((client) => (
+                <tr key={client.id} className="border-b border-slate-50 hover:bg-slate-50 transition-colors">
                   <td className="p-4">
-                    <span className="text-green-600 font-medium bg-green-50 px-2 py-1 rounded">
-                      {session.score}
-                    </span>
+                    <div className="font-bold text-slate-800">{client.name}</div>
+                    <div className="text-xs text-slate-400 font-mono mt-0.5">ID: {client.id.substring(0, 8)}...</div>
+                  </td>
+                  <td className="p-4 text-sm text-slate-600">{client.age} yrs • {client.gender}</td>
+                  <td className="p-4 text-sm text-slate-600">{client.lastSession}</td>
+                  <td className="p-4 text-right">
+                    <button className="text-blue-500 hover:text-blue-700 font-medium text-sm">View &gt;</button>
                   </td>
                 </tr>
               ))}
             </tbody>
           </table>
         </div>
+
       </div>
     </main>
   );
