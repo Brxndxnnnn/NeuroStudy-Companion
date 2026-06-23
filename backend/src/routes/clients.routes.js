@@ -65,4 +65,51 @@ router.get(
     clientController.getClientById
 )
 
+/**
+ * @openapi
+ * /api/clients:
+ *   post:
+ *     summary: Create a new client
+ *     description: |
+ *       This endpoint allows you to create a new client by providing the necessary information in the request body.
+ *       The client will be associated with the clinic of the authenticated user.
+ * 
+ *       For **technician users**, the `clinic_id` will be automatically set to the clinic of the authenticated user.
+ *       For **admin users**, the `clinic_id` can be specified in the request body to create a client for a different clinic.
+ *     tags: [Clients]
+ *     security:
+ *       - bearerAuth: []
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             properties:
+ *               name:
+ *                 { type: string, example: "John Doe" }
+ *               dob:
+ *                 { type: string, format: date }
+ *               gender:
+ *                 { type: string, example: "Male" }
+ *               race:
+ *                 { type: string, example: "Chinese" }
+ *               notes:
+ *                 { type: string, example: "Patient has a history of migraines." }
+ *               clinic_id:
+ *                 { type: string, format: uuid, example: "a0000000-0000-0000-0000-000000000001" }
+ *     responses:
+ *       201:
+ *         description: The created client
+ *       400:
+ *         description: Missing required fields or invalid input
+ *       401:
+ *         description: Not authenticated
+ */
+router.post(
+    '/',
+    requirePermission(PERMS.CLIENTS_WRITE_OWN_CLINIC),
+    clientController.createClient
+)
+
 export default router
