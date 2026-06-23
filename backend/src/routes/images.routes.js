@@ -26,7 +26,11 @@ const router = Router()
  *                   image_id:
  *                     type: string
  *                     format: uuid
- *                   image_url:
+ *                   filename:
+ *                     type: string
+ *                   url:
+ *                     type: string
+ *                   category:
  *                     type: string
  *                   created_at:
  *                     type: string
@@ -66,7 +70,11 @@ router.get(
  *                 image_id:
  *                   type: string
  *                   format: uuid
- *                 image_url:
+ *                 filename:
+ *                   type: string
+ *                 url:
+ *                   type: string
+ *                 category:
  *                   type: string
  *                 created_at:
  *                   type: string
