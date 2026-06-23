@@ -84,3 +84,62 @@ ALTER TABLE band_powers DROP CONSTRAINT IF EXISTS band_powers_current_image_id_f
 ALTER TABLE band_powers 
     ADD CONSTRAINT band_powers_current_event_id_fkey 
     FOREIGN KEY (current_event_id) REFERENCES events(event_id) ON DELETE SET NULL;
+
+INSERT INTO questions (question_no, prompt, correct_answer, difficulty) VALUES
+(1, 'What is 7 + 5?',                                                          '12',        'basic'),
+(2, 'What is 18 - 9?',                                                         '9',         'basic'),
+(3, 'What is 6 × 4?',                                                          '24',        'basic'),
+(4, 'What is 36 ÷ 6 + 7?',                                                     '13',        'intermediate'),
+(5, 'Solve for x: 3x + 5 = 20',                                                '5',         'intermediate'),
+(6, 'A rectangle has length 8 cm and width 5 cm. What is its area?',           '40 cm²',    'intermediate'),
+(7, 'Solve for x: 2x² - 8x = 0',                                               'x = 0 or 4','advanced'),
+(8, 'If y = 3x + 2, what is y when x = 5?',                                    '17',        'advanced'),
+(9, 'A shop gives 15% discount on an item priced at 200. What is the final price?', '170',  'advanced');
+
+CREATE TABLE questionnaires (
+    questionnaire_id uuid        PRIMARY KEY DEFAULT gen_random_uuid(),
+    name             text        NOT NULL,
+    description      text,
+    version          text        NOT NULL DEFAULT '1.0',
+    created_at       timestamptz NOT NULL DEFAULT now()
+);
+
+CREATE TABLE questionnaire_questions (
+    question_id      uuid        PRIMARY KEY DEFAULT gen_random_uuid(),
+    questionnaire_id uuid        NOT NULL REFERENCES questionnaires(questionnaire_id) ON DELETE CASCADE,
+    question_no      integer     NOT NULL,
+    statement        jsonb       NOT NULL, -- {"en": "...", "ms": "...", "zh": "..."}
+    response_type    text        NOT NULL DEFAULT 'likert_5',
+    domain           text,
+    is_reverse_scored boolean    NOT NULL DEFAULT false,
+    metadata         jsonb,
+    created_at       timestamptz NOT NULL DEFAULT now(),
+    UNIQUE(questionnaire_id, question_no)  -- enforces ordering uniqueness + replaces the index
+);
+
+CREATE TABLE session_questionnaire_responses (
+    response_id      uuid        PRIMARY KEY DEFAULT gen_random_uuid(),
+    session_id       uuid        NOT NULL REFERENCES sessions(session_id) ON DELETE CASCADE,
+    questionnaire_id uuid        NOT NULL REFERENCES questionnaires(questionnaire_id) ON DELETE RESTRICT,
+    question_id      uuid        NOT NULL REFERENCES questionnaire_questions(question_id) ON DELETE RESTRICT,
+    response_value   jsonb       NOT NULL,
+    clinic_id        uuid        REFERENCES clinics(clinic_id) ON DELETE SET NULL,
+    created_at       timestamptz NOT NULL DEFAULT now(),
+    UNIQUE(session_id, question_id)
+);
+
+CREATE INDEX idx_session_questionnaire_responses_session ON session_questionnaire_responses(session_id);
+CREATE INDEX idx_session_questionnaire_responses_clinic  ON session_questionnaire_responses(clinic_id);
+
+ALTER TABLE session_questionnaire_responses ENABLE ROW LEVEL SECURITY;
+ALTER TABLE session_questionnaire_responses FORCE ROW LEVEL SECURITY;
+
+CREATE POLICY tenant_isolation_policy ON session_questionnaire_responses
+USING (
+    current_setting('app.is_admin', true)::boolean = true
+    OR clinic_id = NULLIF(current_setting('app.current_clinic_id', true), '')::uuid
+)
+WITH CHECK (
+    current_setting('app.is_admin', true)::boolean = true
+    OR clinic_id = NULLIF(current_setting('app.current_clinic_id', true), '')::uuid
+);
