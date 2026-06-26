@@ -167,6 +167,10 @@
                                 <Button x:Name="BtnCapture" Content="Start capture" Click="BtnCapture_Click" IsEnabled="False"/>
                                 <TextBlock x:Name="TxtCapture" Text="idle" VerticalAlignment="Center" Foreground="{StaticResource Muted2}"/>
                             </StackPanel>
+                            <StackPanel Orientation="Horizontal" Margin="0,8,0,0">
+                                <Button x:Name="BtnRvf" Content="Raw vs filtered" Click="BtnRvf_Click" IsEnabled="False"/>
+                                <TextBlock x:Name="TxtRvf" Text="(temp) idle" VerticalAlignment="Center" Foreground="{StaticResource Muted2}"/>
+                            </StackPanel>
                         </StackPanel>
                     </Border>
                 </StackPanel>

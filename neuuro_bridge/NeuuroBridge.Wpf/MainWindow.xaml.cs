@@ -165,6 +165,25 @@ namespace NeuuroBridge.Wpf
             }
         }
 
+        // TEMP (client request): capture raw-float vs SDK-filtered (both µV) into one CSV for comparison.
+        private void BtnRvf_Click(object sender, RoutedEventArgs e)
+        {
+            if (!_ctl.IsRvfCapturing)
+            {
+                _ctl.StartRawVsFilteredCapture();
+                BtnRvf.Content = "Stop & save";
+                TxtRvf.Text = "capturing…";
+            }
+            else
+            {
+                var (raw, filt) = _ctl.StopRawVsFilteredCapture();
+                string path = _ctl.WriteRawVsFilteredCsv();
+                BtnRvf.Content = "Raw vs filtered";
+                TxtRvf.Text = path == null ? "no frames captured" : $"saved {raw} raw / {filt} filt frames";
+                if (path != null) Log("Raw-vs-filtered saved → " + path);
+            }
+        }
+
         // ── Controller event handlers ────────────────────────────────────────
         private void OnConnected(string addr, string id)
         {
@@ -178,6 +197,7 @@ namespace NeuuroBridge.Wpf
             BtnReauth.IsEnabled = true;
             BtnStartSession.IsEnabled = true;
             BtnCapture.IsEnabled = true;
+            BtnRvf.IsEnabled = true;
         }
 
         // Transient BLE drop — the bridge is auto-reconnecting to the same device, session preserved.
@@ -209,6 +229,7 @@ namespace NeuuroBridge.Wpf
             BtnStartSession.IsEnabled = false;
             BtnStopSession.IsEnabled = false;
             BtnCapture.IsEnabled = false;
+            BtnRvf.IsEnabled = false;
             RecDot.Visibility = Visibility.Collapsed; TxtElapsed.Text = "";
             // Clear the session card — a reconnect prepares a fresh session/code.
             TxtPairing.Text = "—"; TxtSessionId.Text = "—"; TxtStarted.Text = "—";
