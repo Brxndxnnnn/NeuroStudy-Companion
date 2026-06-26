@@ -1,13 +1,13 @@
-# --- Stage 1: Install Dependencies
-FROM node:18-alpine AS deps
+# --- Stage 1: Install Dependencies ---
+FROM node:20-alpine AS deps
 WORKDIR /app
 # Copy package manifests
 COPY package.json package-lock.json ./
-# Install dependencies cleanly
-RUN npm ci
+# Tell npm to retry up to 5 times if the network drops, then install
+RUN npm config set fetch-retries 5 && npm install
 
-# --- Stage 2: Build the App
-FROM node:18-alpine AS builder
+# --- Stage 2: Build the App ---
+FROM node:20-alpine AS builder
 WORKDIR /app
 COPY --from=deps /app/node_modules ./node_modules
 # Copy all project files
@@ -16,11 +16,12 @@ COPY . .
 RUN npm run build
 
 # --- Stage 3: Production Runner ---
-FROM node:18-alpine AS runner
+FROM node:20-alpine AS runner
 WORKDIR /app
 
-ENV NODE_ENV production
-ENV PORT 3000
+# Using the modern ENV syntax to clear Docker warnings
+ENV NODE_ENV=production
+ENV PORT=3000
 
 # Copy the standalone build from the builder stage
 COPY --from=builder /app/public ./public
