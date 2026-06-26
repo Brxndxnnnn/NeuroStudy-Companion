@@ -144,7 +144,7 @@ export default function ActiveSessionMockup() {
           const sessionData = await checkRes.json();
           
           // DEMO BYPASS: "|| true" kept here for your testing without the C# app
-          if (sessionData.bridge_recording_at !== null || true) {
+          if (sessionData.bridge_recording_at !== null) {
             clearInterval(pollInterval);
             setIsWaitingForBridge(false);
             setCurrentStep("images");
