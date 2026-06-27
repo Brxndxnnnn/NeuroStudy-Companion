@@ -1,19 +1,20 @@
 using System;
-using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Media;
-using System.Windows.Shapes;
+using ScottPlot;
+using ScottPlot.Plottable;
+using Drawing = System.Drawing;
 
 namespace NeuuroBridge.Wpf
 {
     /// <summary>
-    /// Dependency-free live EEG visuals styled after the Neeuro reference app's paper
-    /// strip charts (adapted to the dark theme): three tabs of stacked, labelled lanes
-    /// with thin scrolling lines.
-    ///   • EEG Waves      — 4 raw channels, auto-scaled per lane to strip the DC offset.
-    ///   • Frequency Bands — δ θ α β γ band power (avg of 4 channels) over time + current value.
-    ///   • Mental States   — Attention / Relaxation / Workload over time + current value.
-    /// Fed from BridgeController.RawFrame / FftBandPowers / cognitive; redraws on a ~25 fps timer.
+    /// Live EEG visuals rendered with ScottPlot — three tabs of scrolling strip charts:
+    ///   • EEG Waves       — 4 raw channels, auto-scaled per lane to strip the DC offset.
+    ///   • Frequency Bands — δ θ α β γ band power over time (Avg or a single channel), current
+    ///                       value shown live in the legend.
+    ///   • Mental States   — Attention / Relaxation / Workload (0–100) over time.
+    /// Fed from BridgeController.RawFrame / FftBandPowers / cognitive; redrawn off the composition
+    /// clock, throttled to ~20 fps, and only the currently visible tab is refreshed.
     /// </summary>
     public partial class LiveEegPanel : UserControl
     {
@@ -23,31 +24,34 @@ namespace NeuuroBridge.Wpf
         private const int BandSources = 5;    // [0] = avg of channels, [1..4] = Fp1, Fp2, T4, T3
         private const int Cogs = 3;
         private const int Hist = 200;         // rolling history for band / cognitive strips
-        private const double RightPad = 8;
+        private const double LaneGap = 2.0;   // vertical spacing between normalised lanes
+        private const double LaneAmp = 1.6;   // normalised peak-to-peak amplitude within a lane
 
-        private static readonly string[] EegLabels = { "Ch1\nFp1", "Ch2\nFp2", "Ch3\nT4", "Ch4\nT3" };
-        private static readonly string[] BandLabels =
-        {
-            "Delta\n(1–4 Hz)", "Theta\n(4–8 Hz)", "Alpha\n(8–12 Hz)",
-            "Beta\n(12–30 Hz)", "Gamma\n(30–40 Hz)"
-        };
-        private static readonly string[] CogLabels = { "Attention", "Relaxation", "Mental\nWorkload" };
+        private static readonly string[] ChNames   = { "Ch1 Fp1", "Ch2 Fp2", "Ch3 T4", "Ch4 T3" };
+        private static readonly string[] BandNames  = { "Delta", "Theta", "Alpha", "Beta", "Gamma" };
+        private static readonly string[] CogNames   = { "Attention", "Relaxation", "Workload" };
         private static readonly string[] SourceLabels = { "Avg", "Ch1", "Ch2", "Ch3", "Ch4" };
 
-        private static readonly Brush LineBrush   = Br("#B7C5D9");   // thin paper-style trace
-        private static readonly Brush SepBrush    = Br("#22303F");   // faint lane separator
-        private static readonly Brush LabelBrush  = Br("#92A2B8");
-        private static readonly Brush ValueBrush  = Br("#E6EDF6");
-        private static readonly Brush ChipBrush   = Br("#1E2A3C");   // unselected channel chip
-        private static readonly Brush AccentBrush = Br("#3B82F6");   // selected channel chip
+        private static readonly Drawing.Color[] Palette =
+        {
+            Drawing.Color.FromArgb(0x3B, 0x82, 0xF6),   // blue
+            Drawing.Color.FromArgb(0x22, 0xC5, 0x5E),   // green
+            Drawing.Color.FromArgb(0xF5, 0x9E, 0x0B),   // amber
+            Drawing.Color.FromArgb(0xE6, 0x7E, 0x22),   // orange
+            Drawing.Color.FromArgb(0xA7, 0x8B, 0xFA),   // violet
+        };
 
-        // ── Rolling buffers ──────────────────────────────────────────────────
+        private static readonly Brush LabelBrush  = Br("#92A2B8");
+        private static readonly Brush ChipBrush    = Br("#1E2A3C");   // unselected channel chip
+        private static readonly Brush AccentBrush  = Br("#3B82F6");   // selected channel chip
+
+        // ── Rolling source buffers ───────────────────────────────────────────
         private readonly double[][] _raw = new double[Channels][];
         private int _rawHead, _rawCount;
         private readonly object _lock = new object();
 
-        // Band history is kept per source: _bandHist[source][band][sample]. Source 0 is the
-        // 4-channel average; 1..4 are the individual channels (Fp1, Fp2, T4, T3).
+        // Band history per source: _bandHist[source][band][sample]. Source 0 is the 4-channel
+        // average; 1..4 are the individual channels (Fp1, Fp2, T4, T3).
         private readonly double[][][] _bandHist = new double[BandSources][][];
         private readonly double[][] _bandLatest = new double[BandSources][];
         private int _bandHead, _bandCount;
@@ -58,21 +62,10 @@ namespace NeuuroBridge.Wpf
         private int _cogHead, _cogCount;
         private readonly double[] _cogLatest = { double.NaN, double.NaN, double.NaN };
 
-        // ── Lane visuals ─────────────────────────────────────────────────────
-        private sealed class Lane
-        {
-            public Polyline Wave;
-            public Line Baseline;
-            public TextBlock Label;
-            public TextBlock Value;   // null when the lane shows no numeric readout
-
-            // Envelope-smoothed auto-scale so the trace doesn't "breathe" each time a
-            // spike scrolls out of the window. Fast attack, slow release (see DrawWave).
-            public double SmMid, SmRange;
-            public bool ScaleInit;
-        }
-
-        private Lane[] _eegLanes, _bandLanes, _cogLanes;
+        // ── ScottPlot display buffers (referenced live by the SignalPlots) ────
+        private double[][] _eegPlot, _bandPlot, _cogPlot;
+        private SignalPlot[] _eegSig, _bandSig, _cogSig;
+        private int _frame;
 
         public LiveEegPanel()
         {
@@ -87,54 +80,111 @@ namespace NeuuroBridge.Wpf
             }
             for (int c = 0; c < Cogs; c++) _cogHist[c] = new double[Hist];
 
-            _eegLanes  = BuildLanes(WaveCanvas, EegLabels, withValue: false);
-            _bandLanes = BuildLanes(BandCanvas, BandLabels, withValue: true);
-            _cogLanes  = BuildLanes(CogCanvas, CogLabels, withValue: true);
+            SetupPlots();
             BuildChannelSelector();
 
-            // Drive redraws off the composition clock (vsync, ~60 fps and frame-synced)
-            // instead of a 25 fps timer, so the trace scrolls continuously and evenly.
-            Loaded += (_, __) => CompositionTarget.Rendering += OnRendering;
+            // Drive redraws off the composition clock (vsync) but only refresh the visible tab.
+            Loaded   += (_, __) => CompositionTarget.Rendering += OnRendering;
             Unloaded += (_, __) => CompositionTarget.Rendering -= OnRendering;
         }
 
         private void OnRendering(object sender, EventArgs e)
         {
-            DrawEeg();
-            DrawBands();
-            DrawCog();
+            if (++_frame % 3 != 0) return;          // ~20 fps is plenty for a strip chart
+            if (EegPlot.IsVisible)       UpdateEeg();
+            else if (BandPlot.IsVisible) UpdateBands();
+            else if (CogPlot.IsVisible)  UpdateCog();
         }
 
-        private static Lane[] BuildLanes(Canvas canvas, string[] labels, bool withValue)
+        // ── Plot setup ───────────────────────────────────────────────────────
+        private void SetupPlots()
         {
-            var lanes = new Lane[labels.Length];
-            for (int i = 0; i < labels.Length; i++)
-            {
-                var lane = new Lane
-                {
-                    Baseline = new Line { Stroke = SepBrush, StrokeThickness = 1 },
-                    Wave = new Polyline { Stroke = LineBrush, StrokeThickness = 1.1, StrokeLineJoin = PenLineJoin.Round },
-                    Label = new TextBlock
-                    {
-                        Text = labels[i], Foreground = LabelBrush, FontSize = 10,
-                        FontWeight = FontWeights.SemiBold, TextAlignment = TextAlignment.Center,
-                        LayoutTransform = new RotateTransform(-90)
-                    }
-                };
-                canvas.Children.Add(lane.Baseline);
-                canvas.Children.Add(lane.Wave);
-                canvas.Children.Add(lane.Label);
-                if (withValue)
-                {
-                    lane.Value = new TextBlock { Text = "—", Foreground = ValueBrush, FontSize = 15, FontWeight = FontWeights.Bold };
-                    canvas.Children.Add(lane.Value);
-                }
-                lanes[i] = lane;
-            }
-            return lanes;
+            _eegPlot  = Alloc(Channels, RawWindow);
+            _bandPlot = Alloc(Bands, Hist);
+            _cogPlot  = Alloc(Cogs, Hist);
+
+            _eegSig  = AddStackedLanes(EegPlot, _eegPlot, ChNames);
+            _bandSig = AddStackedLanes(BandPlot, _bandPlot, BandNames);
+            _cogSig  = AddSharedAxis(CogPlot, _cogPlot, CogNames, yMin: 0, yMax: 100);
         }
 
-        // Channel selector for the Frequency Bands tab (Avg · Ch1 · Ch2 · Ch3 · Ch4).
+        private static double[][] Alloc(int n, int len)
+        {
+            var a = new double[n][];
+            for (int i = 0; i < n; i++) a[i] = new double[len];
+            return a;
+        }
+
+        /// <summary>Stacked, per-lane auto-scaled strips (DC stripped). Used for EEG + bands.</summary>
+        private static SignalPlot[] AddStackedLanes(WpfPlot ctrl, double[][] buf, string[] names)
+        {
+            var plt = ctrl.Plot;
+            StyleDark(plt);
+            LockView(ctrl);
+            int n = names.Length;
+            var sigs = new SignalPlot[n];
+            for (int i = 0; i < n; i++)
+            {
+                var s = plt.AddSignal(buf[i]);
+                s.Color = Palette[i % Palette.Length];
+                s.LineWidth = 1;
+                s.Label = names[i];
+                sigs[i] = s;
+            }
+            plt.SetAxisLimits(0, buf[0].Length - 1, -1.5, (n - 1) * LaneGap + 1.5);
+            plt.YAxis.Ticks(false);     // lane offsets are arbitrary
+            plt.XAxis.Ticks(false);     // x is just sample index
+            plt.Legend(true, Alignment.UpperRight);
+            ctrl.Refresh();
+            return sigs;
+        }
+
+        /// <summary>Real-valued lines on a shared, fixed Y axis. Used for the 0–100 cognitive metrics.</summary>
+        private static SignalPlot[] AddSharedAxis(WpfPlot ctrl, double[][] buf, string[] names, double yMin, double yMax)
+        {
+            var plt = ctrl.Plot;
+            StyleDark(plt);
+            LockView(ctrl);
+            int n = names.Length;
+            var sigs = new SignalPlot[n];
+            for (int i = 0; i < n; i++)
+            {
+                var s = plt.AddSignal(buf[i]);
+                s.Color = Palette[i % Palette.Length];
+                s.LineWidth = 1.5f;
+                s.Label = names[i];
+                sigs[i] = s;
+            }
+            plt.SetAxisLimits(0, buf[0].Length - 1, yMin, yMax);
+            plt.XAxis.Ticks(false);
+            plt.Legend(true, Alignment.UpperRight);
+            ctrl.Refresh();
+            return sigs;
+        }
+
+        /// <summary>Locks the view: these are fixed-window live strips, so mouse pan/zoom (which
+        /// would let the user scroll off into empty space) is disabled.</summary>
+        private static void LockView(WpfPlot ctrl)
+        {
+            ctrl.Configuration.Pan = false;
+            ctrl.Configuration.Zoom = false;
+            ctrl.Configuration.ScrollWheelZoom = false;
+            ctrl.Configuration.DoubleClickBenchmark = false;
+        }
+
+        private static void StyleDark(Plot plt)
+        {
+            plt.Style(
+                figureBackground: Drawing.Color.FromArgb(0x0B, 0x12, 0x1C),
+                dataBackground:   Drawing.Color.FromArgb(0x0B, 0x12, 0x1C),
+                grid:             Drawing.Color.FromArgb(0x22, 0x30, 0x3F),
+                tick:             Drawing.Color.FromArgb(0x6B, 0x7A, 0x90),
+                axisLabel:        Drawing.Color.FromArgb(0x92, 0xA2, 0xB8),
+                titleLabel:       Drawing.Color.FromArgb(0xE6, 0xED, 0xF6));
+            plt.Margins(0, 0);
+        }
+
+        // ── Channel selector (Avg · Ch1 · Ch2 · Ch3 · Ch4) for the bands tab ──
         private void BuildChannelSelector()
         {
             _srcButtons = new Button[BandSources];
@@ -145,10 +195,10 @@ namespace NeuuroBridge.Wpf
                 {
                     Content = SourceLabels[i],
                     FontSize = 11,
-                    Padding = new Thickness(10, 3, 10, 3),
-                    Margin = new Thickness(0, 0, 6, 0)
+                    Padding = new System.Windows.Thickness(10, 3, 10, 3),
+                    Margin = new System.Windows.Thickness(0, 0, 6, 0)
                 };
-                btn.Click += (_, __) => { _selectedSource = idx; UpdateSelectorVisuals(); DrawBands(); };
+                btn.Click += (_, __) => { _selectedSource = idx; UpdateSelectorVisuals(); };
                 _srcButtons[i] = btn;
                 BandChannelBar.Children.Add(btn);
             }
@@ -162,7 +212,7 @@ namespace NeuuroBridge.Wpf
                 bool sel = i == _selectedSource;
                 _srcButtons[i].Background = sel ? AccentBrush : ChipBrush;
                 _srcButtons[i].Foreground = sel ? Brushes.White : LabelBrush;
-                _srcButtons[i].FontWeight = sel ? FontWeights.SemiBold : FontWeights.Normal;
+                _srcButtons[i].FontWeight = sel ? System.Windows.FontWeights.SemiBold : System.Windows.FontWeights.Normal;
             }
         }
 
@@ -228,70 +278,57 @@ namespace NeuuroBridge.Wpf
             for (int s = 0; s < BandSources; s++)
                 for (int b = 0; b < Bands; b++) _bandLatest[s][b] = 0;
             for (int c = 0; c < Cogs; c++) _cogLatest[c] = double.NaN;
-            foreach (var l in _eegLanes) { l.Wave.Points = new PointCollection(); l.ScaleInit = false; }
-            foreach (var l in _bandLanes) { l.Wave.Points = new PointCollection(); l.Value.Text = "—"; l.ScaleInit = false; }
-            foreach (var l in _cogLanes) { l.Wave.Points = new PointCollection(); l.Value.Text = "—"; l.ScaleInit = false; }
+
+            ZeroLanes(_eegPlot, Channels);
+            ZeroLanes(_bandPlot, Bands);
+            foreach (var buf in _cogPlot) Array.Clear(buf, 0, buf.Length);
+            EegPlot.Refresh(); BandPlot.Refresh(); CogPlot.Refresh();
         }
 
-        // ── Rendering ────────────────────────────────────────────────────────
-        private void DrawEeg()
+        private static void ZeroLanes(double[][] buf, int n)
         {
-            double w = WaveCanvas.ActualWidth, h = WaveCanvas.ActualHeight;
-            if (w < 4 || h < 4) return;
+            for (int i = 0; i < n; i++)
+            {
+                double off = (n - 1 - i) * LaneGap;
+                for (int j = 0; j < buf[i].Length; j++) buf[i][j] = off;
+            }
+        }
 
-            int count, head;
-            double[][] snap;
+        // ── Per-frame updates (only the visible tab) ─────────────────────────
+        private void UpdateEeg()
+        {
             lock (_lock)
             {
-                count = _rawCount; head = _rawHead;
-                snap = new double[Channels][];
                 for (int ch = 0; ch < Channels; ch++)
-                {
-                    snap[ch] = new double[count];
-                    for (int j = 0; j < count; j++) snap[ch][j] = _raw[ch][(head - count + j + RawWindow) % RawWindow];
-                }
+                    NormalizeInto(_eegPlot[ch], Snapshot(_raw[ch], _rawHead, _rawCount), _rawCount,
+                                  (Channels - 1 - ch) * LaneGap);
             }
-
-            double laneH = h / Channels, gutter = 26;
-            for (int ch = 0; ch < Channels; ch++)
-            {
-                double top = laneH * ch;
-                PositionChrome(_eegLanes[ch], top, laneH, gutter, w);
-                DrawWave(_eegLanes[ch], snap[ch], count, top, laneH, gutter, w);
-            }
+            EegPlot.Refresh();
         }
 
-        private void DrawBands()
+        private void UpdateBands()
         {
-            double w = BandCanvas.ActualWidth, h = BandCanvas.ActualHeight;
-            if (w < 4 || h < 4) return;
-
             int src = _selectedSource;
-            double laneH = h / Bands, gutter = 64;
             for (int b = 0; b < Bands; b++)
             {
-                double top = laneH * b;
-                PositionChrome(_bandLanes[b], top, laneH, gutter, w);
-                DrawWave(_bandLanes[b], Snapshot(_bandHist[src][b], _bandHead, _bandCount), _bandCount, top, laneH, gutter, w);
-                _bandLanes[b].Value.Text = _bandCount == 0 ? "—" : Fmt(_bandLatest[src][b]);
+                NormalizeInto(_bandPlot[b], Snapshot(_bandHist[src][b], _bandHead, _bandCount), _bandCount,
+                              (Bands - 1 - b) * LaneGap);
+                _bandSig[b].Label = _bandCount == 0 ? BandNames[b] : $"{BandNames[b]}  {Fmt(_bandLatest[src][b])}";
             }
+            BandPlot.Refresh();
         }
 
-        private void DrawCog()
+        private void UpdateCog()
         {
-            double w = CogCanvas.ActualWidth, h = CogCanvas.ActualHeight;
-            if (w < 4 || h < 4) return;
-
-            double laneH = h / Cogs, gutter = 64;
             for (int c = 0; c < Cogs; c++)
             {
-                double top = laneH * c;
-                PositionChrome(_cogLanes[c], top, laneH, gutter, w);
-                DrawWave(_cogLanes[c], Snapshot(_cogHist[c], _cogHead, _cogCount), _cogCount, top, laneH, gutter, w);
-                _cogLanes[c].Value.Text = double.IsNaN(_cogLatest[c]) ? "—" : Fmt(_cogLatest[c]);
+                RightAlign(_cogPlot[c], Snapshot(_cogHist[c], _cogHead, _cogCount), _cogCount);
+                _cogSig[c].Label = double.IsNaN(_cogLatest[c]) ? CogNames[c] : $"{CogNames[c]}  {Fmt(_cogLatest[c])}";
             }
+            CogPlot.Refresh();
         }
 
+        // ── Buffer helpers ───────────────────────────────────────────────────
         private static double[] Snapshot(double[] ring, int head, int count)
         {
             var outp = new double[count];
@@ -300,67 +337,31 @@ namespace NeuuroBridge.Wpf
             return outp;
         }
 
-        /// <summary>Positions the lane separator, rotated label and (optional) value readout.</summary>
-        private static void PositionChrome(Lane lane, double top, double laneH, double gutter, double w)
+        /// <summary>Right-aligns <paramref name="count"/> samples into <paramref name="dst"/>, with the
+        /// DC offset removed and amplitude normalised onto the lane at <paramref name="off"/>.</summary>
+        private static void NormalizeInto(double[] dst, double[] src, int count, double off)
         {
-            lane.Baseline.X1 = gutter;
-            lane.Baseline.X2 = w - RightPad;
-            lane.Baseline.Y1 = lane.Baseline.Y2 = top + laneH - 0.5;
+            int cap = dst.Length, pad = Math.Max(0, cap - count);
+            double mean = 0, min = double.MaxValue, max = double.MinValue;
+            for (int j = 0; j < count; j++) { double v = src[j]; mean += v; if (v < min) min = v; if (v > max) max = v; }
+            if (count > 0) mean /= count;
+            double range = max - min; if (range < 1e-9) range = 1;
 
-            lane.Label.Measure(new Size(double.PositiveInfinity, double.PositiveInfinity));
-            double lblH = lane.Label.DesiredSize.Height;   // rotated bounding box height
-            Canvas.SetLeft(lane.Label, lane.Value != null ? 32 : 6);
-            Canvas.SetTop(lane.Label, top + Math.Max(0, (laneH - lblH) / 2));
-
-            if (lane.Value != null)
-            {
-                lane.Value.Measure(new Size(double.PositiveInfinity, double.PositiveInfinity));
-                Canvas.SetLeft(lane.Value, 6);
-                Canvas.SetTop(lane.Value, top + Math.Max(0, (laneH - lane.Value.DesiredSize.Height) / 2));
-            }
+            for (int j = 0; j < pad; j++) dst[j] = off;
+            for (int j = 0; j < count && pad + j < cap; j++) dst[pad + j] = (src[j] - mean) / range * LaneAmp + off;
         }
 
-        /// <summary>Draws one auto-scaled trace within a lane. The min..max window scale is
-        /// envelope-smoothed (fast attack / slow release) so a spike shows immediately but the
-        /// gain doesn't snap — and thus the whole trace doesn't visibly jump — each time that
-        /// spike later scrolls out of the window.</summary>
-        private static void DrawWave(Lane lane, double[] data, int count, double top, double laneH, double gutter, double w)
+        /// <summary>Right-aligns real-valued samples into <paramref name="dst"/>, padding the unused left
+        /// with the oldest value so the line enters flat rather than from zero.</summary>
+        private static void RightAlign(double[] dst, double[] src, int count)
         {
-            var wave = lane.Wave;
-            if (count < 2) { wave.Points = new PointCollection(); return; }
-
-            double min = double.MaxValue, max = double.MinValue;
-            for (int j = 0; j < count; j++) { double v = data[j]; if (v < min) min = v; if (v > max) max = v; }
-            double tMid = (min + max) / 2, tRange = max - min;
-
-            if (!lane.ScaleInit) { lane.SmMid = tMid; lane.SmRange = tRange; lane.ScaleInit = true; }
-            else
-            {
-                lane.SmMid += (tMid - lane.SmMid) * 0.2;
-                double aRange = tRange > lane.SmRange ? 0.35 : 0.03;   // grow fast, shrink slow
-                lane.SmRange += (tRange - lane.SmRange) * aRange;
-            }
-
-            double mid = lane.SmMid, range = lane.SmRange;
-            double cy = top + laneH / 2, amp = laneH * 0.38;
-            double plotW = (w - RightPad) - gutter;
-            double stepX = count > 1 ? plotW / (count - 1) : plotW;
-
-            var pts = new PointCollection(count);
-            for (int j = 0; j < count; j++)
-            {
-                double norm = range > 1e-9 ? (data[j] - mid) / (range / 2) : 0;   // flat → centered
-                if (norm > 1.25) norm = 1.25; else if (norm < -1.25) norm = -1.25; // clamp attack overshoot
-                pts.Add(new Point(gutter + j * stepX, cy - norm * amp));
-            }
-            wave.Points = pts;
+            int cap = dst.Length, pad = Math.Max(0, cap - count);
+            double baseV = count > 0 ? src[0] : 0;
+            for (int j = 0; j < pad; j++) dst[j] = baseV;
+            for (int j = 0; j < count && pad + j < cap; j++) dst[pad + j] = src[j];
         }
 
         private static string Fmt(double v) => Math.Abs(v) >= 10 ? v.ToString("F0") : v.ToString("0.#");
-
-        private void WaveCanvas_SizeChanged(object sender, SizeChangedEventArgs e) => DrawEeg();
-        private void BandCanvas_SizeChanged(object sender, SizeChangedEventArgs e) => DrawBands();
-        private void CogCanvas_SizeChanged(object sender, SizeChangedEventArgs e) => DrawCog();
 
         private static SolidColorBrush Br(string hex)
         {

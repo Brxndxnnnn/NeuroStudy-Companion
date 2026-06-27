@@ -62,23 +62,27 @@ namespace NeuuroBridge
         private string _connAddress = "", _connDeviceID = "";
         private SenzeBandDeviceInfo _connDevice;
 
-        // CSV capture.
+        // ── CSV capture (single combined export) ──────────────────────────────
+        // Two parallel buffers, paired by arrival index at write time: the raw stream (int ADC +
+        // float µV, each frame tagged with the last-known HR/SpO2/cognitive/quality at arrival) and
+        // the filtered µV stream. One row per sample at the true 250 Hz with a uniform timestamp.
+        private const int CaptureSampleRateHz = 250;   // true hardware rate (matches DbUploader)
         private volatile bool _capturing;
-        private readonly Stopwatch _captureWatch = new Stopwatch();
-        private readonly List<(long Ms, long Frame, int[] Samples)> _captureBuf = new List<(long, long, int[])>();
+        private readonly List<CapFrame> _capRaw = new List<CapFrame>();
+        private readonly List<(DateTime Arrival, float[] Samples)> _capFilt = new List<(DateTime, float[])>();
         private readonly object _captureLock = new object();
 
-        // ── TEMPORARY (client request): raw-vs-filtered comparison capture ────────
-        // Records the SDK's raw-float (µV) and filtered (µV) streams in parallel so the
-        // two can be diffed side by side in one CSV. Paired by arrival index (both derive
-        // from the same hardware stream). Each frame's arrival UTC is stored so the CSV can
-        // emit a DB-style uniform per-sample timestamp plus the raw arrival for verification.
-        // Independent of the raw-int CSV capture above. Remove when done.
-        private const int RvfSampleRateHz = 250;   // true hardware rate (matches DbUploader; NOT EegProcessor.SampleRate=256)
-        private volatile bool _rvfCapturing;
-        private readonly List<(DateTime Arrival, float[] Samples)> _rvfRaw = new List<(DateTime, float[])>();
-        private readonly List<(DateTime Arrival, float[] Samples)> _rvfFilt = new List<(DateTime, float[])>();
-        private readonly object _rvfLock = new object();
+        // One captured raw frame plus the live values that were current when it arrived.
+        private struct CapFrame
+        {
+            public DateTime Arrival;
+            public long Frame;
+            public int[] RawAdc;       // raw int ADC counts
+            public float[] RawUv;      // raw float µV
+            public int? Hr, Spo2;
+            public float Att, Rel, Mwl;
+            public int SignalQuality;
+        }
 
         private bool _wired;
 
@@ -238,11 +242,10 @@ namespace NeuuroBridge
             _svc.OnFilteredEeg += f => { lock (_stateLock) _lastFiltered = f; };
             _svc.OnFilteredEeg += f => _processor.AddFilteredFrame(f);
             _svc.OnFilteredEeg += UploadFilteredFrame;   // DB: full-res filtered µV → eeg_filtered_samples
-            _svc.OnFilteredEeg += f =>   // TEMP: raw-vs-filtered capture (µV filtered stream)
+            _svc.OnFilteredEeg += f =>   // combined CSV capture: filtered µV stream
             {
-                if (!_rvfCapturing || f == null) return;
                 // Filtered frames carry no SDK arrival stamp; capture now (in the marshalled handler).
-                lock (_rvfLock) _rvfFilt.Add((DateTime.UtcNow, f));
+                if (_capturing && f != null) lock (_captureLock) _capFilt.Add((DateTime.UtcNow, f));
             };
             _svc.OnAuthStatus += (ok, detail) => AuthChanged?.Invoke(ok, detail);
 
@@ -452,13 +455,6 @@ namespace NeuuroBridge
                 Interlocked.Increment(ref _rawFrameCount);
                 lock (_stateLock) _lastRawInt = frame.IntSamples;
 
-                if (_capturing)
-                {
-                    long ms = _captureWatch.ElapsedMilliseconds;
-                    long fn = Interlocked.Read(ref _rawFrameCount);
-                    lock (_captureLock) _captureBuf.Add((ms, fn, (int[])frame.IntSamples.Clone()));
-                }
-
                 // Capture a local ref: StopSession may dispose _db on another thread mid-frame.
                 var db = _db;
                 if (SessionActive && db != null && db.Streaming)
@@ -472,12 +468,9 @@ namespace NeuuroBridge
                 }
             }
 
-            // TEMP raw-vs-filtered: capture the raw-float (µV) stream (a separate SDK callback from int).
-            // ArrivalUtc is the SDK-synchronous delivery instant — same anchor the DB raw path uses.
-            if (_rvfCapturing && frame.FloatSamples != null)
-            {
-                lock (_rvfLock) _rvfRaw.Add((frame.ArrivalUtc, frame.FloatSamples));
-            }
+            // Combined CSV capture: record raw ADC + raw µV for this frame, tagged with the
+            // last-known vitals/cognitive. ArrivalUtc is the SDK-synchronous delivery instant.
+            if (_capturing) CaptureRawFrame(frame);
 
             RawFrame?.Invoke(frame);
         }
@@ -539,129 +532,114 @@ namespace NeuuroBridge
             });
         }
 
-        // ── CSV capture ──────────────────────────────────────────────────────
+        // ── CSV capture (single combined export) ─────────────────────────────
         public void StartCapture()
         {
-            lock (_captureLock) _captureBuf.Clear();
-            _captureWatch.Restart();
+            lock (_captureLock) { _capRaw.Clear(); _capFilt.Clear(); }
             _capturing = true;
         }
 
+        /// <summary>Stops capturing and returns the number of raw frames buffered.</summary>
         public int StopCapture()
         {
             _capturing = false;
-            lock (_captureLock) return _captureBuf.Count;
+            lock (_captureLock) return _capRaw.Count;
         }
 
-        /// <summary>Writes the captured frames to a CSV and returns the full path (or null if empty).</summary>
-        public string WriteCsv(string directory = null)
+        private void CaptureRawFrame(RawEegFrame frame)
         {
-            List<(long Ms, long Frame, int[] Samples)> frames;
-            lock (_captureLock) frames = new List<(long, long, int[])>(_captureBuf);
-            if (frames.Count == 0) return null;
-
-            string filename = $"raw_{SessionId}_{DateTime.UtcNow:yyyyMMdd_HHmmss}.csv";
-            string path = directory != null ? Path.Combine(directory, filename) : filename;
-
-            using (var sw = new StreamWriter(path, false, Encoding.UTF8))
+            int? hr, spo2; float att, rel, mwl; bool? ready; bool[] channels;
+            lock (_stateLock)
             {
-                sw.WriteLine("elapsed_ms,frame,sample_idx,Fp1,Fp2,T4,T3");
-                foreach (var (ms, frameNum, samples) in frames)
-                {
-                    if (samples == null || samples.Length < ChannelCount) continue;
-                    int spc = samples.Length / ChannelCount;
-                    for (int s = 0; s < spc; s++)
-                    {
-                        sw.Write(ms); sw.Write(','); sw.Write(frameNum); sw.Write(','); sw.Write(s);
-                        for (int ch = 0; ch < ChannelCount; ch++) { sw.Write(','); sw.Write(samples[ch * spc + s]); }
-                        sw.WriteLine();
-                    }
-                }
+                hr = _heartRate; spo2 = _spo2;
+                att = _sdkAttention; rel = _sdkRelaxation; mwl = _sdkMentalWorkload;
+                ready = _signalReady; channels = _channels;
             }
-            return Path.GetFullPath(path);
-        }
-
-        // ── TEMPORARY (client request): raw-vs-filtered comparison CSV ───────
-        /// <summary>True while a raw-vs-filtered comparison capture is running.</summary>
-        public bool IsRvfCapturing => _rvfCapturing;
-
-        /// <summary>Starts capturing the SDK's raw-float (µV) and filtered (µV) streams for comparison.
-        /// Frames only flow once the device is authenticated and streaming. TEMP — remove when done.</summary>
-        public void StartRawVsFilteredCapture()
-        {
-            lock (_rvfLock) { _rvfRaw.Clear(); _rvfFilt.Clear(); }
-            _rvfCapturing = true;
-        }
-
-        /// <summary>Stops the comparison capture and returns the (raw, filtered) frame counts. TEMP.</summary>
-        public (int raw, int filt) StopRawVsFilteredCapture()
-        {
-            _rvfCapturing = false;
-            lock (_rvfLock) return (_rvfRaw.Count, _rvfFilt.Count);
+            var rec = new CapFrame
+            {
+                Arrival = frame.ArrivalUtc,
+                Frame = Interlocked.Read(ref _rawFrameCount),
+                RawAdc = frame.IntSamples != null ? (int[])frame.IntSamples.Clone() : null,
+                RawUv = frame.FloatSamples != null ? (float[])frame.FloatSamples.Clone() : null,
+                Hr = hr, Spo2 = spo2, Att = att, Rel = rel, Mwl = mwl,
+                SignalQuality = SignalQuality.Compute(ready, channels),
+            };
+            lock (_captureLock) _capRaw.Add(rec);
         }
 
         /// <summary>
-        /// Writes one CSV pairing raw-float (µV) against SDK-filtered (µV) per channel, one row per
-        /// sample. Frames are paired by arrival index (both streams derive from the same hardware feed).
-        /// <para>
-        /// sample_time_utc is a DB-style UNIFORM per-sample timestamp: anchored to the first raw frame's
-        /// arrival, then advanced by 1/250 s per sample (same scheme as DbUploader.CopyRaw — BLE delivers
-        /// frames in uneven bursts, so a uniform axis is truer than per-frame arrival). raw_arrival_utc /
-        /// filt_arrival_utc expose each frame's actual arrival so the pairing/timeline can be verified.
-        /// </para>
-        /// Returns the path, or null if nothing was captured. TEMP — remove with the rest of the rvf capture.
+        /// Writes one combined CSV: per channel the raw ADC, raw µV and SDK-filtered µV, plus the
+        /// last-known heart rate, SpO₂, attention, relaxation, mental workload and signal quality —
+        /// one row per sample. Raw and filtered frames are paired by arrival index (both derive from
+        /// the same hardware feed). sample_time_utc is a uniform 250 Hz axis anchored to the first
+        /// frame's arrival (matching DbUploader.CopyRaw); arrival_utc exposes each frame's raw arrival.
+        /// Returns the path, or null if nothing was captured.
         /// </summary>
-        public string WriteRawVsFilteredCsv(string directory = null)
+        public string WriteCsv(string directory = null)
         {
-            List<(DateTime A, float[] S)> raw, filt;
-            lock (_rvfLock)
+            List<CapFrame> raw; List<(DateTime A, float[] S)> filt;
+            lock (_captureLock)
             {
-                raw  = _rvfRaw.Select(x => (x.Arrival, x.Samples)).ToList();
-                filt = _rvfFilt.Select(x => (x.Arrival, x.Samples)).ToList();
+                raw = new List<CapFrame>(_capRaw);
+                filt = new List<(DateTime, float[])>(_capFilt);
             }
-            int pairs = Math.Min(raw.Count, filt.Count);
-            if (pairs == 0) return null;
+            if (raw.Count == 0) return null;
 
             // Uniform per-sample timeline at the true 250 Hz, anchored to the first raw frame's arrival
             // (= the time of that frame's LAST sample), exactly as the DB raw path anchors sample 0.
-            long periodTicks = TimeSpan.TicksPerSecond / RvfSampleRateHz;
-            int spc0 = raw[0].S.Length / ChannelCount;
-            long baseTicks = raw[0].A.Ticks - (long)(spc0 - 1) * periodTicks;
+            long periodTicks = TimeSpan.TicksPerSecond / CaptureSampleRateHz;
+            int spc0 = FrameSpc(raw[0]);
+            if (spc0 <= 0) return null;
+            long baseTicks = raw[0].Arrival.Ticks - (long)(spc0 - 1) * periodTicks;
             long gIdx = 0;   // running sample counter across frames
 
             const string TsFmt = "yyyy-MM-ddTHH:mm:ss.ffffffZ";   // µs precision, matches DB resolution
 
-            string filename = $"rawvsfilt_{SessionId}_{DateTime.UtcNow:yyyyMMdd_HHmmss}.csv";
+            string filename = $"capture_{SessionId}_{DateTime.UtcNow:yyyyMMdd_HHmmss}.csv";
             string path = directory != null ? Path.Combine(directory, filename) : filename;
 
             using (var sw = new StreamWriter(path, false, Encoding.UTF8))
             {
-                sw.Write("sample_time_utc,raw_arrival_utc,filt_arrival_utc,frame,sample_idx");
-                foreach (var ch in ChannelLabels) sw.Write($",{ch}_raw_uV,{ch}_filt_uV");
-                sw.WriteLine();
+                sw.Write("sample_time_utc,arrival_utc,frame,sample_idx");
+                foreach (var ch in ChannelLabels) sw.Write($",{ch}_raw_adc,{ch}_raw_uV,{ch}_filt_uV");
+                sw.WriteLine(",heart_rate,spo2,attention,relaxation,mental_workload,signal_quality");
 
-                for (int f = 0; f < pairs; f++)
+                for (int f = 0; f < raw.Count; f++)
                 {
-                    var (rArr, rs) = raw[f];
-                    var (fArr, fs) = filt[f];
-                    if (rs == null || fs == null || rs.Length < ChannelCount || fs.Length < ChannelCount) continue;
+                    var r = raw[f];
+                    float[] fs = f < filt.Count ? filt[f].S : null;
+                    int adcSpc = r.RawAdc != null ? r.RawAdc.Length / ChannelCount : 0;
+                    int uvSpc  = r.RawUv  != null ? r.RawUv.Length  / ChannelCount : 0;
+                    int filtSpc = fs != null ? fs.Length / ChannelCount : 0;
+                    int spc = Math.Max(adcSpc, Math.Max(uvSpc, filtSpc));
+                    if (spc == 0) continue;
 
-                    int rspc = rs.Length / ChannelCount;
-                    int fspc = fs.Length / ChannelCount;
-                    int spc  = Math.Min(rspc, fspc);
-                    string rArrStr = rArr.ToUniversalTime().ToString(TsFmt, CultureInfo.InvariantCulture);
-                    string fArrStr = fArr.ToUniversalTime().ToString(TsFmt, CultureInfo.InvariantCulture);
+                    string arr = r.Arrival.ToUniversalTime().ToString(TsFmt, CultureInfo.InvariantCulture);
+                    string hr  = r.Hr?.ToString(CultureInfo.InvariantCulture) ?? "";
+                    string spo = r.Spo2?.ToString(CultureInfo.InvariantCulture) ?? "";
+                    string att = FmtF(r.Att), rel = FmtF(r.Rel), mwl = FmtF(r.Mwl);
+                    string sq  = r.SignalQuality.ToString(CultureInfo.InvariantCulture);
+
                     for (int s = 0; s < spc; s++)
                     {
                         var ts = new DateTime(baseTicks + (gIdx + s) * periodTicks, DateTimeKind.Utc);
                         sw.Write(ts.ToString(TsFmt, CultureInfo.InvariantCulture)); sw.Write(',');
-                        sw.Write(rArrStr); sw.Write(','); sw.Write(fArrStr); sw.Write(',');
-                        sw.Write(f);       sw.Write(','); sw.Write(s);
+                        sw.Write(arr); sw.Write(','); sw.Write(r.Frame); sw.Write(','); sw.Write(s);
                         for (int ch = 0; ch < ChannelCount; ch++)
                         {
-                            sw.Write(','); sw.Write(rs[ch * rspc + s].ToString("R", CultureInfo.InvariantCulture));
-                            sw.Write(','); sw.Write(fs[ch * fspc + s].ToString("R", CultureInfo.InvariantCulture));
+                            sw.Write(',');
+                            if (s < adcSpc) sw.Write(r.RawAdc[ch * adcSpc + s]);
+                            sw.Write(',');
+                            if (s < uvSpc) sw.Write(r.RawUv[ch * uvSpc + s].ToString("R", CultureInfo.InvariantCulture));
+                            sw.Write(',');
+                            if (s < filtSpc) sw.Write(fs[ch * filtSpc + s].ToString("R", CultureInfo.InvariantCulture));
                         }
+                        sw.Write(','); sw.Write(hr);
+                        sw.Write(','); sw.Write(spo);
+                        sw.Write(','); sw.Write(att);
+                        sw.Write(','); sw.Write(rel);
+                        sw.Write(','); sw.Write(mwl);
+                        sw.Write(','); sw.Write(sq);
                         sw.WriteLine();
                     }
                     gIdx += spc;
@@ -669,6 +647,15 @@ namespace NeuuroBridge
             }
             return Path.GetFullPath(path);
         }
+
+        private static int FrameSpc(CapFrame r)
+        {
+            if (r.RawAdc != null) return r.RawAdc.Length / ChannelCount;
+            if (r.RawUv != null) return r.RawUv.Length / ChannelCount;
+            return 0;
+        }
+
+        private static string FmtF(float v) => float.IsNaN(v) ? "" : v.ToString("0.###", CultureInfo.InvariantCulture);
 
         // ── Per-channel helpers (frame = ChannelCount equal blocks) ──────────
         public static (float last, float pkpk) IntLastPkpk(int[] d, int ch)
