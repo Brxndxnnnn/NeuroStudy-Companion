@@ -237,6 +237,7 @@ namespace NeuuroBridge
             _svc.OnRawEeg += HandleRawEeg;
             _svc.OnFilteredEeg += f => { lock (_stateLock) _lastFiltered = f; };
             _svc.OnFilteredEeg += f => _processor.AddFilteredFrame(f);
+            _svc.OnFilteredEeg += UploadFilteredFrame;   // DB: full-res filtered µV → eeg_filtered_samples
             _svc.OnFilteredEeg += f =>   // TEMP: raw-vs-filtered capture (µV filtered stream)
             {
                 if (!_rvfCapturing || f == null) return;
@@ -503,14 +504,27 @@ namespace NeuuroBridge
             _db.EnqueueEeg(row);
         }
 
+        // Streams the SDK's full-resolution filtered (µV) frames to eeg_filtered_samples, mirroring the
+        // raw path. The frame is already a private per-frame clone (OnFiltered clones before dispatch), and
+        // it carries no SDK arrival stamp — so DbNow at handler time anchors the per-sample counter clock.
+        private void UploadFilteredFrame(float[] frame)
+        {
+            if (frame == null) return;
+            // Local ref: StopSession may dispose _db on another thread mid-frame.
+            var db = _db;
+            if (SessionActive && db != null && db.Streaming)
+                db.EnqueueFiltered(db.DbNow, frame);
+        }
+
         private void UploadBandPowers(BandPowers[] powers)
         {
             if (!SessionActive || _db == null || !_db.Streaming) return;
-            float att, rel, mwl; bool? ready; bool[] channels;
+            float att, rel, mwl; bool? ready; bool[] channels; int? hr, spo2;
             lock (_stateLock)
             {
                 att = _sdkAttention; rel = _sdkRelaxation; mwl = _sdkMentalWorkload;
                 ready = _signalReady; channels = _channels;
+                hr = _heartRate; spo2 = _spo2;
             }
             _db.EnqueueBand(new BandPowerRow
             {
@@ -519,6 +533,8 @@ namespace NeuuroBridge
                 Relaxation = rel,
                 MentalWorkload = mwl,
                 SignalQuality = SignalQuality.Compute(ready, channels),
+                HeartRate = hr,
+                Spo2 = spo2,
                 Bands = powers,
             });
         }
