@@ -1,6 +1,7 @@
 <UserControl x:Class="NeuuroBridge.Wpf.LiveEegPanel"
              xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
-             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml">
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             xmlns:sp="clr-namespace:ScottPlot;assembly=ScottPlot.WPF">
     <UserControl.Resources>
         <!-- Paper-style strip-chart tabs, adapted to the app's dark theme. -->
         <Style x:Key="ChartTabItem" TargetType="TabItem">
@@ -52,7 +53,7 @@
     <TabControl Style="{StaticResource ChartTabs}">
         <TabItem Header="EEG Waves" Style="{StaticResource ChartTabItem}">
             <Border Background="#0B121C" CornerRadius="6" ClipToBounds="True" Margin="0,8,0,0">
-                <Canvas x:Name="WaveCanvas" SizeChanged="WaveCanvas_SizeChanged"/>
+                <sp:WpfPlot x:Name="EegPlot"/>
             </Border>
         </TabItem>
         <TabItem Header="Frequency Bands" Style="{StaticResource ChartTabItem}">
@@ -63,13 +64,13 @@
                 </Grid.RowDefinitions>
                 <StackPanel x:Name="BandChannelBar" Grid.Row="0" Orientation="Horizontal" Margin="0,0,0,6"/>
                 <Border Grid.Row="1" Background="#0B121C" CornerRadius="6" ClipToBounds="True">
-                    <Canvas x:Name="BandCanvas" SizeChanged="BandCanvas_SizeChanged"/>
+                    <sp:WpfPlot x:Name="BandPlot"/>
                 </Border>
             </Grid>
         </TabItem>
         <TabItem Header="Mental States" Style="{StaticResource ChartTabItem}">
             <Border Background="#0B121C" CornerRadius="6" ClipToBounds="True" Margin="0,8,0,0">
-                <Canvas x:Name="CogCanvas" SizeChanged="CogCanvas_SizeChanged"/>
+                <sp:WpfPlot x:Name="CogPlot"/>
             </Border>
         </TabItem>
     </TabControl>

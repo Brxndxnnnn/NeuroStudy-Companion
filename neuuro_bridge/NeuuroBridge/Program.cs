@@ -71,7 +71,7 @@ namespace NeuuroBridge
         private static void Main(string[] args)
         {
             Console.OutputEncoding = System.Text.Encoding.UTF8;
-            Console.Title = "Neuuro Bridge — SenzeBand EEG";
+            Console.Title = "Neuuro Bridge";
             Print("=== Neuuro Bridge ===");
 
             string license = ResolveLicense(args);

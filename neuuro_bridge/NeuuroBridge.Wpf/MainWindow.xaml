@@ -2,7 +2,7 @@
         xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
         xmlns:local="clr-namespace:NeuuroBridge.Wpf"
-        Title="Neuuro Bridge — SenzeBand EEG" Height="760" Width="1180"
+        Title="Neuuro Bridge" Height="760" Width="1180"
         MinHeight="640" MinWidth="980"
         Background="{StaticResource Bg}" FontFamily="Segoe UI" Foreground="{StaticResource Ink}">
     <Grid Margin="16">
@@ -16,9 +16,8 @@
         <DockPanel Grid.Row="0" Margin="0,0,0,12">
             <StackPanel DockPanel.Dock="Left">
                 <TextBlock Text="Neuuro Bridge" FontSize="22" FontWeight="Bold"/>
-                <TextBlock Text="SenzeBand EEG → TimescaleDB" Foreground="{StaticResource Muted2}" FontSize="12"/>
             </StackPanel>
-            <Border DockPanel.Dock="Right" VerticalAlignment="Center" CornerRadius="12" Padding="12,5"
+            <Border DockPanel.Dock="Right" VerticalAlignment="Center" Margin="48,0,0,0" CornerRadius="12" Padding="12,5"
                     Background="#1E2A3C" BorderBrush="{StaticResource PanelEdge}" BorderThickness="1">
                 <StackPanel Orientation="Horizontal">
                     <Ellipse x:Name="ConnDot" Width="10" Height="10" Fill="{StaticResource Bad}" VerticalAlignment="Center" Margin="0,0,8,0"/>
@@ -38,14 +37,19 @@
                     <ColumnDefinition Width="Auto"/>
                     <ColumnDefinition Width="Auto"/>
                 </Grid.ColumnDefinitions>
-                <Button x:Name="BtnScan" Grid.Column="0" Content="Scan (12s)" Click="BtnScan_Click" IsEnabled="False"/>
+                <Button x:Name="BtnScan" Grid.Column="0" Content="Scan (12s)" Click="BtnScan_Click" IsEnabled="False"
+                        ToolTip="Scan for nearby SenzeBands for 12 seconds. Make sure the band is ON and Bluetooth is enabled."/>
                 <ComboBox x:Name="CmbDevices" Grid.Column="1" Height="34" Margin="0,0,8,0" VerticalContentAlignment="Center"
-                          DisplayMemberPath="DeviceName"/>
-                <Button x:Name="BtnConnect" Grid.Column="2" Content="Connect" Click="BtnConnect_Click" IsEnabled="False"/>
+                          DisplayMemberPath="DeviceName"
+                          ToolTip="Select a discovered SenzeBand to connect to."/>
+                <Button x:Name="BtnConnect" Grid.Column="2" Content="Connect" Click="BtnConnect_Click" IsEnabled="False"
+                        ToolTip="Connect to the selected device. Enabled once a scan finds at least one band."/>
                 <Button x:Name="BtnDisconnect" Grid.Column="3" Content="Disconnect" Click="BtnDisconnect_Click" IsEnabled="False"
-                        Background="#334155"/>
+                        Style="{StaticResource Secondary}"
+                        ToolTip="Disconnect from the band. If a session is uploading you'll be asked to confirm."/>
                 <Button x:Name="BtnReauth" Grid.Column="4" Content="Re-auth" Click="BtnReauth_Click" IsEnabled="False"
-                        Background="#334155"/>
+                        Style="{StaticResource Secondary}"
+                        ToolTip="Re-attempt authentication with the license key. Use if raw EEG stays locked after connecting."/>
                 <Border Grid.Column="5" CornerRadius="6" Padding="10,6" Background="#1E2A3C" VerticalAlignment="Center">
                     <StackPanel Orientation="Horizontal">
                         <Ellipse x:Name="AuthDot" Width="9" Height="9" Fill="{StaticResource Muted}" VerticalAlignment="Center" Margin="0,0,6,0"/>
@@ -55,15 +59,16 @@
             </Grid>
         </Border>
 
-        <!-- Body: left control column + right (charts in Stage 4) -->
+        <!-- Body: resizable left control column + right live charts/log -->
         <Grid Grid.Row="2">
             <Grid.ColumnDefinitions>
-                <ColumnDefinition Width="400"/>
-                <ColumnDefinition Width="*"/>
+                <ColumnDefinition Width="400" MinWidth="340"/>
+                <ColumnDefinition Width="Auto"/>
+                <ColumnDefinition Width="*" MinWidth="380"/>
             </Grid.ColumnDefinitions>
 
             <!-- LEFT -->
-            <ScrollViewer Grid.Column="0" VerticalScrollBarVisibility="Auto" Margin="0,0,12,0">
+            <ScrollViewer Grid.Column="0" VerticalScrollBarVisibility="Auto" Margin="0,0,6,0">
                 <StackPanel>
                     <!-- Session -->
                     <Border Style="{StaticResource Card}">
@@ -86,7 +91,8 @@
                             </DockPanel>
                             <DockPanel>
                                 <Button x:Name="BtnCopyPairing" DockPanel.Dock="Right" Content="Copy" Click="BtnCopyPairing_Click"
-                                        IsEnabled="False" Background="#334155" Padding="10,4" VerticalAlignment="Center" Margin="8,0,0,0"/>
+                                        IsEnabled="False" Style="{StaticResource Secondary}" Padding="10,4" VerticalAlignment="Center" Margin="8,0,0,0"
+                                        ToolTip="Copy the pairing code to the clipboard."/>
                                 <TextBlock x:Name="TxtPairing" Text="—" FontSize="30" FontWeight="Bold" Foreground="{StaticResource Accent}"/>
                             </DockPanel>
                             <Grid Margin="0,8,0,0">
@@ -103,9 +109,11 @@
                             </Grid>
                             <StackPanel Orientation="Horizontal" Margin="0,12,0,0">
                                 <Button x:Name="BtnStartSession" Content="Start session &amp; upload"
-                                        Click="BtnStartSession_Click" IsEnabled="False" Background="{StaticResource Good}"/>
+                                        Click="BtnStartSession_Click" IsEnabled="False" Background="{StaticResource Good}"
+                                        ToolTip="Begin recording and uploading EEG to the database. Claim the pairing code on the web frontend first."/>
                                 <Button x:Name="BtnStopSession" Content="Stop session"
-                                        Click="BtnStopSession_Click" IsEnabled="False" Background="{StaticResource Bad}"/>
+                                        Click="BtnStopSession_Click" IsEnabled="False" Background="{StaticResource Bad}"
+                                        ToolTip="Stop recording, flush and close the upload. The band stays connected."/>
                             </StackPanel>
                         </StackPanel>
                     </Border>
@@ -162,22 +170,24 @@
                     <!-- Capture -->
                     <Border Style="{StaticResource Card}">
                         <StackPanel>
-                            <TextBlock Style="{StaticResource CardTitle}" Text="RAW CAPTURE → CSV"/>
+                            <TextBlock Style="{StaticResource CardTitle}" Text="EXPORT CAPTURE → CSV"/>
                             <StackPanel Orientation="Horizontal">
-                                <Button x:Name="BtnCapture" Content="Start capture" Click="BtnCapture_Click" IsEnabled="False"/>
+                                <Button x:Name="BtnCapture" Content="Start capture" Click="BtnCapture_Click" IsEnabled="False"
+                                        ToolTip="Record everything to one CSV: raw ADC, raw µV, filtered µV, heart rate, SpO₂, attention, relaxation, mental workload and signal quality (independent of the database upload)."/>
                                 <TextBlock x:Name="TxtCapture" Text="idle" VerticalAlignment="Center" Foreground="{StaticResource Muted2}"/>
-                            </StackPanel>
-                            <StackPanel Orientation="Horizontal" Margin="0,8,0,0">
-                                <Button x:Name="BtnRvf" Content="Raw vs filtered" Click="BtnRvf_Click" IsEnabled="False"/>
-                                <TextBlock x:Name="TxtRvf" Text="(temp) idle" VerticalAlignment="Center" Foreground="{StaticResource Muted2}"/>
                             </StackPanel>
                         </StackPanel>
                     </Border>
                 </StackPanel>
             </ScrollViewer>
 
-            <!-- RIGHT: charts placeholder for Stage 4 + live log -->
-            <Grid Grid.Column="1">
+            <!-- Drag to resize the control column vs. the charts. -->
+            <GridSplitter Grid.Column="1" Width="6" HorizontalAlignment="Stretch" VerticalAlignment="Stretch"
+                          Background="Transparent" ResizeBehavior="PreviousAndNext" ResizeDirection="Columns"
+                          ToolTip="Drag to resize"/>
+
+            <!-- RIGHT: live charts + log -->
+            <Grid Grid.Column="2">
                 <Grid.RowDefinitions>
                     <RowDefinition Height="*"/>
                     <RowDefinition Height="190"/>
@@ -199,9 +209,10 @@
                 <Border Grid.Row="1" Style="{StaticResource Card}">
                     <DockPanel>
                         <TextBlock DockPanel.Dock="Top" Style="{StaticResource CardTitle}" Text="LOG"/>
-                        <TextBox x:Name="LogBox" IsReadOnly="True" Background="Transparent" Foreground="{StaticResource Muted2}"
-                                 BorderThickness="0" FontFamily="Consolas" FontSize="11"
-                                 VerticalScrollBarVisibility="Auto" TextWrapping="NoWrap"/>
+                        <RichTextBox x:Name="LogBox" IsReadOnly="True" IsDocumentEnabled="False" Background="Transparent"
+                                     Foreground="{StaticResource Muted2}" BorderThickness="0" Padding="0"
+                                     FontFamily="Consolas" FontSize="11" VerticalScrollBarVisibility="Auto"
+                                     HorizontalScrollBarVisibility="Disabled"/>
                     </DockPanel>
                 </Border>
             </Grid>
