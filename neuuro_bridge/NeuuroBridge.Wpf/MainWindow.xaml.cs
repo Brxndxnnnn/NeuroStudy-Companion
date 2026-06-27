@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.Linq;
 using System.Windows;
+using System.Windows.Documents;
 using System.Windows.Media;
 using System.Windows.Threading;
 
@@ -91,7 +92,7 @@ namespace NeuuroBridge.Wpf
             if (!(CmbDevices.SelectedItem is SenzeBandDeviceInfo dev)) { Log("Select a device first."); return; }
             Log($"Connecting to {dev.DeviceName}…");
             BtnConnect.IsEnabled = false;
-            ConnPill.Text = "Connecting…"; ConnDot.Fill = Warn;
+            SetConn("Connecting…", Warn);
             _ctl.Connect(dev.DeviceID);
         }
 
@@ -165,29 +166,10 @@ namespace NeuuroBridge.Wpf
             }
         }
 
-        // TEMP (client request): capture raw-float vs SDK-filtered (both µV) into one CSV for comparison.
-        private void BtnRvf_Click(object sender, RoutedEventArgs e)
-        {
-            if (!_ctl.IsRvfCapturing)
-            {
-                _ctl.StartRawVsFilteredCapture();
-                BtnRvf.Content = "Stop & save";
-                TxtRvf.Text = "capturing…";
-            }
-            else
-            {
-                var (raw, filt) = _ctl.StopRawVsFilteredCapture();
-                string path = _ctl.WriteRawVsFilteredCsv();
-                BtnRvf.Content = "Raw vs filtered";
-                TxtRvf.Text = path == null ? "no frames captured" : $"saved {raw} raw / {filt} filt frames";
-                if (path != null) Log("Raw-vs-filtered saved → " + path);
-            }
-        }
-
         // ── Controller event handlers ────────────────────────────────────────
         private void OnConnected(string addr, string id)
         {
-            ConnPill.Text = "Connected"; ConnDot.Fill = Good;
+            SetConn("Connected", Good);
             Log($"Connected to {id} @ {addr}");
             // Lock scanning/connecting while a device is held.
             BtnScan.IsEnabled = false;
@@ -197,28 +179,27 @@ namespace NeuuroBridge.Wpf
             BtnReauth.IsEnabled = true;
             BtnStartSession.IsEnabled = true;
             BtnCapture.IsEnabled = true;
-            BtnRvf.IsEnabled = true;
         }
 
         // Transient BLE drop — the bridge is auto-reconnecting to the same device, session preserved.
         private void OnConnectionInterrupted()
         {
-            ConnPill.Text = "Reconnecting…"; ConnDot.Fill = Warn;
-            AuthDot.Fill = Mut; TxtAuth.Text = "reconnecting…";
+            SetConn("Reconnecting…", Warn);
+            SetAuth("reconnecting…", Mut);
             Log("Link dropped — reconnecting (session preserved)…");
         }
 
         // Link restored — recording continues in the same session; auth re-arms via OnAuth.
         private void OnReconnected()
         {
-            ConnPill.Text = "Connected"; ConnDot.Fill = Good;
+            SetConn("Connected", Good);
             Log("Reconnected — session resumed.");
         }
 
         private void OnDisconnected(string addr)
         {
-            ConnPill.Text = "Disconnected"; ConnDot.Fill = Bad;
-            AuthDot.Fill = Mut; TxtAuth.Text = "not authenticated";
+            SetConn("Disconnected", Bad);
+            SetAuth("not authenticated", Mut);
             Log("Disconnected (" + addr + ")");
             // Back to a scan/connect-ready state; reconnect without rescanning if devices remain.
             BtnScan.IsEnabled = true;
@@ -229,7 +210,6 @@ namespace NeuuroBridge.Wpf
             BtnStartSession.IsEnabled = false;
             BtnStopSession.IsEnabled = false;
             BtnCapture.IsEnabled = false;
-            BtnRvf.IsEnabled = false;
             RecDot.Visibility = Visibility.Collapsed; TxtElapsed.Text = "";
             // Clear the session card — a reconnect prepares a fresh session/code.
             TxtPairing.Text = "—"; TxtSessionId.Text = "—"; TxtStarted.Text = "—";
@@ -252,8 +232,7 @@ namespace NeuuroBridge.Wpf
 
         private void OnAuth(bool ok, string detail)
         {
-            AuthDot.Fill = ok ? Good : Bad;
-            TxtAuth.Text = ok ? "authenticated" : "auth failed";
+            SetAuth(ok ? "authenticated" : "auth failed", ok ? Good : Bad);
             Log(ok ? $"Authenticated ({detail}) — raw EEG unlocked." : $"Authentication failed ({detail}).");
         }
 
@@ -394,10 +373,30 @@ namespace NeuuroBridge.Wpf
 
         private void AppendLog(string m)
         {
-            LogBox.AppendText($"[{DateTime.Now:HH:mm:ss}] {m}{Environment.NewLine}");
+            // Colour the line by severity so errors/warnings stand out in the log.
+            var para = new Paragraph(new Run($"[{DateTime.Now:HH:mm:ss}] {m}"))
+            {
+                Margin = new Thickness(0),
+                Foreground = SeverityBrush(m)
+            };
+            LogBox.Document.Blocks.Add(para);
             LogBox.ScrollToEnd();
         }
 
+        private static Brush SeverityBrush(string m)
+        {
+            if (m.IndexOf("ERROR", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                m.IndexOf("fail",  StringComparison.OrdinalIgnoreCase) >= 0)
+                return Bad;
+            if (m.IndexOf("WARN", StringComparison.OrdinalIgnoreCase) >= 0)
+                return Warn;
+            return Mut;
+        }
+
         private void Log(string m) => AppendLog(m);
+
+        // Status indicators are always a coloured dot + a label, set together — keep them in sync.
+        private void SetConn(string text, Brush dot) { ConnPill.Text = text; ConnDot.Fill = dot; }
+        private void SetAuth(string text, Brush dot) { TxtAuth.Text = text; AuthDot.Fill = dot; }
     }
 }
