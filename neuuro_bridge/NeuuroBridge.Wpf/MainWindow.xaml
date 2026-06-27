@@ -110,11 +110,14 @@
                             <StackPanel Orientation="Horizontal" Margin="0,12,0,0">
                                 <Button x:Name="BtnStartSession" Content="Start session &amp; upload"
                                         Click="BtnStartSession_Click" IsEnabled="False" Background="{StaticResource Good}"
-                                        ToolTip="Begin recording and uploading EEG to the database. Claim the pairing code on the web frontend first."/>
+                                        ToolTip="Enabled once the session is paired (claimed) on the website. Recording also starts automatically when the website starts the session."/>
                                 <Button x:Name="BtnStopSession" Content="Stop session"
                                         Click="BtnStopSession_Click" IsEnabled="False" Background="{StaticResource Bad}"
                                         ToolTip="Stop recording, flush and close the upload. The band stays connected."/>
                             </StackPanel>
+                            <TextBlock x:Name="TxtPairHint" Text="Waiting to pair with website…"
+                                       Foreground="{StaticResource Warn}" FontSize="11" Margin="0,6,0,0"
+                                       Visibility="Collapsed"/>
                         </StackPanel>
                     </Border>
 
