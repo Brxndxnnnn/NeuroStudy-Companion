@@ -123,18 +123,14 @@ namespace NeuuroBridge.Wpf
 
         private void BtnStartSession_Click(object sender, RoutedEventArgs e)
         {
-            // Warn if the frontend hasn't claimed this session yet — starting now uploads EEG that
-            // no client record is linked to (stray data) until/unless someone pairs the code.
-            if (_ctl.SyncStatus != "claimed")
-            {
-                string s = string.IsNullOrEmpty(_ctl.SyncStatus) ? "unknown" : _ctl.SyncStatus;
-                var r = MessageBox.Show(
-                    $"This session has not been claimed on the web frontend yet (status: {s}).\n\n" +
-                    "Enter the pairing code on the frontend first so the readings link to a client. " +
-                    "Starting now may leave stray, unclaimed data in the database.\n\nStart anyway?",
-                    "Session not claimed", MessageBoxButton.YesNo, MessageBoxImage.Warning);
-                if (r != MessageBoxResult.Yes) return;
-            }
+            // The button is only enabled once the session is claimed, so a press here pre-empts the
+            // website's automatic start (the bridge auto-starts when sync_status flips to "recording").
+            var r = MessageBox.Show(
+                "Recording will be started automatically when the website starts the session.\n\n" +
+                "Are you sure you want to start it manually now?",
+                "Start recording manually?", MessageBoxButton.YesNo, MessageBoxImage.Question);
+            if (r != MessageBoxResult.Yes) return;
+
             BtnStartSession.IsEnabled = false;
             bool dbOk = _ctl.StartSession();
             BtnStopSession.IsEnabled = true;
@@ -177,8 +173,8 @@ namespace NeuuroBridge.Wpf
             CmbDevices.IsEnabled = false;
             BtnDisconnect.IsEnabled = true;
             BtnReauth.IsEnabled = true;
-            BtnStartSession.IsEnabled = true;
             BtnCapture.IsEnabled = true;
+            RefreshStartGate();   // stays disabled until the website claims the session
         }
 
         // Transient BLE drop — the bridge is auto-reconnecting to the same device, session preserved.
@@ -210,6 +206,7 @@ namespace NeuuroBridge.Wpf
             BtnStartSession.IsEnabled = false;
             BtnStopSession.IsEnabled = false;
             BtnCapture.IsEnabled = false;
+            TxtPairHint.Visibility = Visibility.Collapsed;
             RecDot.Visibility = Visibility.Collapsed; TxtElapsed.Text = "";
             // Clear the session card — a reconnect prepares a fresh session/code.
             TxtPairing.Text = "—"; TxtSessionId.Text = "—"; TxtStarted.Text = "—";
@@ -251,30 +248,33 @@ namespace NeuuroBridge.Wpf
             TxtSessionId.Text = _ctl.SessionId;
             TxtStarted.Text = _ctl.SessionStartUtc.ToString("yyyy-MM-dd HH:mm:ss") + " UTC";
             BtnCopyPairing.IsEnabled = true;
-            BtnStartSession.IsEnabled = _ctl.IsConnected;
             OnSyncStatusChanged();
         }
 
         private void OnSyncStatusChanged()
         {
             string s = _ctl.SyncStatus;
-            if (string.IsNullOrEmpty(s)) { TxtSyncStatus.Text = "—"; SyncDot.Fill = Mut; return; }
-            TxtSyncStatus.Text = s;
-            // unclaimed = amber (waiting on frontend), claimed = green, completed = muted (done).
-            SyncDot.Fill = s == "claimed" ? Good : s == "completed" ? Mut : Warn;
+            if (string.IsNullOrEmpty(s)) { TxtSyncStatus.Text = "—"; SyncDot.Fill = Mut; }
+            else
+            {
+                TxtSyncStatus.Text = s;
+                // unclaimed = amber (waiting on frontend), claimed = green, completed = muted (done).
+                SyncDot.Fill = s == "claimed" ? Good : s == "completed" ? Mut : Warn;
+            }
+            RefreshStartGate();   // claim state drives whether manual Start is available
         }
 
         private void OnSessionStarted()
         {
-            BtnStartSession.IsEnabled = false;
             BtnStopSession.IsEnabled = true;
+            RefreshStartGate();
         }
 
         private void OnSessionStopped()
         {
-            // Device stays connected — allow starting a fresh session.
-            BtnStartSession.IsEnabled = _ctl.IsConnected;
+            // Device stays connected, but Start stays gated until a fresh session is claimed.
             BtnStopSession.IsEnabled = false;
+            RefreshStartGate();
             var db = _ctl.Db;
             Log(db != null
                 ? $"Session stopped — {db.RawRowsSent:N0} raw rows uploaded this session."
@@ -398,5 +398,19 @@ namespace NeuuroBridge.Wpf
         // Status indicators are always a coloured dot + a label, set together — keep them in sync.
         private void SetConn(string text, Brush dot) { ConnPill.Text = text; ConnDot.Fill = dot; }
         private void SetAuth(string text, Brush dot) { TxtAuth.Text = text; AuthDot.Fill = dot; }
+
+        // Gate manual Start on pairing: it's only enabled once the website has claimed the session
+        // (and we're connected + not already recording). While connected but still unclaimed, show a
+        // "waiting to pair" hint instead. Called whenever connection or sync status changes.
+        private void RefreshStartGate()
+        {
+            string s = _ctl.SyncStatus;
+            bool claimed = s == "claimed";
+            BtnStartSession.IsEnabled = _ctl.IsConnected && claimed && !_ctl.SessionActive;
+
+            bool waiting = _ctl.IsConnected && !_ctl.SessionActive
+                           && (string.IsNullOrEmpty(s) || s == "unclaimed");
+            TxtPairHint.Visibility = waiting ? Visibility.Visible : Visibility.Collapsed;
+        }
     }
 }
