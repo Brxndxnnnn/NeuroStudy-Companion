@@ -4,9 +4,16 @@ import authService from '../services/auth.service.js'
 import catchAsync from '../utils/catchAsync.js'
 import pool from '../config/db.js'
 
+const cookieOptions = {
+    httpOnly: true,
+    secure: process.env.NODE_ENV === 'production',
+    sameSite: 'strict',
+    maxAge: 7 * 24 * 60 * 60 * 1000 // 7 days
+}
+
 const login = catchAsync(async (req, res) => {
     const { email, password } = req.body
-
+    const override = req.body.override === true
     if (!email || !password)
         return res.status(400).json({ error: 'Email and password are required.' })
 
@@ -49,6 +56,11 @@ const login = catchAsync(async (req, res) => {
         const valid = await authService.comparePassword(password, user.password_hash)
         if (!valid) return res.status(401).json({ error: 'Invalid credentials. Please check your email and password.' })
 
+        const existingSession = await authService.detectActiveSession(user.user_id)
+        if (existingSession && !override) {
+            return res.status(403).json({ error: 'An active session already exists for this user. Are you sure you want to override it?' })
+        }
+
         // Generate dual tokens
         const jti = randomUUID()
         const accessToken = authService.signAccessToken({
@@ -64,12 +76,7 @@ const login = catchAsync(async (req, res) => {
         await authService.createRefreshSession(user.user_id, refreshToken, req.ip, req.headers['user-agent'])
 
         // Securely store refresh token in HttpOnly cookie
-        res.cookie('refreshToken', refreshToken, {
-            httpOnly: true,
-            secure: process.env.NODE_ENV === 'production',
-            sameSite: 'strict',
-            maxAge: 7 * 24 * 60 * 60 * 1000 // 7 days
-        })
+        res.cookie('refreshToken', refreshToken, cookieOptions)
 
         res.json({
             accessToken,
@@ -101,7 +108,12 @@ const refresh = catchAsync(async (req, res) => {
         await client.query("RESET app.is_admin")
 
         if (!user) return res.status(401).json({ error: 'User not found.' })
-
+        
+        // Rotate refresh token
+        // const newRefreshToken = randomUUID()
+        // await authService.createRefreshSession(user.user_id, newRefreshToken, req.ip, req.headers['user-agent'])
+        // res.cookie('refreshToken', newRefreshToken, cookieOptions)
+        // Generate a new access token with updated claims
         const newAccessToken = authService.signAccessToken({
             jti: randomUUID(),
             sub: user.user_id,
@@ -118,10 +130,12 @@ const refresh = catchAsync(async (req, res) => {
 })
 
 const logout = catchAsync(async (req, res) => {
-    const refreshToken = req.cookies.refreshToken
+    const cookies = req.cookies
+    if (!cookies.refreshToken) return res.status(400).json({ error: 'No refresh token provided.' })
+    const refreshToken = cookies.refreshToken
     if (refreshToken) {
         await authService.deleteRefreshSession(refreshToken)
-        res.clearCookie('refreshToken')
+        res.clearCookie('refreshToken', cookieOptions)
     }
 
     if (req.user?.jti) {

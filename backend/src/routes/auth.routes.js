@@ -16,7 +16,7 @@ const router = Router()
  *         application/json:
  *           schema:
  *             type: object
- *             required: [email, password]
+ *             required: [email, password, override]
  *             properties:
  *               email:
  *                 type: string
@@ -24,11 +24,17 @@ const router = Router()
  *               password:
  *                 type: string
  *                 example: password123
+ *               override:
+ *                 type: boolean
+ *                 description: "Set to true to override any existing active session for this user if one exists."
+ *                 example: false
  *     responses:
  *       200:
  *         description: JWT token and user info
  *       401:
  *         description: Invalid credentials
+ *       403:
+ *         description: Active session exists and override not yet confirmed
  */
 router.post('/login', authController.login)
 
