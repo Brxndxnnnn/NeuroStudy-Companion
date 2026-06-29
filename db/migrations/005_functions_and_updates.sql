@@ -143,3 +143,22 @@ WITH CHECK (
     current_setting('app.is_admin', true)::boolean = true
     OR clinic_id = NULLIF(current_setting('app.current_clinic_id', true), '')::uuid
 );
+
+-- 26/06/2026 For storing SDK filtered data + tracking heart rate and Sp02 as requested by Mr Rashid
+CREATE TABLE eeg_filtered_samples (
+      session_id uuid        NOT NULL REFERENCES sessions(session_id) ON DELETE CASCADE,
+      time       timestamptz NOT NULL,
+      fp1        real,        -- µV (SDK-filtered), NOT integer ADC counts
+      fp2        real,
+      t3         real,
+      t4         real,
+      PRIMARY KEY (session_id, time)
+  );
+SELECT create_hypertable('eeg_filtered_samples', by_range('time'));
+SELECT set_chunk_time_interval('eeg_filtered_samples', INTERVAL '1 day');
+GRANT SELECT, INSERT ON eeg_filtered_samples TO bridge_writer;
+GRANT SELECT            ON eeg_filtered_samples TO app_user;
+
+ALTER TABLE band_powers
+      ADD COLUMN heart_rate integer,
+      ADD COLUMN spo2       integer;
