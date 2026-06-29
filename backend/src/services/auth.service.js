@@ -79,7 +79,12 @@ export const revokeAccessToken = async (jti, userId, expiresAt) => {
   revokedTokens.add(jti); // Instant local invalidation
 };
 
+export const detectActiveSession = async (userId) => {
+  const res = await pool.query('SELECT * FROM active_sessions WHERE user_id = $1 AND expires_at > NOW()', [userId])
+  return res.rows[0]
+};
+
 export default { 
     signAccessToken, verifyAccessToken, createRefreshSession, findRefreshSession, deleteRefreshSession, 
-    comparePassword, hashPassword, revokeAccessToken, isRevoked, hashToken 
+    comparePassword, hashPassword, revokeAccessToken, isRevoked, hashToken, detectActiveSession
 };

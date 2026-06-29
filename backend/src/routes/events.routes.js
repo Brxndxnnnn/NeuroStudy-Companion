@@ -11,10 +11,11 @@ const router = Router()
  *   post:
  *     summary: Create a new event for a session
  *     description: |
- *       This endpoint allows you to create a new event for a specific session. You must provide the session_id and image_id in the request body. 
+ *       This endpoint allows you to create a new event for a specific session. You must provide the session_id and either image_id or question_id in the request body.
  *       The event will be associated with the clinic of the authenticated user.
  * 
- *       **Note**: The `session_id` and `image_id` must be valid UUIDs. If the provided IDs do not exist in the database, an error will be returned.
+ *       **Note**: The `session_id`, `image_id`, and `question_id` must be valid UUIDs. If the provided IDs do not exist in the database, an error will be returned.
+ *       Please ensure that you only provide either `image_id` or `question_id`, but not both, as they are mutually exclusive.
  *     tags: [Events]
  *     security:
  *       - bearerAuth: []
@@ -27,6 +28,7 @@ const router = Router()
  *             properties:
  *               session_id: { type: string, format: uuid }
  *               image_id: { type: string, format: uuid }
+ *               question_id: { type: string, format: uuid }
  *     responses:
  *       201:
  *         description: Event created successfully

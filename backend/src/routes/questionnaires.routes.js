@@ -27,10 +27,40 @@ router.get('/', questionnaireController.listQuestionnaires)
  *         name: languages
  *         schema:
  *           type: string
- *           description: Comma-separated list of language codes (e.g., "en,ms,cn")
+ *           description: Comma-separated list of language codes (e.g., "en,ms,zh")
  *     responses:
  *       200:
  *         description: Array of questions
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: array
+ *               items:
+ *                 type: object
+ *                 properties:
+ *                   question_id:
+ *                     type: string
+ *                     format: uuid
+ *                     example: "750c4551-2932-4597-bf72-27050e318795"
+ *                   question_no:
+ *                     type: integer
+ *                     example: 1
+ *                   domain:
+ *                     type: string
+ *                     description: "BFI-2 personality domain (E, A, C, N, O)"
+ *                     example: "E"
+ *                   is_reverse_scored:
+ *                     type: boolean
+ *                     example: false
+ *                   statement:
+ *                     type: object
+ *                     description: "Multi-language statements (JSONB)"
+ *                     additionalProperties:
+ *                       type: string
+ *                     example:
+ *                       en: "Someone who is outgoing and comfortable interacting with others."
+ *                       ms: "Seseorang yang peramah dan selesa berinteraksi dengan orang lain."
+ *                       zh: "一个外向且乐于与他人交往的人。"
  */
 router.get('/questions', questionnaireController.listAllQuestions)
 
@@ -66,10 +96,40 @@ router.get('/:questionnaire_id', questionnaireController.getQuestionnaireById)
  *         name: languages
  *         schema:
  *           type: string
- *           description: Comma-separated list of language codes (e.g., "en,ms,cn")
+ *           description: Comma-separated list of language codes (e.g., "en,ms,zh")
  *     responses:
  *       200:
  *         description: Array of questions for the specified questionnaire
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: array
+ *               items:
+ *                 type: object
+ *                 properties:
+ *                   question_id:
+ *                     type: string
+ *                     format: uuid
+ *                     example: "750c4551-2932-4597-bf72-27050e318795"
+ *                   question_no:
+ *                     type: integer
+ *                     example: 1
+ *                   domain:
+ *                     type: string
+ *                     description: "BFI-2 personality domain (E, A, C, N, O)"
+ *                     example: "E"
+ *                   is_reverse_scored:
+ *                     type: boolean
+ *                     example: false
+ *                   statement:
+ *                     type: object
+ *                     description: "Multi-language statements (JSONB)"
+ *                     additionalProperties:
+ *                       type: string
+ *                     example:
+ *                       en: "Someone who is outgoing and comfortable interacting with others."
+ *                       ms: "Seseorang yang peramah dan selesa berinteraksi dengan orang lain."
+ *                       zh: "一个外向且乐于与他人交往的人。"
  *       404:
  *         description: No questions found for the given questionnaire_id
  */
