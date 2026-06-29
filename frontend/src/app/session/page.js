@@ -7,10 +7,26 @@ export default function SessionSetup() {
   const [pairingCode, setPairingCode] = useState("");
   const [isLoading, setIsLoading] = useState(false);
   const [feedback, setFeedback] = useState({ type: "", message: "" });
+  
+  // Holds the client details selected from the dashboard
+  const [selectedClient, setSelectedClient] = useState({ id: "", name: "" });
 
   useEffect(() => {
     const token = localStorage.getItem("token");
-    if (!token) router.push("/login");
+    if (!token) {
+      router.push("/login");
+      return;
+    }
+
+    // Force user to pick a client first before pairing
+    const clientId = localStorage.getItem("currentClientId");
+    const clientName = localStorage.getItem("currentClientName");
+    
+    if (!clientId) {
+      router.push("/history");
+    } else {
+      setSelectedClient({ id: clientId, name: clientName });
+    }
   }, [router]);
 
   // STEP 1: CLAIM THE SESSION
@@ -27,14 +43,16 @@ export default function SessionSetup() {
       const response = await fetch("http://139.59.126.77/api/sessions/pair", {
         method: "PATCH",
         headers: { "Content-Type": "application/json", "Authorization": `Bearer ${cleanToken}` },
-        body: JSON.stringify({ pairing_code: pairingCode, "client_id": "c0000000-0000-0000-0000-000000000001" }), // Only sending the code
+        body: JSON.stringify({ 
+          pairing_code: pairingCode, 
+          // Injecting the REAL client_id here!
+          client_id: selectedClient.id 
+        }), 
       });
 
       if (response.ok) {
         const data = await response.json();
-        console.log(data)
-        // Save the ID for Steps 2 & 3
-        localStorage.setItem("currentSessionId", data.session.session_id || data.id);
+        localStorage.setItem("currentSessionId", data.session?.session_id || data.id);
         
         setFeedback({ type: "success", message: "Paired successfully! Initializing..." });
         setTimeout(() => router.push("/session/active"), 1500);
@@ -51,28 +69,28 @@ export default function SessionSetup() {
   const handleLogout = () => {
     localStorage.removeItem("token");
     localStorage.removeItem("currentSessionId");
+    localStorage.removeItem("currentClientId");
+    localStorage.removeItem("currentClientName");
     router.push("/login");
   };
-return (
+
+  return (
     <main className="min-h-screen bg-slate-50 p-8 font-sans flex flex-col items-center">
       
-      {/* NEW: Top Navigation Bar */}
+      {/* Top Navigation Bar */}
       <div className="w-full max-w-4xl flex justify-between items-center mb-16 bg-white p-4 rounded-xl shadow-sm border border-slate-200">
         <div className="flex items-center gap-3">
-          <div className="bg-blue-600 w-8 h-8 rounded-lg flex items-center justify-center text-white font-bold">NS</div>
-          <span className="font-bold text-slate-800 text-lg tracking-tight">NeuroStudy</span>
+          <div className="bg-blue-600 w-8 h-8 rounded-lg flex items-center justify-center text-white font-bold">NP</div>
+          <span className="font-bold text-slate-800 text-lg tracking-tight">NeuroPrecise</span>
         </div>
         <div className="flex items-center gap-4">
           <button 
             onClick={() => router.push("/history")}
             className="bg-blue-50 text-blue-600 hover:bg-blue-100 px-4 py-2 rounded-lg text-sm font-bold transition-colors flex items-center gap-2"
           >
-            📊 Client History
+            ← Change Client
           </button>
-          <button 
-            onClick={handleLogout} 
-            className="text-slate-500 hover:text-slate-800 text-sm font-medium px-2"
-          >
+          <button onClick={handleLogout} className="text-slate-500 hover:text-slate-800 text-sm font-medium px-2">
             Logout
           </button>
         </div>
@@ -80,7 +98,9 @@ return (
 
       <div className="text-center mb-8">
         <h1 className="text-3xl font-bold text-slate-800 mb-2">EEG Session Setup</h1>
-        <p className="text-slate-500">Link your desktop session to begin the recording sequence.</p>
+        <p className="text-slate-500">
+          Pairing headset for patient: <span className="font-bold text-blue-600">{selectedClient.name}</span>
+        </p>
       </div>
 
       <div className="bg-white w-full max-w-xl p-8 rounded-xl shadow-sm border border-slate-200 mb-6">
@@ -88,8 +108,11 @@ return (
           Bridge Pairing Code
         </label>
         
-        {feedback.type === "error" && <div className="mb-4 p-3 bg-red-50 text-red-700 rounded text-sm font-medium text-center">⚠️ {feedback.message}</div>}
-        {feedback.type === "success" && <div className="mb-4 p-3 bg-green-50 text-green-700 rounded text-sm font-medium text-center">✅ {feedback.message}</div>}
+        {feedback.message && (
+          <div className={`mb-4 p-3 rounded text-sm font-medium text-center ${feedback.type === 'success' ? 'bg-green-50 text-green-700' : 'bg-red-50 text-red-700'}`}>
+            {feedback.type === 'success' ? '✅' : '⚠️'} {feedback.message}
+          </div>
+        )}
 
         <form onSubmit={handleVerify} className="text-center">
           <input 
