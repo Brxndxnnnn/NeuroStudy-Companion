@@ -60,17 +60,35 @@ export default function SessionSetup() {
         setFeedback({ type: "error", message: "Invalid pairing code or session already claimed." });
       }
     } catch (error) {
-      setFeedback({ type: "error", message: "Network error: Could not reach database." });
+      setFeedback({ type: "error", message: "Error " });
     } finally {
       setIsLoading(false);
     }
   };
 
-  const handleLogout = () => {
+  const handleLogout = async () => {
+    const token = localStorage.getItem("token");
+    
+    //destroy the session
+    if (token) {
+      try {
+        await fetch("http://139.59.126.77/api/auth/logout", {
+          method: "POST",
+          headers: { "Authorization": `Bearer ${token}` }
+        });
+      } catch (err) {
+        console.error("Failed to notify server of logout", err);
+      }
+    }
+
+    //2.Clear our local browser memory
     localStorage.removeItem("token");
-    localStorage.removeItem("currentSessionId");
+    localStorage.removeItem("userRole");
     localStorage.removeItem("currentClientId");
     localStorage.removeItem("currentClientName");
+    // ... clear any other items
+    
+    // 3. Send user back to login screen
     router.push("/login");
   };
 
@@ -80,8 +98,8 @@ export default function SessionSetup() {
       {/* Top Navigation Bar */}
       <div className="w-full max-w-4xl flex justify-between items-center mb-16 bg-white p-4 rounded-xl shadow-sm border border-slate-200">
         <div className="flex items-center gap-3">
-          <div className="bg-blue-600 w-8 h-8 rounded-lg flex items-center justify-center text-white font-bold">NP</div>
-          <span className="font-bold text-slate-800 text-lg tracking-tight">NeuroPrecise</span>
+          <div className="bg-blue-600 w-8 h-8 rounded-lg flex items-center justify-center text-white font-bold">NS</div>
+          <span className="font-bold text-slate-800 text-lg tracking-tight">NeuroStudy</span>
         </div>
         <div className="flex items-center gap-4">
           <button 

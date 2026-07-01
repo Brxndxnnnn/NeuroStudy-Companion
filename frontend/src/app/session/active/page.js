@@ -1,31 +1,30 @@
 "use client";
 import { useState, useEffect, useRef } from "react";
 import { useRouter } from "next/navigation";
+import { fetchWithAuth } from "@/utils/api";
 
 export default function ActiveSessionMockup() {
   const router = useRouter();
   
-  // Flow: ready -> connecting -> images -> math -> survey -> complete
   const [currentStep, setCurrentStep] = useState("ready"); 
-  
-  // Connection States
   const [isWaitingForBridge, setIsWaitingForBridge] = useState(false);
   const [pollingError, setPollingError] = useState("");
-  
-  // Image & Event Tracking States
   const [images, setImages] = useState([]);
-  const [currentImageIndex, setCurrentImageIndex] = useState(0);
-  
-  //Using useRef for the Event ID prevents stale data inside the 3-second timer
-  const currentEventIdRef = useRef(null);
-
-  // Math & Survey States
-  const [currentMathIndex, setCurrentMathIndex] = useState(0);
+  const [questions, setQuestions] = useState([]);
+  const [surveyQuestions, setSurveyQuestions] = useState([]);
+  const [isLoadingData, setIsLoadingData] = useState(false);
+  const [currentSurveyIndex, setCurrentSurveyIndex] = useState(0);
+  const [surveyComplete, setSurveyComplete] = useState(false);
+  const [selectedLanguage, setSelectedLanguage] = useState("en");
+  const [questionnaires, setQuestionnaires] = useState([]);
+  const [selectedQuestionnaireId, setSelectedQuestionnaireId] = useState("");
   const [surveyAnswers, setSurveyAnswers] = useState({});
-  const mathQuestions = ["What is 7 + 5?", "What is 18 - 9?", "What is 6 × 4?", "What is 36 ÷ 6 + 7?", "Solve for x: 3x + 5 = 20"];
-  const bfi2Questions = ["Someone who is outgoing and comfortable interacting with others.", "Someone who is caring and tender-hearted toward others.", "Someone who tends to be less organized in managing daily matters.", "Someone who is calm and able to handle pressure well."];
-
-  const getCleanToken = () => localStorage.getItem("token")?.replace(/^["']|["']$/g, '').trim();
+  const [currentImageIndex, setCurrentImageIndex] = useState(0);
+  const currentEventIdRef = useRef(null);
+  const [currentMathIndex, setCurrentMathIndex] = useState(0);
+  const [mathAnswers, setMathAnswers] = useState({});
+  const [mathInputEnabled, setMathInputEnabled] = useState(false);
+  const currentMathEventIdRef = useRef(null);
 
   // ==========================================
   // 1. FETCH IMAGES ON LOAD
@@ -33,9 +32,8 @@ export default function ActiveSessionMockup() {
   useEffect(() => {
     const fetchImages = async () => {
       try {
-        const res = await fetch("http://139.59.126.77/api/images", {
-          headers: { "Authorization": `Bearer ${getCleanToken()}` }
-        });
+        const res = await fetchWithAuth("http://139.59.126.77/api/images");
+
         if (res.ok) {
           const data = await res.json();
           setImages(data); 
@@ -48,20 +46,124 @@ export default function ActiveSessionMockup() {
   }, []);
 
   // ==========================================
-  // EVENT TRACKING HELPERS (Step 4)
+  // 2. FETCH MATH QUESTIONS
+  // ==========================================
+  useEffect(() => {
+    if (currentStep === "math" && questions.length === 0 && !isLoadingData) {
+      const fetchQuestions = async () => {
+        setIsLoadingData(true);
+        try {
+          const res = await fetchWithAuth("http://139.59.126.77/api/questions");
+          if (res.ok) {
+            const data = await res.json();
+            setQuestions(data);
+            if (data.length > 0) {
+              setCurrentMathIndex(0);
+              setMathInputEnabled(false);
+              logQuestionShown(data[0].question_id);
+            }
+          }
+        } catch (err) {
+          console.error("Failed to fetch questions", err);
+        } finally {
+          setIsLoadingData(false);
+        }
+      };
+      fetchQuestions();
+    }
+  }, [currentStep]);
+
+  // ==========================================
+  // 3. TIMER TO ENABLE MATH INPUT (3-5s)
+  // ==========================================
+  useEffect(() => {
+    if (currentStep === "math" && questions.length > 0) {
+      const delay = 3000 + Math.random() * 2000;
+      const timer = setTimeout(() => {
+        setMathInputEnabled(true);
+      }, delay);
+      return () => clearTimeout(timer);
+    }
+  }, [currentStep, currentMathIndex, questions]);
+
+  // ==========================================
+  // 4. FETCH SURVEY DATA (questionnaires & questions)
+  // ==========================================
+  useEffect(() => {
+    if (currentStep === "survey" && !isLoadingData) {
+      const fetchSurveyData = async () => {
+        setIsLoadingData(true);
+        try {
+          // First, get all questionnaires
+          const qRes = await fetchWithAuth("http://139.59.126.77/api/questionnaires");
+          // Get questions for a specific questionnaire
+          if (!qRes.ok) throw new Error("Failed to fetch questionnaires");
+          const qData = await qRes.json();
+          setQuestionnaires(qData);
+
+          // Select the first questionnaire (or you can let user choose later)
+          if (qData.length > 0) {
+            const firstId = qData[0].questionnaire_id || qData[0].id;
+            setSelectedQuestionnaireId(firstId);
+            // Now fetch questions for that questionnaire with the default language
+            await fetchQuestionsForSurvey(firstId, selectedLanguage);
+          }
+        } catch (err) {
+          console.error("Error loading survey:", err);
+        } finally {
+          setIsLoadingData(false);
+        }
+      };
+      fetchSurveyData();
+    }
+  }, [currentStep]);
+
+  // Helper to fetch questions for a specific questionnaire & language
+  const fetchQuestionsForSurvey = async (questionnaireId, language) => {
+    try {
+      const res = await fetchWithAuth(
+          `http://139.59.126.77/api/questionnaires/${questionnaireId}/questions?languages=${language}`
+        );
+      if (res.ok) {
+        const data = await res.json();
+        setSurveyQuestions(data);
+        setCurrentSurveyIndex(0);
+      } else {
+        console.error("Failed to fetch survey questions");
+        setSurveyQuestions([]);
+      }
+    } catch (err) {
+      console.error("Error fetching survey questions:", err);
+    }
+  };
+
+  // Language change handler – refetch survey questions
+  const handleLanguageChange = (lang) => {
+    setSelectedLanguage(lang);
+    if (selectedQuestionnaireId) {
+      fetchQuestionsForSurvey(selectedQuestionnaireId, lang);
+    }
+  };
+
+  // Optionally allow user to change questionnaire (if multiple)
+  const handleQuestionnaireChange = (qId) => {
+    setSelectedQuestionnaireId(qId);
+    fetchQuestionsForSurvey(qId, selectedLanguage);
+  };
+
+  // ==========================================
+  // EVENT LOGGING HELPERS
   // ==========================================
   const logImageShown = async (imageId) => {
     if (!imageId) return;
     try {
       const sessionId = localStorage.getItem("currentSessionId");
-      const res = await fetch("http://139.59.126.77/api/events", {
+      const res = await fetchWithAuth("http://139.59.126.77/api/events", {
         method: "POST",
-        headers: { "Content-Type": "application/json", "Authorization": `Bearer ${getCleanToken()}` },
         body: JSON.stringify({ session_id: sessionId, image_id: imageId })
       });
       if (res.ok) {
         const data = await res.json();
-        // Save to Ref instead of State
         currentEventIdRef.current = data.event_id || data.id; 
       }
     } catch (err) { console.error("Event start failed", err); }
@@ -70,55 +172,70 @@ export default function ActiveSessionMockup() {
   const logImageHidden = async () => {
     const eventId = currentEventIdRef.current;
     if (!eventId) return;
-    
     try {
-      await fetch(`http://139.59.126.77/api/events/${eventId}/hide`, {
-        method: "PATCH",
-        headers: { "Authorization": `Bearer ${getCleanToken()}` }
+      await fetchWithAuth(`http://139.59.126.77/api/events/${eventId}/hide`, {
+        method: "PATCH"
       });
-      currentEventIdRef.current = null; // Clear it out
+      currentEventIdRef.current = null;
     } catch (err) { console.error("Event hide failed", err); }
   };
 
+  const logQuestionShown = async (questionId) => {
+    if (!questionId) return;
+    try {
+      const sessionId = localStorage.getItem("currentSessionId");
+      const res = await fetchWithAuth("http://139.59.126.77/api/events", {
+        method: "POST",
+        // FIXED: Now correctly sending question_id
+        body: JSON.stringify({ session_id: sessionId, question_id: questionId }) 
+      });
+      if (res.ok) {
+        const data = await res.json();
+        currentMathEventIdRef.current = data.event_id || data.id;
+      }
+    } catch (err) { console.error("Question event start failed", err); }
+  };
+
+  const logQuestionHidden = async () => {
+    const eventId = currentMathEventIdRef.current;
+    if (!eventId) return;
+    try {
+      await fetchWithAuth(`http://139.59.126.77/api/events/${eventId}/hide`, {
+        method: "PATCH"
+      });
+      currentMathEventIdRef.current = null;
+    } catch (err) { console.error("Question event hide failed", err); }
+  };
+
   // ==========================================
-  // NEW: THE STRICT 3-SECOND AUTO-ADVANCE TIMER
+  // 5. IMAGES: AUTO-ADVANCE EVERY 10 SECONDS
   // ==========================================
   useEffect(() => {
     let timer;
-    
-    // Only run this timer IF we are in the images phase and images have loaded
     if (currentStep === "images" && images.length > 0) {
-      
-      // Set a strict 3000 millisecond delay
       timer = setTimeout(async () => {
-        await logImageHidden(); // Close the current image in the DB
-        
+        await logImageHidden();
         if (currentImageIndex < images.length - 1) {
-          // Move to the next image
           const nextIdx = currentImageIndex + 1;
           setCurrentImageIndex(nextIdx);
-          await logImageShown(images[nextIdx].id || images[nextIdx].image_id);
+          await logImageShown(images[nextIdx].image_id);
         } else {
-          // Sequence finished! Move to the math test
           setCurrentStep("math");
         }
-      }, 3000);
+      }, 10000);
     }
-
-    // Cleanup: If the component unmounts or the index changes, clear the old timer
     return () => clearTimeout(timer);
   }, [currentStep, currentImageIndex, images]);
 
   // ==========================================
-  // STEP 2 & 3: START AND POLL
+  // 6. START SESSION & POLL
   // ==========================================
   const handleStartRecording = async () => {
     setPollingError("");
     setIsWaitingForBridge(true);
-    setCurrentStep("connecting"); 
+    setCurrentStep("connecting");
 
     const sessionId = localStorage.getItem("currentSessionId");
-    
     if (!sessionId || sessionId === "undefined") {
       setPollingError("Missing Session ID. Please pair again.");
       setIsWaitingForBridge(false);
@@ -126,37 +243,27 @@ export default function ActiveSessionMockup() {
     }
 
     try {
-      const startRes = await fetch(`http://139.59.126.77/api/sessions/${sessionId}/start`, {
-        method: "PATCH", 
-        headers: { "Authorization": `Bearer ${getCleanToken()}` }
+      const startRes = await fetchWithAuth(`http://139.59.126.77/api/sessions/${sessionId}/start`, {
+        method: "PATCH"
       });
       if (!startRes.ok) throw new Error("Failed to initialize session on the server.");
 
       let attempts = 0;
       const pollInterval = setInterval(async () => {
         attempts++;
-        const checkRes = await fetch(`http://139.59.126.77/api/sessions/${sessionId}`, {
-          method: "GET",
-          headers: { "Authorization": `Bearer ${getCleanToken()}` }
-        });
-        
+        const checkRes = await fetchWithAuth(`http://139.59.126.77/api/sessions/${sessionId}`);
         if (checkRes.ok) {
           const sessionData = await checkRes.json();
-          
-          // DEMO BYPASS: "|| true" kept here for your testing without the C# app
           if (sessionData.bridge_recording_at !== null) {
             clearInterval(pollInterval);
             setIsWaitingForBridge(false);
             setCurrentStep("images");
-            
-            // Fire the POST event for the very first image!
             if (images.length > 0) {
-              await logImageShown(images[0].id || images[0].image_id);
+              await logImageShown(images[0].image_id);
             }
             return;
           }
         }
-        
         if (attempts >= 30) {
           clearInterval(pollInterval);
           setIsWaitingForBridge(false);
@@ -170,26 +277,66 @@ export default function ActiveSessionMockup() {
     }
   };
 
-  const handleEndSession = async () => {
+  // ==========================================
+  // 7. MATH NAVIGATION
+  // ==========================================
+  const handleMathAnswerChange = (value) => {
+    if (!mathInputEnabled) return;
+    setMathAnswers(prev => ({
+      ...prev,
+      [currentMathIndex]: value
+    }));
+  };
+
+  const handleNextMath = async () => {
+    if (!mathAnswers[currentMathIndex]?.trim()) {
+      alert("Please provide an answer before proceeding.");
+      return;
+    }
+
+    await logQuestionHidden();
+
+    if (currentMathIndex < questions.length - 1) {
+      const nextIdx = currentMathIndex + 1;
+      setCurrentMathIndex(nextIdx);
+      setMathInputEnabled(false);
+      await logQuestionShown(questions[nextIdx].question_id);
+    } else {
+      await endSessionAndGoToSurvey();
+    }
+  };
+
+  // ==========================================
+  // 8. END SESSION
+  // ==========================================
+  const endSessionAndGoToSurvey = async () => {
     try {
       const sessionId = localStorage.getItem("currentSessionId");
-      await fetch(`http://139.59.126.77/api/sessions/${sessionId}/end`, {
-        method: "PATCH", 
-        headers: { "Authorization": `Bearer ${getCleanToken()}` }
+      const res = await fetchWithAuth(`http://139.59.126.77/api/sessions/${sessionId}/end`, {
+        method: "PATCH"
       });
-      setCurrentStep("complete");
+      if (!res.ok) throw new Error("Failed to end session");
+      setCurrentStep("survey");
     } catch (err) {
-      console.error("End session failed", err);
+      console.error("Error ending session:", err);
+      setCurrentStep("survey");
+    }
+  };
+
+  // ==========================================
+  // 9. SURVEY NAVIGATION
+  // ==========================================
+  const handleNextSurvey = () => {
+    if (currentSurveyIndex < surveyQuestions.length - 1) {
+      setCurrentSurveyIndex(prev => prev + 1);
+    } else {
+      setSurveyComplete(true);
       setCurrentStep("complete");
     }
   };
 
-  const handleSurveyChange = (questionIndex, score) => {
-    setSurveyAnswers(prev => ({ ...prev, [questionIndex]: score }));
-  };
-
   // ==========================================
-  // UI RENDER BLOCKS
+  // UI RENDER FUNCTIONS
   // ==========================================
 
   const renderReadyState = () => (
@@ -231,59 +378,177 @@ export default function ActiveSessionMockup() {
     }
 
     const currentImg = images[currentImageIndex];
+    const hasImage = currentImg.url && currentImg.url.trim() !== "";
 
     return (
       <div className="bg-white p-12 rounded-xl shadow-md border border-slate-200 max-w-4xl mx-auto text-center animate-in zoom-in-95">
-        <div className="flex justify-between items-center mb-8 border-b border-slate-100 pb-4">
-          <span className="text-red-600 font-bold animate-pulse flex items-center gap-2"><span className="h-3 w-3 bg-red-600 rounded-full"></span>EEG RECORDING ACTIVE</span>
-          <span className="text-slate-500 font-mono text-sm">Image {currentImageIndex + 1} of {images.length}</span>
+        <div className="flex justify-between items-center mb-4 border-b border-slate-100 pb-4">
+          <span className="text-slate-500 font-mono text-sm">
+            Image {currentImageIndex + 1} of {images.length}
+          </span>
+          {currentImg.category && (
+            <span className="text-sm font-medium text-slate-600 bg-slate-100 px-3 py-1 rounded-full">
+              {currentImg.category}
+            </span>
+          )}
         </div>
-        
-        <h2 className="text-3xl font-bold mb-8 text-slate-800">{currentImg.name || "Visual Stimulus"}</h2>
-        
-        <div className="w-full h-96 bg-slate-100 rounded-lg flex items-center justify-center mb-6 border border-slate-200 shadow-inner overflow-hidden relative">
-          <img src={currentImg.url || currentImg.image_url} alt="Stimulus" className="w-full h-full object-contain" onError={(e) => e.target.style.display = 'none'} />
-        </div>
-
-        {/* Removed the manual button and added an automated indicator */}
-        <div className="text-slate-400 font-bold tracking-widest text-sm uppercase animate-pulse">
-          Auto-advancing...
+        <div className="w-full h-96 bg-slate-100 rounded-lg flex items-center justify-center border border-slate-200 shadow-inner overflow-hidden relative">
+          {hasImage ? (
+            <img 
+              src={currentImg.url} 
+              alt={currentImg.filename || "Stimulus"} 
+              className="w-full h-full object-contain" 
+              onError={(e) => {
+                e.target.style.display = 'none';
+                const parent = e.target.parentNode;
+                const fallback = document.createElement('div');
+                fallback.className = 'text-slate-400 font-medium';
+                fallback.textContent = 'Image not available';
+                parent.appendChild(fallback);
+              }} 
+            />
+          ) : (
+            <div className="text-slate-400 font-medium">Image not available</div>
+          )}
         </div>
       </div>
     );
   };
 
-  const renderMathTest = () => (
-    <div className="bg-white p-12 rounded-xl shadow-md border border-slate-200 max-w-4xl mx-auto text-center animate-in zoom-in-95">
-      <div className="flex justify-between items-center mb-8 border-b border-slate-100 pb-4">
-        <span className="text-red-600 font-bold animate-pulse flex items-center gap-2"><span className="h-3 w-3 bg-red-600 rounded-full"></span>EEG RECORDING ACTIVE</span>
-        <span className="text-slate-500 font-mono text-sm">Phase 2: Cognitive Task</span>
+  const renderMathTest = () => {
+    if (questions.length === 0) {
+      return (
+        <div className="bg-white p-12 rounded-xl shadow-md border border-slate-200 max-w-4xl mx-auto text-center">
+          <p className="text-slate-500">Loading questions...</p>
+        </div>
+      );
+    }
+    const currentQ = questions[currentMathIndex];
+    const answer = mathAnswers[currentMathIndex] || "";
+    return (
+      <div className="bg-white p-8 rounded-xl shadow-md border border-slate-200 max-w-4xl mx-auto animate-in zoom-in-95">
+        <div className="flex justify-between items-center mb-6 border-b border-slate-100 pb-4">
+          <span className="text-red-600 font-bold animate-pulse flex items-center gap-2"><span className="h-3 w-3 bg-red-600 rounded-full"></span>EEG RECORDING ACTIVE</span>
+          <span className="text-slate-500 font-mono text-sm">Question {currentMathIndex + 1} of {questions.length}</span>
+        </div>
+        <div className="mb-4">
+          <p className="text-3xl font-bold text-blue-600">{currentQ.prompt}</p>
+          {currentQ.difficulty && (
+            <p className="text-sm text-slate-500 mt-2">Difficulty: {currentQ.difficulty}</p>
+          )}
+        </div>
+        <div className="mt-6">
+          <input
+            type="text"
+            placeholder="Type your answer..."
+            value={answer}
+            onChange={(e) => handleMathAnswerChange(e.target.value)}
+            disabled={!mathInputEnabled}
+            className={`w-full p-3 border rounded-lg focus:ring-2 focus:ring-blue-500 ${!mathInputEnabled ? 'bg-slate-100 text-slate-400 cursor-not-allowed' : 'border-slate-300'}`}
+          />
+          {!mathInputEnabled && (
+            <p className="text-xs text-slate-400 mt-1">Input will be enabled in a few seconds to give you time to read...</p>
+          )}
+        </div>
+        <div className="flex justify-end mt-6">
+          <button
+            onClick={handleNextMath}
+            disabled={!mathInputEnabled || !answer.trim()}
+            className={`bg-blue-600 hover:bg-blue-700 text-white font-bold py-3 px-8 rounded-lg shadow-sm disabled:bg-slate-300 disabled:cursor-not-allowed`}
+          >
+            {currentMathIndex < questions.length - 1 ? "Next Question" : "Finish & End Session"}
+          </button>
+        </div>
       </div>
-      <h2 className="text-4xl font-bold mb-12 text-blue-600 tracking-tight">{mathQuestions[currentMathIndex]}</h2>
-      <div className="flex justify-center gap-4 mt-8">
-        <button onClick={() => { currentMathIndex < mathQuestions.length - 1 ? setCurrentMathIndex(currentMathIndex + 1) : setCurrentStep("survey") }} className="px-8 py-3 bg-blue-600 hover:bg-blue-700 text-white shadow-sm rounded-lg font-bold text-lg">
-          {currentMathIndex < mathQuestions.length - 1 ? "Next Question" : "Finish Recording ⏹️"}
-        </button>
-      </div>
-    </div>
-  );
+    );
+  };
 
-  const renderSurvey = () => (
-    <div className="bg-white p-8 rounded-xl shadow-md border border-slate-200 max-w-4xl mx-auto animate-in slide-in-from-bottom-4">
-      <div className="flex justify-between items-center mb-6 border-b border-slate-100 pb-4">
-        <div><h2 className="text-2xl font-bold text-slate-800 mb-1">Post-Session Survey</h2></div>
+  const renderSurvey = () => {
+    if (isLoadingData) {
+      return (
+        <div className="bg-white p-12 rounded-xl shadow-md border border-slate-200 max-w-4xl mx-auto text-center">
+          <p className="text-slate-500">Loading survey...</p>
+        </div>
+      );
+    }
+    if (surveyComplete) {
+      return (
+        <div className="bg-white p-12 rounded-xl shadow-md border border-slate-200 max-w-4xl mx-auto text-center">
+          <h2 className="text-2xl font-bold text-slate-800">Survey Complete</h2>
+          <p className="text-slate-500 mt-2">Redirecting to completion...</p>
+        </div>
+      );
+    }
+    if (surveyQuestions.length === 0) {
+      return (
+        <div className="bg-white p-12 rounded-xl shadow-md border border-slate-200 max-w-4xl mx-auto text-center">
+          <p className="text-slate-500">No survey questions available.</p>
+        </div>
+      );
+    }
+
+    const currentQ = surveyQuestions[currentSurveyIndex];
+    // Extract the statement in the selected language
+    const statementObj = currentQ.statement || {};
+    const questionText = statementObj[selectedLanguage] || statementObj.en || "Question text not available";
+    const answer = surveyAnswers[currentSurveyIndex] || "";
+
+    return (
+      <div className="bg-white p-8 rounded-xl shadow-md border border-slate-200 max-w-4xl mx-auto animate-in slide-in-from-bottom-4">
+        <div className="flex justify-between items-center mb-6 border-b border-slate-100 pb-4">
+          <div>
+            <h2 className="text-2xl font-bold text-slate-800 mb-1">Post‑Session Survey</h2>
+            <p className="text-sm text-slate-500">Question {currentSurveyIndex + 1} of {surveyQuestions.length}</p>
+        </div>
+        {/* Language selector */}
+        <div className="flex gap-2">
+          {['en', 'ms', 'zh'].map(lang => (
+            <button
+              key={lang}
+              onClick={() => handleLanguageChange(lang)}
+              className={`px-3 py-1 text-xs font-bold rounded-full transition-colors ${
+                selectedLanguage === lang
+                  ? 'bg-blue-600 text-white'
+                  : 'bg-slate-100 text-slate-600 hover:bg-slate-200'
+              }`}
+            >
+              {lang.toUpperCase()}
+            </button>
+          ))}
+  </div>
+</div>
+        <div className="mb-6">
+          <p className="text-lg font-medium text-slate-700">{questionText}</p>
+          <div className="mt-4">
+            <input
+              type="text"
+              placeholder="Your answer..."
+              value={answer}
+              onChange={(e) => setSurveyAnswers(prev => ({ ...prev, [currentSurveyIndex]: e.target.value }))}
+              className="w-full p-3 border border-slate-300 rounded-lg focus:ring-2 focus:ring-blue-500"
+            />
+          </div>
+        </div>
+        <div className="flex justify-end pt-4">
+          <button
+            onClick={handleNextSurvey}
+            disabled={!answer.trim()}
+            className={`bg-blue-600 hover:bg-blue-700 text-white font-bold py-3 px-8 rounded-lg shadow-sm disabled:bg-slate-300 disabled:cursor-not-allowed`}
+          >
+            {currentSurveyIndex < surveyQuestions.length - 1 ? "Next Question" : "Finish Survey"}
+          </button>
+        </div>
       </div>
-      <div className="flex justify-end pt-4">
-        <button onClick={handleEndSession} className="bg-blue-600 hover:bg-blue-700 text-white font-bold py-3 px-8 rounded-lg shadow-sm">
-          Submit & End Session
-        </button>
-      </div>
-    </div>
-  );
+    );
+  };
 
   return (
     <main className="min-h-screen bg-slate-50 p-8 font-sans flex flex-col items-center justify-center">
-      <div className="w-full max-w-6xl mb-8"><button onClick={() => router.push("/session")} className="text-slate-400 hover:text-slate-800 font-medium text-sm flex items-center gap-2">← Abort Session</button></div>
+      <div className="w-full max-w-6xl mb-8">
+        <button onClick={() => router.push("/session")} className="text-slate-400 hover:text-slate-800 font-medium text-sm flex items-center gap-2">
+          ← Abort Session
+        </button>
+      </div>
       <div className="w-full">
         {currentStep === "ready" && renderReadyState()}
         {currentStep === "connecting" && renderConnecting()}
@@ -294,7 +559,9 @@ export default function ActiveSessionMockup() {
           <div className="text-center animate-in zoom-in">
             <div className="text-6xl mb-4">🎉</div>
             <h2 className="text-3xl font-bold text-slate-800 mb-2">Session Completed & Saved</h2>
-            <button onClick={() => router.push("/session/history")} className="px-6 py-2 bg-slate-200 text-slate-700 rounded-lg font-bold mt-4">Return to Dashboard</button>
+            <button onClick={() => router.push("/history")} className="px-6 py-2 bg-slate-200 text-slate-700 rounded-lg font-bold mt-4">
+              Return to Dashboard
+            </button>
           </div>
         )}
       </div>
