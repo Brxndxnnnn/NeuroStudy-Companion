@@ -1,138 +1,149 @@
 "use client";
-import { useState } from "react";
+import { useState, useEffect } from "react";
 import { useRouter } from "next/navigation";
+import { fetchWithAuth } from "@/utils/api";
 
 export default function ClinicalDashboard() {
   const router = useRouter();
-  
-  // MOCK DATA: Replace with GET /api/clients later
-  const [clients, setClients] = useState([
-    { id: "c0000000-0000-0000-0000-000000000001", name: "Eleanor Vance", age: 42, gender: "Female", lastSession: "Oct 12, 2023" },
-    { id: "c0000000-0000-0000-0000-000000000002", name: "Marcus Thorne", age: 28, gender: "Male", lastSession: "Oct 12, 2023" },
-    { id: "c0000000-0000-0000-0000-000000000003", name: "Sarah Connor", age: 35, gender: "Female", lastSession: "Oct 11, 2023" },
-  ]);
+  const [clients, setClients] = useState([]);
+  const [isLoading, setIsLoading] = useState(true);
 
-  // Form State
+  // Form States (Matching Eugene's POST payload)
   const [newName, setNewName] = useState("");
-  const [newAge, setNewAge] = useState("");
+  const [newDob, setNewDob] = useState("");
   const [newGender, setNewGender] = useState("");
-  const [feedback, setFeedback] = useState("");
+  const [newRace, setNewRace] = useState("");
+  const [newNotes, setNewNotes] = useState("");
+  const [feedback, setFeedback] = useState({ type: "", message: "" });
 
-  const handleRegisterClient = (e) => {
+  const getCleanToken = () => localStorage.getItem("token")?.replace(/^["']|["']$/g, '').trim();
+
+// ==========================================
+  // 1. FETCH CLIENTS ON LOAD
+  // ==========================================
+  const fetchClients = async () => {
+    try {
+      const res = await fetchWithAuth("http://139.59.126.77/api/clients");
+      
+      if (res.ok) {
+        const data = await res.json();
+        setClients(data); 
+      } else {
+        console.error("Failed to fetch clients");
+      }
+    } catch (err) {
+      console.error("Network error while fetching clients:", err);
+    } finally {
+      setIsLoading(false);
+    }
+  };
+
+  useEffect(() => {
+    fetchClients();
+  }, []);
+
+  useEffect(() => {
+    fetchClients();
+  }, []);
+
+  // ==========================================
+  // 2. REGISTER A NEW CLIENT
+  // ==========================================
+  const handleRegisterClient = async (e) => {
     e.preventDefault();
-    if (!newName || !newAge || !newGender) {
-      setFeedback("Please fill out all fields.");
+    if (!newName || !newDob || !newGender) {
+      setFeedback({ type: "error", message: "Name, DOB, and Gender are required." });
       return;
     }
 
-    // MOCK SUBMIT: Replace with POST /api/clients later
-    const newClient = {
-      id: `mock-id-${Math.random()}`,
-      name: newName,
-      age: newAge,
-      gender: newGender,
-      lastSession: "No sessions yet"
-    };
-    
-    setClients([newClient, ...clients]);
-    setNewName(""); setNewAge(""); setNewGender("");
-    setFeedback("Client successfully registered!");
-    setTimeout(() => setFeedback(""), 3000);
+    try {
+      const res = await fetch("http://139.59.126.77/api/clients", {
+        method: "POST",
+        headers: { 
+          "Content-Type": "application/json", 
+          "Authorization": `Bearer ${getCleanToken()}` 
+        },
+        body: JSON.stringify({
+          name: newName,
+          dob: newDob,
+          gender: newGender,
+          race: newRace,
+          notes: newNotes
+        })
+      });
+
+      if (res.ok) {
+        setFeedback({ type: "success", message: "Client successfully registered!" });
+        setNewName(""); setNewDob(""); setNewGender(""); setNewRace(""); setNewNotes("");
+        fetchClients(); // Instantly refresh the table with the new client
+        setTimeout(() => setFeedback({ type: "", message: "" }), 3000);
+      } else {
+        setFeedback({ type: "error", message: "Failed to register client on server." });
+      }
+    } catch (err) {
+      setFeedback({ type: "error", message: "Network error while registering." });
+    }
   };
 
-  return (
-    <main className="min-h-screen bg-slate-100 p-8 font-sans text-slate-800">
-      {/* Top Header */}
-      <div className="max-w-7xl mx-auto flex justify-between items-center mb-8 bg-white p-4 rounded-xl shadow-sm border border-slate-200">
-        <div className="flex items-center gap-3">
-          <div className="bg-blue-600 w-8 h-8 rounded-lg flex items-center justify-center text-white font-bold">NP</div>
-          <span className="font-bold text-xl text-blue-900 tracking-tight">NeuroPrecise</span>
-          <span className="text-slate-400 ml-2">Clinical Portal</span>
-        </div>
-        <button onClick={() => router.push("/session")} className="bg-blue-50 hover:bg-blue-100 text-blue-600 px-4 py-2 rounded-lg font-bold text-sm transition-colors">
-          Go to EEG Pairing →
-        </button>
-      </div>
+  // ==========================================
+  // 3. SELECT CLIENT & PROCEED TO SESSION
+  // ==========================================
+  const handleSelectClient = (clientId, clientName) => {
+    // Save the real database ID to local storage so the Setup page can use it
+    localStorage.setItem("currentClientId", clientId);
+    localStorage.setItem("currentClientName", clientName);
+    router.push("/session");
+  };
 
-      <div className="max-w-7xl mx-auto grid grid-cols-1 md:grid-cols-3 gap-8">
+
+
+return (
+    <main className="min-h-screen bg-slate-50 p-8 font-sans text-slate-800">
+      <div className="max-w-7xl mx-auto space-y-8">
         
-        {/* Left Column: Registration Form */}
-        <div className="bg-white p-6 rounded-xl shadow-sm border border-slate-200 h-fit">
-          <div className="flex justify-between items-center mb-6">
-            <h2 className="font-bold text-lg text-slate-800">Client Registration</h2>
-            <span className="text-blue-500">👤+</span>
+        {/*Client Directory */}
+        <div className="bg-white rounded-xl shadow-sm border border-slate-200 overflow-hidden">
+          <div className="p-6 border-b border-slate-100 bg-slate-50/50">
+            <h2 className="font-bold text-lg text-slate-800">Client Directory</h2>
+            <p className="text-xs text-slate-500">Select an existing patient to start a session.</p>
           </div>
+          <div className="overflow-x-auto">
+            <table className="w-full text-left">
+              <thead className="bg-slate-50 text-xs text-slate-500 uppercase font-bold">
+                <tr><th className="p-4">Patient</th><th className="p-4">Demographics</th><th className="p-4">Action</th></tr>
+              </thead>
+              <tbody>
+                {isLoading ? <tr><td colSpan="3" className="p-8 text-center">Loading...</td></tr> : 
+                 clients.map((client) => (
+                  <tr key={client.client_id} className="border-b hover:bg-slate-50">
+                    <td className="p-4 font-bold">{client.name}</td>
+                    <td className="p-4 text-sm">{client.gender} • {client.dob}</td>
+                    <td className="p-4">
+                      <button onClick={() => handleSelectClient(client.client_id, client.name)} className="bg-blue-600 text-white px-4 py-1 rounded text-xs font-bold">Start</button>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </div>
 
-          {feedback && <div className={`mb-4 p-3 rounded text-sm font-medium ${feedback.includes('success') ? 'bg-green-50 text-green-700' : 'bg-red-50 text-red-700'}`}>{feedback}</div>}
-
-          <form onSubmit={handleRegisterClient} className="space-y-4">
-            <div>
-              <label className="block text-xs font-bold text-slate-500 uppercase mb-1">Full Name</label>
-              <input type="text" value={newName} onChange={(e) => setNewName(e.target.value)} className="w-full p-2.5 border border-slate-200 rounded-lg text-sm focus:ring-2 focus:ring-blue-500" placeholder="e.g. Johnathan Doe" />
-            </div>
-            <div className="grid grid-cols-2 gap-4">
-              <div>
-                <label className="block text-xs font-bold text-slate-500 uppercase mb-1">Age</label>
-                <input type="number" value={newAge} onChange={(e) => setNewAge(e.target.value)} className="w-full p-2.5 border border-slate-200 rounded-lg text-sm focus:ring-2 focus:ring-blue-500" placeholder="e.g. 34" />
-              </div>
-              <div>
-                <label className="block text-xs font-bold text-slate-500 uppercase mb-1">Gender</label>
-                <select value={newGender} onChange={(e) => setNewGender(e.target.value)} className="w-full p-2.5 border border-slate-200 rounded-lg text-sm focus:ring-2 focus:ring-blue-500 bg-white">
-                  <option value="">Select</option>
-                  <option value="Male">Male</option>
-                  <option value="Female">Female</option>
-                  <option value="Other">Other</option>
-                </select>
-              </div>
-            </div>
-            
-            <div className="pt-4 flex gap-3">
-              <button type="submit" className="flex-1 bg-blue-600 hover:bg-blue-700 text-white font-bold py-2.5 rounded-lg text-sm transition-colors shadow-sm">
-                Register Patient
-              </button>
-              <button type="button" onClick={() => {setNewName(""); setNewAge(""); setNewGender("");}} className="px-4 py-2.5 border border-slate-200 hover:bg-slate-50 text-slate-600 font-medium rounded-lg text-sm transition-colors">
-                Clear
-              </button>
-            </div>
+        {/*Client Registration*/}
+        <div className="bg-white p-6 rounded-xl shadow-sm border border-slate-200">
+          <h2 className="font-bold text-lg text-slate-800 mb-4">Register New Client</h2>
+          {feedback.message && <div className={`mb-4 p-2 text-sm ${feedback.type === 'success' ? 'bg-green-100' : 'bg-red-100'}`}>{feedback.message}</div>}
+          <form onSubmit={handleRegisterClient} className="grid grid-cols-1 md:grid-cols-2 gap-4">
+            <input type="text" placeholder="Full Name" value={newName} onChange={(e) => setNewName(e.target.value)} className="p-2 border rounded" required />
+            <input type="date" value={newDob} onChange={(e) => setNewDob(e.target.value)} className="p-2 border rounded" required />
+            <select value={newGender} onChange={(e) => setNewGender(e.target.value)} className="p-2 border rounded" required>
+              <option value="">Select Gender</option><option value="Male">Male</option><option value="Female">Female</option>
+            </select>
+            <input type="text" placeholder="Race" value={newRace} onChange={(e) => setNewRace(e.target.value)} className="p-2 border rounded" />
+            <textarea placeholder="Clinical Notes" value={newNotes} onChange={(e) => setNewNotes(e.target.value)} className="md:col-span-2 p-2 border rounded" />
+            <button type="submit" className="md:col-span-2 bg-slate-800 text-white py-2 rounded font-bold">Register Client</button>
           </form>
         </div>
-
-        {/* Right Column: Client Directory */}
-        <div className="md:col-span-2 bg-white rounded-xl shadow-sm border border-slate-200 overflow-hidden">
-          <div className="p-6 border-b border-slate-100 flex justify-between items-center bg-slate-50/50">
-            <div>
-              <h2 className="font-bold text-lg text-slate-800">Client Directory</h2>
-              <p className="text-xs text-slate-500">Select a client from the EEG Setup page to begin a session.</p>
-            </div>
-          </div>
-          
-          <table className="w-full text-left">
-            <thead className="bg-slate-50 border-b border-slate-100 text-xs text-slate-500 uppercase font-bold tracking-wide">
-              <tr>
-                <th className="p-4">Patient Name</th>
-                <th className="p-4">Demographics</th>
-                <th className="p-4">Last Session Date</th>
-                <th className="p-4"></th>
-              </tr>
-            </thead>
-            <tbody>
-              {clients.map((client) => (
-                <tr key={client.id} className="border-b border-slate-50 hover:bg-slate-50 transition-colors">
-                  <td className="p-4">
-                    <div className="font-bold text-slate-800">{client.name}</div>
-                    <div className="text-xs text-slate-400 font-mono mt-0.5">ID: {client.id.substring(0, 8)}...</div>
-                  </td>
-                  <td className="p-4 text-sm text-slate-600">{client.age} yrs • {client.gender}</td>
-                  <td className="p-4 text-sm text-slate-600">{client.lastSession}</td>
-                  <td className="p-4 text-right">
-                    <button className="text-blue-500 hover:text-blue-700 font-medium text-sm">View &gt;</button>
-                  </td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        </div>
-
+        
       </div>
     </main>
   );
