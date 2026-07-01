@@ -2,97 +2,108 @@
 import { useState } from "react";
 import { useRouter } from "next/navigation";
 
-export default function Login() {
+export default function LoginPage() {
   const router = useRouter();
-  const [email, setEmail] = useState("");
+  
+  // CHANGED: Now using email instead of username
+  const [email, setEmail] = useState(""); 
   const [password, setPassword] = useState("");
-  const [errorMessage, setErrorMessage] = useState("");
+  const [error, setError] = useState("");
+  const [isLoading, setIsLoading] = useState(false);
 
   const handleLogin = async (e) => {
     e.preventDefault();
-    setErrorMessage(""); // Clear old errors
+    setError("");
+    setIsLoading(true);
 
     try {
-      const response = await fetch("http://139.59.126.77/api/auth/login", {
+      const res = await fetch("http://139.59.126.77/api/auth/login", {
         method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-        },
-        body: JSON.stringify({ email, password }),
+        headers: { "Content-Type": "application/json" },
+        // CHANGED: Sending email in the body payload
+        body: JSON.stringify(
+          { email, password, override: true })
       });
 
-      const data = await response.json();
-
-      if (response.ok) {
-        localStorage.setItem("token", data.accessToken);
-        const role = data.user?.role;
+      if (res.ok) {
+        const data = await res.json();
+        const token = data.accessToken; 
         
-        if (role === "admin") {
-          router.push("/admin");
-        } else if (role === "technician") {
-          router.push("/session");
+        // 1. Grab the user's role from Eugene's API response
+        const userRole = data.user.role; 
+
+        // 2. Save both the token and the role to local storage
+        localStorage.setItem("token", token);
+        localStorage.setItem("userRole", userRole); 
+
+        // 3. Act as a traffic cop based on the role
+        if (userRole === "admin" || userRole === "superadmin") {
+          // Send admins to the Super Admin Dashboard
+          router.push("/admin"); 
+          
         } else {
-          setErrorMessage("Access denied: No valid role assigned to this account.");
+          // Send technicians to the Clinical Portal
+          router.push("/history"); 
         }
+
       } else {
-        // If password/email is wrong, pull the error text directly from the database API
-        setErrorMessage(data.message || "Invalid email or password.");
+        setError("Invalid email or password.");
       }
-    } catch (error) {
-      setErrorMessage("Could not connect to the authentication server.");
+    } catch (err) {
+      setError("Network error. Could not connect to database.");
+    } finally {
+      setIsLoading(false);
     }
   };
 
   return (
-    <main className="min-h-screen bg-slate-50 flex flex-col items-center justify-center p-4 font-sans">
-      <div className="text-center mb-8">
-        <div className="bg-teal-400 w-16 h-16 rounded-2xl mx-auto flex items-center justify-center shadow-lg mb-4">
-          <span className="text-white text-3xl font-bold">🧠</span>
-        </div>
-        <h1 className="text-3xl font-bold text-slate-800">NeuroStudy Companion</h1>
-        <p className="text-slate-500 mt-2">Track your focus, improve your study habits</p>
-      </div>
-
-      <div className="bg-white w-full max-w-md p-8 rounded-xl shadow-sm border border-slate-100">
-        <h2 className="text-xl font-bold text-slate-800 mb-6">Welcome Back</h2>
+    <main className="min-h-screen bg-slate-50 flex flex-col justify-center items-center p-4">
+      <div className="w-full max-w-md bg-white p-8 rounded-xl shadow-md border border-slate-200">
         
-        {/* DYNAMIC ERROR PROMPT DISPLAY */}
-        {errorMessage && (
-          <div className="bg-red-50 text-red-600 border border-red-100 p-3 rounded-lg text-sm mb-4 font-medium flex items-center gap-2">
-            ⚠️ {errorMessage}
+        <div className="flex flex-col items-center mb-8">
+          <div className="bg-blue-600 w-12 h-12 rounded-xl flex items-center justify-center text-white font-bold text-xl mb-4 shadow-sm">
+            NS
+          </div>
+          <h1 className="text-2xl font-bold text-slate-800">NeuroStudy</h1>
+          <p className="text-sm text-slate-500">Clinical Login Portal</p>
+        </div>
+
+        {error && (
+          <div className="mb-6 p-3 bg-red-50 text-red-700 text-sm font-medium rounded-lg text-center">
+            {error}
           </div>
         )}
 
-        <form onSubmit={handleLogin} className="space-y-4">
+        <form onSubmit={handleLogin} className="space-y-5">
           <div>
-            <label className="block text-sm text-slate-600 mb-1">Email</label>
+            {/* CHANGED: Updated label and input type to email */}
+            <label className="block text-xs font-bold text-slate-500 uppercase mb-2">Email Address</label>
             <input 
               type="email" 
+              value={email} 
+              onChange={(e) => setEmail(e.target.value)} 
+              className="w-full p-3 border border-slate-200 rounded-lg focus:ring-2 focus:ring-blue-500 text-slate-800"
+              placeholder=""
               required
-              placeholder="tech@neurostudy.com"
-              className="w-full px-4 py-3 rounded-lg border border-slate-200 focus:outline-none focus:ring-2 focus:ring-teal-400 focus:border-transparent transition-all"
-              value={email}
-              onChange={(e) => setEmail(e.target.value)}
             />
           </div>
-          
           <div>
-            <label className="block text-sm text-slate-600 mb-1">Password</label>
+            <label className="block text-xs font-bold text-slate-500 uppercase mb-2">Password</label>
             <input 
               type="password" 
+              value={password} 
+              onChange={(e) => setPassword(e.target.value)} 
+              className="w-full p-3 border border-slate-200 rounded-lg focus:ring-2 focus:ring-blue-500 text-slate-800"
+              placeholder="••••••••"
               required
-              placeholder="Enter your password"
-              className="w-full px-4 py-3 rounded-lg border border-slate-200 focus:outline-none focus:ring-2 focus:ring-teal-400 focus:border-transparent transition-all"
-              value={password}
-              onChange={(e) => setPassword(e.target.value)}
             />
           </div>
-
           <button 
             type="submit" 
-            className="w-full bg-blue-500 hover:bg-blue-600 text-white font-semibold py-3 rounded-lg transition-colors mt-4 shadow-sm"
+            disabled={isLoading}
+            className="w-full bg-blue-600 hover:bg-blue-700 text-white font-bold py-3 rounded-lg transition-colors shadow-sm disabled:bg-blue-300"
           >
-            Log In
+            {isLoading ? "Authenticating..." : "Sign In"}
           </button>
         </form>
       </div>
