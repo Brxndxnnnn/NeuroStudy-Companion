@@ -1,5 +1,6 @@
 import questionnaireModel from '../models/questionnaire.model.js'
 import catchAsync from '../utils/catchAsync.js'
+import { BadRequestError, NotFoundError } from '../utils/appError.js'
 
 // ── GET /api/questionnaires ─────────────────────────────────────────────────────
 const listQuestionnaires = catchAsync(async (req, res) => {
@@ -10,20 +11,11 @@ const listQuestionnaires = catchAsync(async (req, res) => {
 // ── GET /api/questionnaires/:questionnaire_id ─────────────────────────────────
 const getQuestionnaireById = catchAsync(async (req, res) => {
     const { questionnaire_id } = req.params
-    let results
-
-    try {
-        results = await questionnaireModel.findById(questionnaire_id, req.dbClient)
-    } catch (err) {
-        if (err.code === '22P02') { // invalid input syntax for uuid
-            return res.status(400).json({ error: 'Invalid questionnaire_id format' })
-        }
-        return res.status(500).json({ error: 'Internal server error' })
-    }
-
-    if (!results || results.length === 0) {
-        return res.status(404).json({ error: 'Questionnaire not found' })
-    }
+    if (!questionnaire_id)
+        throw new BadRequestError('Missing required field: questionnaire_id is required')
+    const results = await questionnaireModel.findById(questionnaire_id, req.dbClient)
+    if (!results || results.length === 0)
+        throw new NotFoundError('Questionnaire not found')
 
     return res.json(results[0])
 })
@@ -38,26 +30,22 @@ const listAllQuestions = catchAsync(async (req, res) => {
 // ── GET /api/questionnaires/:questionnaire_id/questions ─────────────────────────
 const getQuestionsByQuestionnaireId = catchAsync(async (req, res) => {
     const { questionnaire_id } = req.params
+    if (!questionnaire_id)
+        throw new BadRequestError('Missing required field: questionnaire_id is required')
     const languages = req.query.languages ? req.query.languages.split(',') : []
-    console.log('Requested languages:', languages)
-    console.log('Requested questionnaire_id:', questionnaire_id)
-    let results
-
-    try {
-        results = await questionnaireModel.findQuestionsByQuestionnaireId(questionnaire_id, languages, req.dbClient)
-    } catch (err) {
-        console.error('Error fetching questions by questionnaire_id:', err)
-        if (err.code === '22P02') { // invalid input syntax for uuid
-            return res.status(400).json({ error: 'Invalid questionnaire_id format' })
-        }
-        return res.status(500).json({ error: 'Internal server error' })
-    }
-
-    if (!results || results.length === 0) {
-        return res.status(404).json({ error: 'No questions found for the given questionnaire_id' })
-    }
+    const results = await questionnaireModel.findQuestionsByQuestionnaireId(questionnaire_id, languages, req.dbClient)
+    if (!results || results.length === 0)
+        throw new NotFoundError('No questions found for the given questionnaire_id')
 
     return res.json(results)
 })
+// ── POST /api/questionnaires/answer ─────────────────────────────────────────────
+const answerQuestionnaire = catchAsync(async (req, res) => {
+    const { session_id, questionnaire_id, answers } = req.body
+    if (!session_id || !questionnaire_id || !answers || !Array.isArray(answers) || answers.length === 0)
+        throw new BadRequestError('Missing required fields: session_id, questionnaire_id, and answers are required')
+    const results = await questionnaireModel.insertAnswers(session_id, questionnaire_id, answers, req.user.clinic_id, req.dbClient)
+    return res.status(201).json({ message: results.length + ' answer(s) submitted successfully', results })
+})
 
-export default { listQuestionnaires, getQuestionnaireById, listAllQuestions, getQuestionsByQuestionnaireId }
+export default { listQuestionnaires, getQuestionnaireById, listAllQuestions, getQuestionsByQuestionnaireId, answerQuestionnaire }

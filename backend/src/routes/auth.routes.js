@@ -33,8 +33,8 @@ const router = Router()
  *         description: JWT token and user info
  *       401:
  *         description: Invalid credentials
- *       403:
- *         description: Active session exists and override not yet confirmed
+ *       409:
+ *         description: Conflict - An active session already exists for this user and override is not set to true
  */
 router.post('/login', authController.login)
 
