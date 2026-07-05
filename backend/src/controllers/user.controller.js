@@ -1,7 +1,7 @@
 import userModel from '../models/user.model.js'
 import catchAsync from '../utils/catchAsync.js'
 import authService from '../services/auth.service.js'
-import { BadRequestError, NotFoundError } from '../utils/appError.js'
+import { BadRequestError, NotFoundError } from '../utils/AppError.js'
 
 // ── POST /api/users ──────────────────────────────────────────────────────────
 const createUser = catchAsync(async (req, res, next) => {
