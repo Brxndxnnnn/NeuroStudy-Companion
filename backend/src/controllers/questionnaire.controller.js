@@ -1,6 +1,6 @@
 import questionnaireModel from '../models/questionnaire.model.js'
 import catchAsync from '../utils/catchAsync.js'
-import { BadRequestError, NotFoundError } from '../utils/appError.js'
+import { BadRequestError, NotFoundError } from '../utils/AppError.js'
 
 // ── GET /api/questionnaires ─────────────────────────────────────────────────────
 const listQuestionnaires = catchAsync(async (req, res) => {
