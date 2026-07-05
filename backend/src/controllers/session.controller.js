@@ -1,6 +1,6 @@
 import sessionModel from '../models/session.model.js'
 import catchAsync from '../utils/catchAsync.js'
-import { BadRequestError, NotFoundError } from '../utils/appError.js'
+import { BadRequestError, NotFoundError } from '../utils/AppError.js'
 
 // ── GET /api/sessions ──────────────────────────────────────────────────────────
 const listSessions = catchAsync(async (req, res) => {
