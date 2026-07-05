@@ -148,6 +148,7 @@ router.patch(
  *       This endpoint allows you to end a specific session. You must provide the session_id in the URL.
  * 
  *       **Note**: The `session_id` must be a valid UUID. If the provided ID does not exist in the database, an error will be returned.
+ *       This endpoint also triggers the backfilling of session results for the specified session.
  *     tags: [Sessions]
  *     security:
  *       - bearerAuth: []
@@ -195,6 +196,93 @@ router.get(
     '/:session_id/results',
     requirePermission(PERMS.SESSIONS_READ_OWN_CLINIC),
     sessionController.getSessionResult
+)
+
+/**
+ * @openapi
+ * /api/sessions/{session_id}/results/raw:
+ *   get:
+ *     summary: Retrieve the raw results for a specific session
+ *     description: |
+ *       This endpoint allows you to retrieve the raw results for a specific session. You must provide the session_id in the URL.
+ * 
+ *       **Note**: The `session_id` must be a valid UUID. If the provided ID does not exist in the database, an error will be returned.
+ *       
+ *       This API right now quite slow since DB is on the $4 droplet, try like 5-10 seconds, at most can try 1 minute interval (0 to 60) 
+ *       or (60 to 120) to get the filtered results. We will optimize this in the future.
+ *     tags: [Sessions]
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - in: path
+ *         name: session_id
+ *         required: true
+ *       - in: query
+ *         name: start_seconds
+ *         required: true
+ *         schema:
+ *           type: number
+ *           description: The starting point in seconds from which to retrieve the raw results.
+ *       - in: query
+ *         name: end_seconds
+ *         required: true
+ *         schema:
+ *           type: number
+ *           description: The ending point in seconds up to which to retrieve the raw results.
+ *     responses:
+ *       200:
+ *         description: Raw results retrieved successfully
+ *       404:
+ *         description: Could not find session with the provided session_id
+ */
+router.get(
+    '/:session_id/results/raw',
+    requirePermission(PERMS.SESSIONS_READ_OWN_CLINIC),
+    sessionController.getSessionEEGResults
+)
+
+
+/**
+ * @openapi
+ * /api/sessions/{session_id}/results/filtered:
+ *   get:
+ *     summary: Retrieve the filtered results for a specific session
+ *     description: |
+ *       This endpoint allows you to retrieve the filtered results for a specific session. You must provide the session_id in the URL.
+ * 
+ *       **Note**: The `session_id` must be a valid UUID. If the provided ID does not exist in the database, an error will be returned.
+ *       
+ *       This API right now quite slow since DB is on the $4 droplet, try like 5-10 seconds, at most can try 1 minute interval (0 to 60) 
+ *       or (60 to 120) to get the filtered results. We will optimize this in the future.
+ *     tags: [Sessions]
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - in: path
+ *         name: session_id
+ *         required: true
+ *       - in: query
+ *         name: start_seconds
+ *         required: true
+ *         schema:
+ *           type: number
+ *         description: The starting point in seconds from which to retrieve the filtered results.
+ *       - in: query
+ *         name: end_seconds
+ *         required: true
+ *         schema:
+ *           type: number
+ *         description: The ending point in seconds up to which to retrieve the filtered results.
+ *     responses:
+ *       200:
+ *         description: Filtered results retrieved successfully
+ *       404:
+ *         description: Could not find session with the provided session_id
+ */
+router.get(
+    '/:session_id/results/filtered',
+    requirePermission(PERMS.SESSIONS_READ_OWN_CLINIC),
+    sessionController.getSessionEEGResults
 )
 
 export default router

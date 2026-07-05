@@ -31,8 +31,6 @@ const findAllQuestions = async (languages, client = pool) => {
 }
 
 const findQuestionsByQuestionnaireId = async (questionnaire_id, languages, client = pool) => {
-    console.log('findQuestionsByQuestionnaireId - questionnaire_id:', questionnaire_id)
-    console.log('findQuestionsByQuestionnaireId - languages:', languages)
     const [en, ms, cn] = languages
     let sql = `SELECT question_id, question_no, domain, is_reverse_scored`
     if (languages.length === 0) {
@@ -48,4 +46,18 @@ const findQuestionsByQuestionnaireId = async (questionnaire_id, languages, clien
     return rows;
 }
 
-export default { findAll, findById, findAllQuestions, findQuestionsByQuestionnaireId }
+const insertAnswers = async (session_id, questionnaire_id, answers, clinic_id, client = pool) => {
+    let sql = `INSERT INTO session_questionnaire_responses (session_id, questionnaire_id, question_id, response_value, clinic_id) VALUES `
+    const values = []
+    const placeholders = answers.map((answer, index) => {
+        const { question_id, answer_value } = answer
+        values.push(session_id, questionnaire_id, question_id, answer_value, clinic_id)
+        const baseIndex = index * 5 + 1
+        return `($${baseIndex}, $${baseIndex + 1}, $${baseIndex + 2}, $${baseIndex + 3}, $${baseIndex + 4})`
+    }).join(', ')
+    sql += ` ${placeholders} returning session_id, questionnaire_id, question_id, response_value, clinic_id`
+    const { rows } = await query(client, sql, values)
+    return rows
+}
+
+export default { findAll, findById, findAllQuestions, findQuestionsByQuestionnaireId, insertAnswers }

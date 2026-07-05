@@ -1,8 +1,9 @@
 import pool from '../config/db.js'
+import { UnauthorizedError, PermissionDeniedError } from '../utils/AppError.js'
 
 const requirePermission = (permissionName) => async (req, res, next) => {
     if (!req.user)
-        return res.status(401).json({ error: 'Not authenticated.' })
+        throw new UnauthorizedError('Not authenticated.')
 
     if (req.user.role === 'admin' || req.user.role === 'superadmin')
         return next()  // Admins bypass permission checks. TEMP FIX FOR NOW. Will implement more granular admin permissions later.
@@ -15,7 +16,7 @@ const requirePermission = (permissionName) => async (req, res, next) => {
     )
 
     if (rows.length === 0)
-        return res.status(403).json({ error: 'Insufficient permissions.' })
+        throw new PermissionDeniedError('Insufficient permissions.')
 
     next()
 }
