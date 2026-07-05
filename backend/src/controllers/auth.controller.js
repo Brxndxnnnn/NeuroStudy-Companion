@@ -2,6 +2,7 @@ import { randomUUID } from 'crypto'
 import userModel from '../models/user.model.js'
 import authService from '../services/auth.service.js'
 import catchAsync from '../utils/catchAsync.js'
+import { BadRequestError, ConflictError, NotFoundError, UnauthorizedError } from '../utils/AppError.js'
 import pool from '../config/db.js'
 
 const cookieOptions = {
@@ -15,34 +16,7 @@ const login = catchAsync(async (req, res) => {
     const { email, password } = req.body
     const override = req.body.override === true
     if (!email || !password)
-        return res.status(400).json({ error: 'Email and password are required.' })
-
-    // const user = await userModel.findByEmail(email)
-    // if (!user)
-    //     return res.status(401).json({ error: 'Invalid credentials. Cannot find user.' })
-
-    // const valid = await authService.comparePassword(password, user.password_hash)
-    // if (!valid)
-    //     return res.status(401).json({ error: 'Invalid credentials. Please check your email and password.' })
-
-    // const jti = randomUUID()
-    // const token = authService.signToken({
-    //     jti,
-    //     sub: user.user_id,
-    //     email: user.email,
-    //     role: user.role_name,
-    //     role_id: user.role_id,
-    // })
-
-    // res.json({
-    //     token,
-    //     user: {
-    //         user_id:      user.user_id,
-    //         email:        user.email,
-    //         display_name: user.display_name,
-    //         role:         user.role_name,
-    //     },
-    // })
+        throw new BadRequestError('Email and password are required.')
 
     // Auth flows must bypass RLS to verify credentials across clinics
     const client = await pool.connect()
@@ -51,14 +25,14 @@ const login = catchAsync(async (req, res) => {
         const user = await userModel.findByEmail(email, client)
         await client.query("RESET app.is_admin")
 
-        if (!user) return res.status(401).json({ error: 'Invalid credentials. User not found.' })
+        if (!user) throw new UnauthorizedError('Invalid credentials. Please check your email and password.')
 
         const valid = await authService.comparePassword(password, user.password_hash)
-        if (!valid) return res.status(401).json({ error: 'Invalid credentials. Please check your email and password.' })
+        if (!valid) throw new UnauthorizedError('Invalid credentials. Please check your email and password.')
 
         const existingSession = await authService.detectActiveSession(user.user_id)
         if (existingSession && !override) {
-            return res.status(403).json({ error: 'An active session already exists for this user. Are you sure you want to override it?' })
+            throw new ConflictError('An active session already exists for this user. Are you sure you want to override it?')
         }
 
         // Generate dual tokens
@@ -95,10 +69,10 @@ const login = catchAsync(async (req, res) => {
 
 const refresh = catchAsync(async (req, res) => {
     const refreshToken = req.cookies.refreshToken
-    if (!refreshToken) return res.status(401).json({ error: 'No refresh token provided.' })
+    if (!refreshToken) throw new UnauthorizedError('No refresh token provided.')
 
     const session = await authService.findRefreshSession(refreshToken)
-    if (!session) return res.status(401).json({ error: 'Invalid or expired session.' })
+    if (!session) throw new UnauthorizedError('Invalid or expired session.')
 
     // Bypass RLS to fetch user claims for new access token
     const client = await pool.connect()
@@ -107,7 +81,7 @@ const refresh = catchAsync(async (req, res) => {
         const user = await userModel.findById(session.user_id, client)
         await client.query("RESET app.is_admin")
 
-        if (!user) return res.status(401).json({ error: 'User not found.' })
+        if (!user) throw new UnauthorizedError('User not found.')
         
         // Rotate refresh token
         // const newRefreshToken = randomUUID()
@@ -131,7 +105,7 @@ const refresh = catchAsync(async (req, res) => {
 
 const logout = catchAsync(async (req, res) => {
     const cookies = req.cookies
-    if (!cookies.refreshToken) return res.status(400).json({ error: 'No refresh token provided.' })
+    if (!cookies.refreshToken) throw new BadRequestError('No refresh token provided.')
     const refreshToken = cookies.refreshToken
     if (refreshToken) {
         await authService.deleteRefreshSession(refreshToken)
@@ -147,7 +121,7 @@ const logout = catchAsync(async (req, res) => {
 
 const me = catchAsync(async (req, res) => {
     const user = await userModel.findById(req.user.sub, req.dbClient)
-    if (!user) return res.status(404).json({ error: 'User not found.' })
+    if (!user) throw new NotFoundError('User not found.')
     res.json(user)
 })
 

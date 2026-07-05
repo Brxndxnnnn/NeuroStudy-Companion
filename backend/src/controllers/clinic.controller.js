@@ -1,12 +1,11 @@
 import clinicModel from '../models/clinic.model.js'
 import catchAsync  from '../utils/catchAsync.js'
+import { BadRequestError, NotFoundError } from '../utils/AppError.js'
 
 // ── POST /api/clinics ─────────────────────────────────────────────────────────
 const createClinic = catchAsync(async (req, res) => {
     const { name, address } = req.body
-
-    if (!name) return res.status(400).json({ error: 'name is required' })
-
+    if (!name) throw new BadRequestError('name is required')
     const clinic = await clinicModel.create({ name, address }, req.dbClient)
     return res.status(201).json(clinic)
 })
@@ -19,19 +18,27 @@ const listClinics = catchAsync(async (req, res) => {
 
 // ── GET /api/clinics/:id ──────────────────────────────────────────────────────
 const getClinic = catchAsync(async (req, res) => {
-    const clinic = await clinicModel.findById(req.params.id, req.dbClient)
-    if (!clinic) return res.status(404).json({ error: 'Clinic not found' })
+    const { id } = req.params
+    if (!id)
+        throw new BadRequestError('Missing required field: id is required')
+    const clinic = await clinicModel.findById(id, req.dbClient)
+    if (!clinic) throw new NotFoundError('Clinic not found')
     return res.json(clinic)
 })
 
 // ── PATCH /api/clinics/:id ────────────────────────────────────────────────────
 const updateClinic = catchAsync(async (req, res) => {
     const { name, address } = req.body
+    const { id } = req.params
 
-    const clinic = await clinicModel.update(req.params.id, { name, address }, req.dbClient)
+    if (!id)
+        throw new BadRequestError('Missing required field: id is required')
+    if (!name && !address)
+        throw new BadRequestError('At least one of name or address is required')
+    const clinic = await clinicModel.update(id, { name, address }, req.dbClient)
 
-    if (clinic === null)      return res.status(400).json({ error: 'Nothing to update' })
-    if (clinic === undefined) return res.status(404).json({ error: 'Clinic not found' })
+    if (clinic === null)      throw new BadRequestError('Nothing to update')
+    if (clinic === undefined) throw new NotFoundError('Clinic not found')
 
     return res.json(clinic)
 })

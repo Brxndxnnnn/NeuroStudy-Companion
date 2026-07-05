@@ -1,5 +1,6 @@
 import questionModel from '../models/question.model.js'
 import catchAsync  from '../utils/catchAsync.js'
+import { BadRequestError, NotFoundError } from '../utils/AppError.js'
 
 // ── GET /api/questions ─────────────────────────────────────────────────────────
 const listQuestions = catchAsync(async (req, res) => {
@@ -10,21 +11,11 @@ const listQuestions = catchAsync(async (req, res) => {
 // ── GET /api/questions/:question_id ─────────────────────────────────────────────
 const getQuestionById = catchAsync(async (req, res) => {
     const { question_id } = req.params
-    let results
-
-    try {
-        results = await questionModel.findById(question_id, req.dbClient)
-    } catch (err) {
-        if (err.code === '22P02') { // invalid input syntax for uuid
-            return res.status(400).json({ error: 'Invalid question_id format' })
-        }
-        return res.status(500).json({ error: 'Internal server error' })
-    }
-
-    if (!results || results.length === 0) {
-        return res.status(404).json({ error: 'Question not found' })
-    }
-
+    if (!question_id)
+        throw new BadRequestError('Missing required field: question_id is required')
+    const results = await questionModel.findById(question_id, req.dbClient)
+    if (!results || results.length === 0)
+        throw new NotFoundError('Question not found')
     return res.json(results[0])
 })
 

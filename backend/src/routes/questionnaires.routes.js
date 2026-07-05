@@ -135,4 +135,80 @@ router.get('/:questionnaire_id', questionnaireController.getQuestionnaireById)
  */
 router.get('/:questionnaire_id/questions', questionnaireController.getQuestionsByQuestionnaireId)
 
+/**
+ * @openapi
+ * /api/questionnaires/answer:
+ *   post:
+ *     summary: Submit answers for a questionnaire
+ *     description: Submit answers for a specific questionnaire associated with a session and clinic.
+ *       
+ *       **Note on Clinic ID:** 
+ *       The frontend does NOT need to send the technician's `clinic_id`. 
+ *       The backend automatically extracts the `clinic_id` 
+ *       from the signed JWT (Bearer token) provided in the Authorization header.
+ *     tags: [Questionnaires]
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             properties:
+ *               session_id:
+ *                 type: string
+ *                 format: uuid
+ *                 example: "123e4567-e89b-12d3-a456-426614174000"
+ *               questionnaire_id:
+ *                 type: string
+ *                 format: uuid
+ *                 example: "750c4551-2932-4597-bf72-27050e318795"
+ *               answers:
+ *                 type: array
+ *                 items:
+ *                   type: object
+ *                   properties:
+ *                     question_id:
+ *                       type: string
+ *                       format: uuid
+ *                       example: "750c4551-2932-4597-bf72-27050e318795"
+ *                     answer_value:
+ *                       type: integer
+ *                       example: 4
+ *     responses:
+ *       201:
+ *         description: 1 answer(s) submitted successfully
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 message:
+ *                   type: string
+ *                   example: "1 answer(s) submitted successfully"
+ *                 results:
+ *                   type: array
+ *                   items:
+ *                     type: object
+ *                     properties:
+ *                       session_id:
+ *                         type: string
+ *                         format: uuid
+ *                       questionnaire_id:
+ *                         type: string
+ *                         format: uuid
+ *                       question_id:
+ *                         type: string
+ *                         format: uuid
+ *                       response_value:
+ *                         type: integer
+ *                       clinic_id:
+ *                         type: string
+ *                         format: uuid
+ *       400:
+ *         description: Bad request (missing required fields or invalid data)
+ *       409:
+ *         description: Conflict (e.g., duplicate submission)
+ */
+router.post('/answer', questionnaireController.answerQuestionnaire)
+
 export default router
