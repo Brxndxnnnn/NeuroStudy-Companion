@@ -1,11 +1,10 @@
 "use client";
 import { useState } from "react";
 import { useRouter } from "next/navigation";
+import { login } from "@/utils/api";
 
 export default function LoginPage() {
   const router = useRouter();
-  
-  // CHANGED: Now using email instead of username
   const [email, setEmail] = useState(""); 
   const [password, setPassword] = useState("");
   const [error, setError] = useState("");
@@ -17,40 +16,36 @@ export default function LoginPage() {
     setIsLoading(true);
 
     try {
-      const res = await fetch("http://139.59.126.77/api/auth/login", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        // CHANGED: Sending email in the body payload
-        body: JSON.stringify(
-          { email, password, override: true })
-      });
+      // 1. Send the login request (override set to true for concurrent login)
+      const res = await login(email, password, true);
 
       if (res.ok) {
+        // 2. Read the JSON exactly ONCE
         const data = await res.json();
-        const token = data.accessToken; 
+        console.log("Login Success! Welcome:", data.user.display_name);
         
-        // 1. Grab the user's role from Eugene's API response
+        // 3. Extract the exact fields Eugene's backend just sent us
+        const token = data.accessToken; 
         const userRole = data.user.role; 
-
-        // 2. Save both the token and the role to local storage
+        
+        // 4. Save them to local storage so the rest of the app can use them
         localStorage.setItem("token", token);
-        localStorage.setItem("userRole", userRole); 
+        localStorage.setItem("userRole", userRole);
 
-        // 3. Act as a traffic cop based on the role
+        // 5. Redirect to your clinical dashboard
         if (userRole === "admin" || userRole === "superadmin") {
-          // Send admins to the Super Admin Dashboard
-          router.push("/admin"); 
-          
+          router.push("/admin");
         } else {
-          // Send technicians to the Clinical Portal
-          router.push("/history"); 
+          router.push("/history"); // Ensure your dashboard folder is named "history"
         }
-
       } else {
-        setError("Invalid email or password.");
+        // If login failed (wrong password), read the error JSON
+        const errorData = await res.json();
+        setError(errorData.message || errorData.error || "Invalid email or password.");
       }
     } catch (err) {
-      setError("Network error. Could not connect to database.");
+      console.error("CODE CRASHED DURING LOGIN:", err);
+      setError("An unexpected code error occurred. Check the console.");
     } finally {
       setIsLoading(false);
     }

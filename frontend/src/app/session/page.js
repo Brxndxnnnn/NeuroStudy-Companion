@@ -1,6 +1,8 @@
 "use client";
 import { useState, useEffect } from "react";
 import { useRouter } from "next/navigation";
+import { pairSession, logout } from "@/utils/api";
+
 
 export default function SessionSetup() {
   const router = useRouter();
@@ -37,18 +39,7 @@ export default function SessionSetup() {
     setIsLoading(true);
 
     try {
-      const rawToken = localStorage.getItem("token") || "";
-      const cleanToken = rawToken.replace(/^["']|["']$/g, '').trim();
-      
-      const response = await fetch("http://139.59.126.77/api/sessions/pair", {
-        method: "PATCH",
-        headers: { "Content-Type": "application/json", "Authorization": `Bearer ${cleanToken}` },
-        body: JSON.stringify({ 
-          pairing_code: pairingCode, 
-          // Injecting the REAL client_id here!
-          client_id: selectedClient.id 
-        }), 
-      });
+      const response = await pairSession(pairingCode, selectedClient.id);
 
       if (response.ok) {
         const data = await response.json();
@@ -72,10 +63,7 @@ export default function SessionSetup() {
     //destroy the session
     if (token) {
       try {
-        await fetch("http://139.59.126.77/api/auth/logout", {
-          method: "POST",
-          headers: { "Authorization": `Bearer ${token}` }
-        });
+        await logout();
       } catch (err) {
         console.error("Failed to notify server of logout", err);
       }
@@ -86,6 +74,7 @@ export default function SessionSetup() {
     localStorage.removeItem("userRole");
     localStorage.removeItem("currentClientId");
     localStorage.removeItem("currentClientName");
+    localStorage.removeItem("currentSessionId");
     // ... clear any other items
     
     // 3. Send user back to login screen
