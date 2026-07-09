@@ -1,7 +1,19 @@
 "use client";
 import { useState, useEffect, useRef } from "react";
 import { useRouter } from "next/navigation";
-import { fetchWithAuth } from "@/utils/api";
+import {
+  fetchWithAuth,
+  getImages,
+  getQuestions,
+  getQuestionnaires,
+  getQuestionnaireQuestions,
+  startSession,
+  getSession,
+  endSession,
+  createEvent,
+  hideEvent,
+  submitQuestionnaireAnswers,
+} from "@/utils/api";
 
 export default function ActiveSessionMockup() {
   const router = useRouter();
@@ -9,8 +21,10 @@ export default function ActiveSessionMockup() {
   const [currentStep, setCurrentStep] = useState("ready"); 
   const [isWaitingForBridge, setIsWaitingForBridge] = useState(false);
   const [pollingError, setPollingError] = useState("");
+
   const [images, setImages] = useState([]);
   const [questions, setQuestions] = useState([]);
+
   const [surveyQuestions, setSurveyQuestions] = useState([]);
   const [isLoadingData, setIsLoadingData] = useState(false);
   const [currentSurveyIndex, setCurrentSurveyIndex] = useState(0);
@@ -26,14 +40,12 @@ export default function ActiveSessionMockup() {
   const [mathInputEnabled, setMathInputEnabled] = useState(false);
   const currentMathEventIdRef = useRef(null);
 
-  // ==========================================
+
   // 1. FETCH IMAGES ON LOAD
-  // ==========================================
   useEffect(() => {
     const fetchImages = async () => {
       try {
-        const res = await fetchWithAuth("http://139.59.126.77/api/images");
-
+        const res = await getImages();
         if (res.ok) {
           const data = await res.json();
           setImages(data); 
@@ -45,15 +57,15 @@ export default function ActiveSessionMockup() {
     fetchImages();
   }, []);
 
-  // ==========================================
+
+  
   // 2. FETCH MATH QUESTIONS
-  // ==========================================
   useEffect(() => {
     if (currentStep === "math" && questions.length === 0 && !isLoadingData) {
       const fetchQuestions = async () => {
         setIsLoadingData(true);
         try {
-          const res = await fetchWithAuth("http://139.59.126.77/api/questions");
+          const res = await getQuestions();
           if (res.ok) {
             const data = await res.json();
             setQuestions(data);
@@ -73,9 +85,9 @@ export default function ActiveSessionMockup() {
     }
   }, [currentStep]);
 
-  // ==========================================
+
+
   // 3. TIMER TO ENABLE MATH INPUT (3-5s)
-  // ==========================================
   useEffect(() => {
     if (currentStep === "math" && questions.length > 0) {
       const delay = 3000 + Math.random() * 2000;
@@ -86,22 +98,23 @@ export default function ActiveSessionMockup() {
     }
   }, [currentStep, currentMathIndex, questions]);
 
-  // ==========================================
+
+
+
   // 4. FETCH SURVEY DATA (questionnaires & questions)
-  // ==========================================
   useEffect(() => {
     if (currentStep === "survey" && !isLoadingData) {
       const fetchSurveyData = async () => {
         setIsLoadingData(true);
         try {
           // First, get all questionnaires
-          const qRes = await fetchWithAuth("http://139.59.126.77/api/questionnaires");
+          const qRes = await getQuestionnaires();
           // Get questions for a specific questionnaire
           if (!qRes.ok) throw new Error("Failed to fetch questionnaires");
           const qData = await qRes.json();
           setQuestionnaires(qData);
 
-          // Select the first questionnaire (or you can let user choose later)
+
           if (qData.length > 0) {
             const firstId = qData[0].questionnaire_id || qData[0].id;
             setSelectedQuestionnaireId(firstId);
@@ -121,13 +134,11 @@ export default function ActiveSessionMockup() {
   // Helper to fetch questions for a specific questionnaire & language
   const fetchQuestionsForSurvey = async (questionnaireId, language) => {
     try {
-      const res = await fetchWithAuth(
-          `http://139.59.126.77/api/questionnaires/${questionnaireId}/questions?languages=${language}`
-        );
+      const res = await getQuestionnaireQuestions(questionnaireId, language);
       if (res.ok) {
         const data = await res.json();
         setSurveyQuestions(data);
-        setCurrentSurveyIndex(0);
+        setSurveyAnswers({});
       } else {
         console.error("Failed to fetch survey questions");
         setSurveyQuestions([]);
@@ -145,23 +156,14 @@ export default function ActiveSessionMockup() {
     }
   };
 
-  // Optionally allow user to change questionnaire (if multiple)
-  const handleQuestionnaireChange = (qId) => {
-    setSelectedQuestionnaireId(qId);
-    fetchQuestionsForSurvey(qId, selectedLanguage);
-  };
 
-  // ==========================================
+
   // EVENT LOGGING HELPERS
-  // ==========================================
   const logImageShown = async (imageId) => {
     if (!imageId) return;
     try {
       const sessionId = localStorage.getItem("currentSessionId");
-      const res = await fetchWithAuth("http://139.59.126.77/api/events", {
-        method: "POST",
-        body: JSON.stringify({ session_id: sessionId, image_id: imageId })
-      });
+      const res = await createEvent(sessionId, { image_id: imageId });
       if (res.ok) {
         const data = await res.json();
         currentEventIdRef.current = data.event_id || data.id; 
@@ -173,9 +175,7 @@ export default function ActiveSessionMockup() {
     const eventId = currentEventIdRef.current;
     if (!eventId) return;
     try {
-      await fetchWithAuth(`http://139.59.126.77/api/events/${eventId}/hide`, {
-        method: "PATCH"
-      });
+      await hideEvent(eventId);
       currentEventIdRef.current = null;
     } catch (err) { console.error("Event hide failed", err); }
   };
@@ -184,11 +184,7 @@ export default function ActiveSessionMockup() {
     if (!questionId) return;
     try {
       const sessionId = localStorage.getItem("currentSessionId");
-      const res = await fetchWithAuth("http://139.59.126.77/api/events", {
-        method: "POST",
-        // FIXED: Now correctly sending question_id
-        body: JSON.stringify({ session_id: sessionId, question_id: questionId }) 
-      });
+      const res = await createEvent(sessionId, { question_id: questionId });
       if (res.ok) {
         const data = await res.json();
         currentMathEventIdRef.current = data.event_id || data.id;
@@ -200,16 +196,14 @@ export default function ActiveSessionMockup() {
     const eventId = currentMathEventIdRef.current;
     if (!eventId) return;
     try {
-      await fetchWithAuth(`http://139.59.126.77/api/events/${eventId}/hide`, {
-        method: "PATCH"
-      });
+      await hideEvent(eventId);
       currentMathEventIdRef.current = null;
     } catch (err) { console.error("Question event hide failed", err); }
   };
 
-  // ==========================================
+
+
   // 5. IMAGES: AUTO-ADVANCE EVERY 10 SECONDS
-  // ==========================================
   useEffect(() => {
     let timer;
     if (currentStep === "images" && images.length > 0) {
@@ -222,14 +216,14 @@ export default function ActiveSessionMockup() {
         } else {
           setCurrentStep("math");
         }
-      }, 10000);
+      }, 1000);
     }
     return () => clearTimeout(timer);
   }, [currentStep, currentImageIndex, images]);
 
-  // ==========================================
+
+
   // 6. START SESSION & POLL
-  // ==========================================
   const handleStartRecording = async () => {
     setPollingError("");
     setIsWaitingForBridge(true);
@@ -243,15 +237,13 @@ export default function ActiveSessionMockup() {
     }
 
     try {
-      const startRes = await fetchWithAuth(`http://139.59.126.77/api/sessions/${sessionId}/start`, {
-        method: "PATCH"
-      });
+      const startRes = await startSession(sessionId);
       if (!startRes.ok) throw new Error("Failed to initialize session on the server.");
 
       let attempts = 0;
       const pollInterval = setInterval(async () => {
         attempts++;
-        const checkRes = await fetchWithAuth(`http://139.59.126.77/api/sessions/${sessionId}`);
+        const checkRes = await getSession(sessionId);
         if (checkRes.ok) {
           const sessionData = await checkRes.json();
           if (sessionData.bridge_recording_at !== null) {
@@ -277,9 +269,9 @@ export default function ActiveSessionMockup() {
     }
   };
 
-  // ==========================================
+
+
   // 7. MATH NAVIGATION
-  // ==========================================
   const handleMathAnswerChange = (value) => {
     if (!mathInputEnabled) return;
     setMathAnswers(prev => ({
@@ -306,15 +298,12 @@ export default function ActiveSessionMockup() {
     }
   };
 
-  // ==========================================
+
   // 8. END SESSION
-  // ==========================================
   const endSessionAndGoToSurvey = async () => {
     try {
       const sessionId = localStorage.getItem("currentSessionId");
-      const res = await fetchWithAuth(`http://139.59.126.77/api/sessions/${sessionId}/end`, {
-        method: "PATCH"
-      });
+      const res = await endSession(sessionId);
       if (!res.ok) throw new Error("Failed to end session");
       setCurrentStep("survey");
     } catch (err) {
@@ -323,22 +312,43 @@ export default function ActiveSessionMockup() {
     }
   };
 
-  // ==========================================
   // 9. SURVEY NAVIGATION
-  // ==========================================
-  const handleNextSurvey = () => {
-    if (currentSurveyIndex < surveyQuestions.length - 1) {
-      setCurrentSurveyIndex(prev => prev + 1);
-    } else {
+  const handleSubmitSurvey = async () => {
+    // Check all answered
+    const allAnswered = surveyQuestions.every(
+      (_, idx) => surveyAnswers[idx] && surveyAnswers[idx].trim() !== ""
+    );
+    if (!allAnswered) {
+      alert("Please answer all questions.");
+      return;
+    }
+
+    try {
+      const sessionId = localStorage.getItem("currentSessionId");
+      // Build answers array
+      const answers = surveyQuestions.map((q, idx) => ({
+        question_id: q.question_id,
+        answer_value: parseInt(surveyAnswers[idx], 10) || 0, // numeric answer
+      }));
+
+      const res = await submitQuestionnaireAnswers(sessionId, selectedQuestionnaireId, answers);
+      if (!res.ok) {
+        console.error("Failed to submit survey", await res.text());
+        alert("Failed to submit survey. Please try again.");
+        return;
+      }
+
       setSurveyComplete(true);
       setCurrentStep("complete");
+    } catch (err) {
+      console.error("Error submitting survey:", err);
+      alert("Network error. Please try again.");
     }
   };
 
-  // ==========================================
-  // UI RENDER FUNCTIONS
-  // ==========================================
 
+
+  // UI RENDER FUNCTIONS
   const renderReadyState = () => (
     <div className="bg-white p-12 rounded-xl shadow-md border border-slate-200 max-w-2xl mx-auto text-center animate-in fade-in">
       <div className="w-16 h-16 bg-green-100 text-green-600 rounded-full flex items-center justify-center mx-auto mb-6 text-3xl">✓</div>
@@ -474,7 +484,7 @@ export default function ActiveSessionMockup() {
     if (surveyComplete) {
       return (
         <div className="bg-white p-12 rounded-xl shadow-md border border-slate-200 max-w-4xl mx-auto text-center">
-          <h2 className="text-2xl font-bold text-slate-800">Survey Complete</h2>
+          <h2 className="text-2xl font-bold text-slate-800">Survey Submitted</h2>
           <p className="text-slate-500 mt-2">Redirecting to completion...</p>
         </div>
       );
@@ -487,55 +497,61 @@ export default function ActiveSessionMockup() {
       );
     }
 
-    const currentQ = surveyQuestions[currentSurveyIndex];
-    // Extract the statement in the selected language
-    const statementObj = currentQ.statement || {};
-    const questionText = statementObj[selectedLanguage] || statementObj.en || "Question text not available";
-    const answer = surveyAnswers[currentSurveyIndex] || "";
+    // Check if all answered
+    const allAnswered = surveyQuestions.every(
+      (_, idx) => surveyAnswers[idx] && surveyAnswers[idx].trim() !== ""
+    );
 
     return (
-      <div className="bg-white p-8 rounded-xl shadow-md border border-slate-200 max-w-4xl mx-auto animate-in slide-in-from-bottom-4">
+      <div className="bg-white p-8 rounded-xl shadow-md border border-slate-200 max-w-4xl mx-auto">
         <div className="flex justify-between items-center mb-6 border-b border-slate-100 pb-4">
-          <div>
-            <h2 className="text-2xl font-bold text-slate-800 mb-1">Post‑Session Survey</h2>
-            <p className="text-sm text-slate-500">Question {currentSurveyIndex + 1} of {surveyQuestions.length}</p>
-        </div>
-        {/* Language selector */}
-        <div className="flex gap-2">
-          {['en', 'ms', 'zh'].map(lang => (
-            <button
-              key={lang}
-              onClick={() => handleLanguageChange(lang)}
-              className={`px-3 py-1 text-xs font-bold rounded-full transition-colors ${
-                selectedLanguage === lang
-                  ? 'bg-blue-600 text-white'
-                  : 'bg-slate-100 text-slate-600 hover:bg-slate-200'
-              }`}
-            >
-              {lang.toUpperCase()}
-            </button>
-          ))}
-  </div>
-</div>
-        <div className="mb-6">
-          <p className="text-lg font-medium text-slate-700">{questionText}</p>
-          <div className="mt-4">
-            <input
-              type="text"
-              placeholder="Your answer..."
-              value={answer}
-              onChange={(e) => setSurveyAnswers(prev => ({ ...prev, [currentSurveyIndex]: e.target.value }))}
-              className="w-full p-3 border border-slate-300 rounded-lg focus:ring-2 focus:ring-blue-500"
-            />
+          <h2 className="text-2xl font-bold text-slate-800">Post‑Session Survey</h2>
+          <div className="flex gap-2">
+            {['en', 'ms', 'zh'].map(lang => (
+              <button
+                key={lang}
+                onClick={() => handleLanguageChange(lang)}
+                className={`px-3 py-1 text-xs font-bold rounded-full transition-colors ${
+                  selectedLanguage === lang
+                    ? 'bg-blue-600 text-white'
+                    : 'bg-slate-100 text-slate-600 hover:bg-slate-200'
+                }`}
+              >
+                {lang.toUpperCase()}
+              </button>
+            ))}
           </div>
         </div>
-        <div className="flex justify-end pt-4">
+
+        <div className="space-y-6">
+          {surveyQuestions.map((q, idx) => {
+            const statementObj = q.statement || {};
+            const questionText = statementObj[selectedLanguage] || statementObj.en || "Question text not available";
+            const answer = surveyAnswers[idx] || "";
+            return (
+              <div key={q.question_id || idx} className="mb-4">
+                <p className="text-sm font-medium text-slate-700 mb-1">
+                  {idx + 1}. {questionText}
+                </p>
+                <input
+                  type="text"
+                  placeholder="Your answer (number)"
+                  value={answer}
+                  onChange={(e) => setSurveyAnswers(prev => ({ ...prev, [idx]: e.target.value }))}
+                  className="w-full p-3 border border-slate-300 rounded-lg focus:ring-2 focus:ring-blue-500"
+                />
+              </div>
+            );
+          })}
+        </div>
+
+        <div className="flex justify-end pt-4 border-t border-slate-100 mt-6">
           <button
-            onClick={handleNextSurvey}
-            disabled={!answer.trim()}
+            onClick={handleSubmitSurvey}
+            disabled={!allAnswered}
             className={`bg-blue-600 hover:bg-blue-700 text-white font-bold py-3 px-8 rounded-lg shadow-sm disabled:bg-slate-300 disabled:cursor-not-allowed`}
           >
-            {currentSurveyIndex < surveyQuestions.length - 1 ? "Next Question" : "Finish Survey"}
+            Finish Survey
           </button>
         </div>
       </div>
