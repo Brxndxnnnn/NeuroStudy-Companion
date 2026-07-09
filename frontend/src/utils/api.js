@@ -1,10 +1,32 @@
 // src/utils/api.js
 
-export async function fetchWithAuth(url, options = {}) {
-  // 1. Grab the current token from local storage
-  let token = localStorage.getItem("token");
+const BASE_URL = "/api"
 
-  // 2. Merge any custom headers with our default Auth headers
+// TOKEN CACHING (in memory)
+let accessToken = null;
+
+// Helper to set token in memory + localStorage
+export function setAuthToken(token) {
+  accessToken = token;
+  if (token) {
+    localStorage.setItem("token", token);
+  } else {
+    localStorage.removeItem("token");
+  }
+}
+
+// Load token from localStorage on module initialization
+if (typeof window !== "undefined") {
+  const stored = localStorage.getItem("token");
+  if (stored) accessToken = stored;
+}
+
+
+// CORE fetchWithAuth (with network error handling and token refresh)
+export async function fetchWithAuth(url, options = {}) {
+  // Use cached token if available, otherwise read from localStorage
+  let token = accessToken || localStorage.getItem("token");
+
   const headers = {
     "Content-Type": "application/json",
     ...options.headers,
@@ -14,47 +36,254 @@ export async function fetchWithAuth(url, options = {}) {
     headers["Authorization"] = `Bearer ${token}`;
   }
 
-  // 3. Attempt the original API call
-  let response = await fetch(url, { ...options, headers });
+  let response;
 
-  // 4. If it succeeds, or fails for a non-auth reason (like a 404), return it immediately
+  // 1. First try/catch for Network/CORS errors
+  try {
+    response = await fetch(url, { ...options, headers });
+  } catch (error) {
+    console.error("Network connection failed (CORS or Server Offline):", error);
+    throw error; // Do NOT log out it's a network issue
+  }
+
+  // 2. If status is not 401, return response
   if (response.status !== 401) {
     return response;
   }
 
-  // 5. If we hit a 401, our access token is dead. Time to attempt a silent refresh!
+  // 3. We have a 401 – try to refresh the token
   try {
-    const refreshRes = await fetch("http://139.59.126.77/api/auth/refresh", {
+    const refreshRes = await fetch(`${BASE_URL}/auth/refresh`, {
       method: "POST",
-      // CRITICAL: 'include' tells the browser to attach Eugene's HttpOnly cookie!
-      credentials: "include", 
-      headers: { "Content-Type": "application/json" }
+      credentials: "include",
+      headers: { "Content-Type": "application/json" },
     });
 
     if (refreshRes.ok) {
-      // 6. Refresh successful! Grab the new token
       const data = await refreshRes.json();
-      token = data.accessToken;
+      const newToken = data.accessToken;
+      // Update both memory and localStorage
+      setAuthToken(newToken);
+      token = newToken;
 
-      // Update local storage so the rest of the app knows about the new token
-      localStorage.setItem("token", token);
-
-      // Update the headers with the brand new token
+      // Update headers and retry original request
       headers["Authorization"] = `Bearer ${token}`;
-
-      // 7. Retry the ORIGINAL request and return the result
       return await fetch(url, { ...options, headers });
-      
     } else {
-      // 8. If the refresh request ALSO fails, the user's session is truly dead.
-      throw new Error("Session completely expired");
+      throw new Error("Refresh token expired or invalid");
     }
   } catch (error) {
-    // 9. Nuke the local storage and force a hard redirect to the login page
-    localStorage.removeItem("token");
+    // 4. Refresh failed – user is truly unauthenticated
+    setAuthToken(null); // clears both
     localStorage.removeItem("userRole");
-    window.location.href = "/login"; 
-    
+    window.location.href = "/login";
     return Promise.reject(error);
   }
+}
+
+// AUTH FUNCTIONS (use setAuthToken on login/logout)
+export async function login(email, password, override = true) {
+  const res = await fetch(`${BASE_URL}/auth/login`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ email, password, override }),
+  });
+  return res;
+}
+
+export async function logout() {
+  try {
+    await fetchWithAuth(`${BASE_URL}/auth/logout`, { method: "POST" });
+  } catch (e) {
+    // ignore network errors on logout
+  }
+  setAuthToken(null);
+  localStorage.removeItem("userRole");
+  window.location.href = "/login";
+}
+
+export async function getCurrentUser() {
+  const res = await fetchWithAuth(`${BASE_URL}/auth/me`);
+  return res;
+}
+
+// IMAGES
+export async function getImages() {
+  const res = await fetchWithAuth(`${BASE_URL}/images`);
+  return res;
+}
+export async function getImage(imageId) {
+  const res = await fetchWithAuth(`${BASE_URL}/images/${imageId}`);
+  return res;
+}
+
+
+
+
+// QUESTIONS
+export async function getQuestions() {
+  const res = await fetchWithAuth(`${BASE_URL}/questions`);
+  return res;
+}
+export async function getQuestion(questionId) {
+  const res = await fetchWithAuth(`${BASE_URL}/questions/${questionId}`);
+  return res;
+}
+
+
+
+
+// QUESTIONNAIRES
+export async function getQuestionnaires() {
+  const res = await fetchWithAuth(`${BASE_URL}/questionnaires`);
+  return res;
+}
+export async function getQuestionnaire(questionnaireId) {
+  const res = await fetchWithAuth(`${BASE_URL}/questionnaires/${questionnaireId}`);
+  return res;
+}
+export async function getQuestionnaireQuestions(questionnaireId, language = "en") {
+  const res = await fetchWithAuth(
+    `${BASE_URL}/questionnaires/${questionnaireId}/questions`
+  );
+  return res;
+}
+export async function submitQuestionnaireAnswers(sessionId, questionnaireId, answers) {
+  const res = await fetchWithAuth(`${BASE_URL}/questionnaires/answer`, {
+    method: "POST",
+    body: JSON.stringify({
+      session_id: sessionId,
+      questionnaire_id: questionnaireId,
+      answers,
+    }),
+  });
+  return res;
+}
+
+
+
+
+// SESSIONS
+export async function getSessions() {
+  const res = await fetchWithAuth(`${BASE_URL}/sessions`);
+  return res;
+}
+export async function getSession(sessionId) {
+  const res = await fetchWithAuth(`${BASE_URL}/sessions/${sessionId}`);
+  return res;
+}
+export async function pairSession(pairingCode, clientId) {
+  const res = await fetchWithAuth(`${BASE_URL}/sessions/pair`, {
+    method: "PATCH",
+    body: JSON.stringify({ pairing_code: pairingCode, client_id: clientId }),
+  });
+  return res;
+}
+export async function startSession(sessionId) {
+  const res = await fetchWithAuth(`${BASE_URL}/sessions/${sessionId}/start`, {
+    method: "PATCH",
+  });
+  return res;
+}
+export async function endSession(sessionId) {
+  const res = await fetchWithAuth(`${BASE_URL}/sessions/${sessionId}/end`, {
+    method: "PATCH",
+  });
+  return res;
+}
+export async function getSessionResultsRaw(sessionId, startSeconds, endSeconds) {
+  const res = await fetchWithAuth(
+    `${BASE_URL}/sessions/${sessionId}/results/raw?start_seconds=${startSeconds}&end_seconds=${endSeconds}`
+  );
+  return res;
+}
+export async function getSessionResultsFiltered(sessionId, startSeconds, endSeconds) {
+  const res = await fetchWithAuth(
+    `${BASE_URL}/sessions/${sessionId}/results/filtered?start_seconds=${startSeconds}&end_seconds=${endSeconds}`
+  );
+  return res;
+}
+
+
+
+
+// EVENTS
+export async function createEvent(sessionId, payload) {
+  const res = await fetchWithAuth(`${BASE_URL}/events`, {
+    method: "POST",
+    body: JSON.stringify({ session_id: sessionId, ...payload }),
+  });
+  return res;
+}
+export async function hideEvent(eventId) {
+  const res = await fetchWithAuth(`${BASE_URL}/events/${eventId}/hide`, {
+    method: "PATCH",
+  });
+  return res;
+}
+
+
+
+// CLIENTS
+export async function getClients() {
+  const res = await fetchWithAuth(`${BASE_URL}/clients`);
+  return res;
+}
+export async function createClient(clientData) {
+  const res = await fetchWithAuth(`${BASE_URL}/clients`, {
+    method: "POST",
+    body: JSON.stringify(clientData),
+  });
+  return res;
+}
+export async function getClient(clientId) {
+  const res = await fetchWithAuth(`${BASE_URL}/clients/${clientId}`);
+  return res;
+}
+
+
+
+// USERS (admin only)
+export async function getUsers() {
+  const res = await fetchWithAuth(`${BASE_URL}/users`);
+  return res;
+}
+export async function createUser(userData) {
+  const res = await fetchWithAuth(`${BASE_URL}/users`, {
+    method: "POST",
+    body: JSON.stringify(userData),
+  });
+  return res;
+}
+export async function updateUser(userId, updates) {
+  const res = await fetchWithAuth(`${BASE_URL}/users/${userId}`, {
+    method: "PATCH",
+    body: JSON.stringify(updates),
+  });
+  return res;
+}
+export async function deleteUser(userId) {
+  const res = await fetchWithAuth(`${BASE_URL}/users/${userId}`, {
+    method: "DELETE",
+  });
+  return res;
+}
+
+
+
+// CLINICS
+export async function getClinics() {
+  const res = await fetchWithAuth(`${BASE_URL}/clinics`);
+  return res;
+}
+export async function createClinic(clinicData) {
+  const res = await fetchWithAuth(`${BASE_URL}/clinics`, {
+    method: "POST",
+    body: JSON.stringify(clinicData),
+  });
+  return res;
+}
+export async function getClinic(clinicId) {
+  const res = await fetchWithAuth(`${BASE_URL}/clinics/${clinicId}`);
+  return res;
 }

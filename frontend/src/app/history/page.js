@@ -1,14 +1,14 @@
 "use client";
 import { useState, useEffect } from "react";
 import { useRouter } from "next/navigation";
-import { fetchWithAuth } from "@/utils/api";
+import { getClients, createClient } from "@/utils/api";
 
 export default function ClinicalDashboard() {
   const router = useRouter();
   const [clients, setClients] = useState([]);
   const [isLoading, setIsLoading] = useState(true);
 
-  // Form States (Matching Eugene's POST payload)
+  // Form States
   const [newName, setNewName] = useState("");
   const [newDob, setNewDob] = useState("");
   const [newGender, setNewGender] = useState("");
@@ -16,15 +16,11 @@ export default function ClinicalDashboard() {
   const [newNotes, setNewNotes] = useState("");
   const [feedback, setFeedback] = useState({ type: "", message: "" });
 
-  const getCleanToken = () => localStorage.getItem("token")?.replace(/^["']|["']$/g, '').trim();
 
-// ==========================================
   // 1. FETCH CLIENTS ON LOAD
-  // ==========================================
   const fetchClients = async () => {
     try {
-      const res = await fetchWithAuth("http://139.59.126.77/api/clients");
-      
+      const res = await getClients();
       if (res.ok) {
         const data = await res.json();
         setClients(data); 
@@ -42,13 +38,8 @@ export default function ClinicalDashboard() {
     fetchClients();
   }, []);
 
-  useEffect(() => {
-    fetchClients();
-  }, []);
 
-  // ==========================================
   // 2. REGISTER A NEW CLIENT
-  // ==========================================
   const handleRegisterClient = async (e) => {
     e.preventDefault();
     if (!newName || !newDob || !newGender) {
@@ -57,19 +48,12 @@ export default function ClinicalDashboard() {
     }
 
     try {
-      const res = await fetch("http://139.59.126.77/api/clients", {
-        method: "POST",
-        headers: { 
-          "Content-Type": "application/json", 
-          "Authorization": `Bearer ${getCleanToken()}` 
-        },
-        body: JSON.stringify({
-          name: newName,
-          dob: newDob,
-          gender: newGender,
-          race: newRace,
-          notes: newNotes
-        })
+      const res = await createClient({
+        name: newName,
+        dob: newDob,
+        gender: newGender,
+        race: newRace,
+        notes: newNotes,
       });
 
       if (res.ok) {
@@ -85,9 +69,7 @@ export default function ClinicalDashboard() {
     }
   };
 
-  // ==========================================
   // 3. SELECT CLIENT & PROCEED TO SESSION
-  // ==========================================
   const handleSelectClient = (clientId, clientName) => {
     // Save the real database ID to local storage so the Setup page can use it
     localStorage.setItem("currentClientId", clientId);
