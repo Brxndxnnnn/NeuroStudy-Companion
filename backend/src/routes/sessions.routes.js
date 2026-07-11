@@ -13,6 +13,34 @@ const router = Router()
  *     tags: [Sessions]
  *     security:
  *       - bearerAuth: []
+ *     parameters:
+ *       - in: query
+ *         name: clinic_id
+ *         required: false
+ *         schema:
+ *           type: string
+ *           format: uuid
+ *         description: The UUID of the clinic to filter sessions by. Only applicable for admin users.
+ *       - in: query
+ *         name: sync_status
+ *         required: false
+ *         schema:
+ *           type: string
+ *         description: The sync status to filter sessions by.
+ *       - in: query
+ *         name: start_date
+ *         required: false
+ *         schema:
+ *           type: string
+ *           format: date-time
+ *         description: The start date to filter sessions by.
+ *       - in: query
+ *         name: end_date
+ *         required: false
+ *         schema:
+ *           type: string
+ *           format: date-time
+ *         description: The end date to filter sessions by.
  *     responses:
  *       200:
  *         description: Array of sessions with client and technician names
@@ -283,6 +311,49 @@ router.get(
     '/:session_id/results/filtered',
     requirePermission(PERMS.SESSIONS_READ_OWN_CLINIC),
     sessionController.getSessionEEGResults
+)
+
+/**
+ * @openapi
+ * /api/sessions/{session_id}/results/bandpower:
+ *  get:
+ *    summary: Retrieve the band power results for a specific session
+ *    description: |
+ *      This endpoint allows you to retrieve the band power results for a specific session. You must provide the session_id in the URL.
+ *
+ *      **Note**: The `session_id` must be a valid UUID. If the provided ID does not exist in the database, an error will be returned.
+ *
+ *      This API can leave start_seconds and end_seconds empty to get the entire session results, since the band power results are already downsampled to 1Hz, 
+ *      it should be fast enough to retrieve the entire session results.
+ *    tags: [Sessions]
+ *    security:
+ *      - bearerAuth: []
+ *    parameters:
+ *      - in: path
+ *        name: session_id
+ *        required: true
+ *      - in: query
+ *        name: start_seconds
+ *        required: false
+ *        schema:
+ *          type: number
+ *          description: The starting point in seconds from which to retrieve the band power results. Defaults to the beginning of the session if not provided.
+ *      - in: query
+ *        name: end_seconds
+ *        required: false
+ *        schema:
+ *          type: number
+ *          description: The ending point in seconds up to which to retrieve the band power results. Defaults to the beginning of the session if not provided.
+ *    responses:
+ *      200:
+ *        description: Band power results retrieved successfully
+ *      404:
+ *        description: Could not find session with the provided session_id
+ */
+router.get(
+    '/:session_id/results/bandpower',
+    requirePermission(PERMS.SESSIONS_READ_OWN_CLINIC),
+    sessionController.getSessionBandPowerResults
 )
 
 export default router

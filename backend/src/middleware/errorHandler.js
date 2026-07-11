@@ -2,7 +2,6 @@ import { BadRequestError, ConflictError } from '../utils/AppError.js';
 
 // Helper to translate Postgres error codes into user-friendly AppErrors
 const handlePostgresErrors = (err) => {
-    console.log('Postgres error:', err);
     // Postgres error codes: https://www.postgresql.org/docs/current/errcodes-appendix.html
     switch (err.code) {
         case '22P02': // invalid input syntax for type uuid

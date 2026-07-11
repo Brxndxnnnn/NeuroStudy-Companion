@@ -1,26 +1,35 @@
 import pool from '../config/db.js'
 import query from '../utils/query.js'
 
-const findAll = async (client = pool) => {
-    const { rows } = await query(client,
-        `SELECT 
-            s.session_id, 
-            s.sync_status,
-            s.bridge_recording_at,
-            s.device_id,
-            s.paired_at,
-            s.start_time,
-            s.end_time,
-            s.client_id,
-            c.name AS client_name,
-            s.conducted_by,
-            u.display_name AS technician_name
-         FROM sessions s
-         LEFT JOIN clients c ON s.client_id = c.client_id
-         LEFT JOIN users u ON s.conducted_by = u.user_id
-         ORDER BY s.start_time DESC NULLS LAST, s.session_id DESC`
-    )
-    return rows
+const findAll = async ({ clinic_id = undefined, sync_status, start_date, end_date }, client = pool) => {
+    let sql = `SELECT s.session_id, s.sync_status, s.bridge_recording_at, s.device_id, s.paired_at, s.start_time, s.end_time,
+            s.client_id, c.name AS client_name, s.conducted_by, u.display_name AS technician_name FROM sessions s
+            LEFT JOIN clients c ON s.client_id = c.client_id
+            LEFT JOIN users u ON s.conducted_by = u.user_id`;
+
+    const values = [];
+
+    if (clinic_id !== undefined) {
+        sql += ` WHERE s.clinic_id = $${values.length + 1}`;
+        values.push(clinic_id);
+    }
+    if (sync_status !== undefined) {
+        sql += ` AND s.sync_status = $${values.length + 1}`;
+        values.push(sync_status);
+    }
+    if (start_date !== undefined) {
+        sql += ` AND s.start_time >= $${values.length + 1}`;
+        values.push(start_date);
+    }
+    if (end_date !== undefined) {
+        sql += ` AND s.start_time <= $${values.length + 1}`;
+        values.push(end_date);
+    }
+
+    sql += ` ORDER BY s.start_time DESC NULLS LAST, s.session_id DESC`;
+
+    const { rows } = await query(client, sql, values);
+    return rows;
 }
 
 const findById = async (session_id, client = pool) => {
@@ -146,4 +155,56 @@ const getSessionEEGResults = async ({ session_id, sample_rate, start_time, end_t
     }
 }
 
-export default { findAll, findById, pairSessions, startSession, endSession, getSessionResult, backfillSessionResults, getSessionEEGResults }
+const getSessionBandPowerResults = async ({ session_id, start_time, end_time }, fromTs, toTs, client = pool) => {
+    const samplesResult = await client.query(
+        `SELECT s.session_id, b."time", EXTRACT(EPOCH FROM (b."time" - s.start_time))::double precision AS t_seconds,
+            b.fp1_alpha,
+            b.fp1_beta,
+            b.fp1_delta,
+            b.fp1_theta,
+            b.fp1_gamma,
+
+            b.fp2_alpha,
+            b.fp2_beta,
+            b.fp2_delta,
+            b.fp2_theta,
+            b.fp2_gamma,
+
+            b.t3_alpha,
+            b.t3_beta,
+            b.t3_delta,
+            b.t3_theta,
+            b.t3_gamma,
+
+            b.t4_alpha,
+            b.t4_beta,
+            b.t4_delta,
+            b.t4_theta,
+            b.t4_gamma,
+
+            b.attention,
+            b.relaxation,
+            b.mental_workload,
+            b.signal_quality,
+            b.heart_rate,
+            b.spo2 FROM band_powers b
+            JOIN sessions s ON b.session_id = s.session_id
+            WHERE b.session_id = $1::uuid
+                AND b."time" >= $2::timestamptz
+                AND b."time" <  $3::timestamptz
+            ORDER BY b."time" ASC`,
+        [session_id, fromTs, toTs]
+    )
+
+    return {
+        session: {
+            session_id,
+            start_time,
+            end_time
+        },
+        sample_length: samplesResult.rowCount,
+        samples: samplesResult.rows
+    };
+}
+
+export default { findAll, findById, pairSessions, startSession, endSession, getSessionResult, backfillSessionResults, getSessionEEGResults, getSessionBandPowerResults }
