@@ -89,25 +89,6 @@ def _first_filtered_window(db_conn, session_id, window_size_s: float = 4.0):
     }
 
 
-def _elliptic_stats_multichannel(
-    signals: dict,
-    time_start: float = 0.0,
-    time_end: float = None,
-) -> dict:
-    """
-    Helper: run elliptical_stats_iterate() once per channel for one
-    fixed window. time_end defaults to full signal duration.
-    Returns {channel -> {band -> {mean, std, peak}}}.
-    """
-    if time_end is None:
-        any_sig = next(iter(signals.values()))
-        time_end = len(any_sig) / settings.SAMPLE_RATE
-    return {
-        ch: elliptical_stats_iterate(sig, (time_start, time_end), settings.SAMPLE_RATE)
-        for ch, sig in signals.items()
-    }
-
-
 def _elliptic_sliding_multichannel(
     signals: dict,
     window_size_s: float,
@@ -532,6 +513,7 @@ class TestFeaturesOnRealSession:
                           f"std={stats['std']:>8.3f}  "
                           f"peak={stats['peak']:>8.3f}")
                     feature_count += 3
+                print(f"    {'-' * 45}")
 
         print(f"\n  [SUMMARY] Total features per window: {feature_count} "
               f"({'✓' if feature_count == 60 else '✗ expected 60'})")
