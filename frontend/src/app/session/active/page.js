@@ -14,11 +14,58 @@ import {
   hideEvent,
   submitQuestionnaireAnswers,
 } from "@/utils/api";
+import { SessionTopBar } from "@/components/TopNav";
+import { Card, Button, Label, Pill, Alert, Spinner, Field, Input } from "@/components/ui";
+
+const PHASES = [
+  { key: "connect", label: "Connect" },
+  { key: "images", label: "Images" },
+  { key: "math", label: "Math" },
+  { key: "survey", label: "Survey" },
+  { key: "done", label: "Done" },
+];
+
+function phaseOf(step) {
+  if (step === "ready" || step === "connecting") return "connect";
+  if (step === "complete") return "done";
+  return step;
+}
+
+function Stepper({ step }) {
+  const active = phaseOf(step);
+  const activeIdx = PHASES.findIndex((p) => p.key === active);
+  return (
+    <div className="flex items-center justify-center gap-2 sm:gap-3 flex-wrap">
+      {PHASES.map((p, i) => {
+        const state = i < activeIdx ? "done" : i === activeIdx ? "active" : "todo";
+        return (
+          <div key={p.key} className="flex items-center gap-2 sm:gap-3">
+            <div className="flex items-center gap-2">
+              <span
+                className={`grid place-items-center h-6 w-6 rounded-full text-[11px] font-bold tnum transition-colors ${
+                  state === "done"
+                    ? "bg-accent text-on-accent"
+                    : state === "active"
+                    ? "bg-accent-soft text-accent-strong ring-2 ring-accent/30"
+                    : "bg-inset text-muted"
+                }`}
+              >
+                {state === "done" ? "✓" : i + 1}
+              </span>
+              <span className={`text-[12.5px] font-semibold ${state === "todo" ? "text-muted" : "text-ink"}`}>{p.label}</span>
+            </div>
+            {i < PHASES.length - 1 && <span className={`h-px w-5 sm:w-8 ${i < activeIdx ? "bg-accent" : "bg-border"}`} />}
+          </div>
+        );
+      })}
+    </div>
+  );
+}
 
 export default function ActiveSessionMockup() {
   const router = useRouter();
-  
-  const [currentStep, setCurrentStep] = useState("ready"); 
+
+  const [currentStep, setCurrentStep] = useState("ready");
   const [isWaitingForBridge, setIsWaitingForBridge] = useState(false);
   const [pollingError, setPollingError] = useState("");
 
@@ -39,7 +86,11 @@ export default function ActiveSessionMockup() {
   const [mathAnswers, setMathAnswers] = useState({});
   const [mathInputEnabled, setMathInputEnabled] = useState(false);
   const currentMathEventIdRef = useRef(null);
+  const [patientName, setPatientName] = useState("");
 
+  useEffect(() => {
+    setPatientName(localStorage.getItem("currentClientName") || "");
+  }, []);
 
   // 1. FETCH IMAGES ON LOAD
   useEffect(() => {
@@ -48,7 +99,7 @@ export default function ActiveSessionMockup() {
         const res = await getImages();
         if (res.ok) {
           const data = await res.json();
-          setImages(data); 
+          setImages(data);
         }
       } catch (err) {
         console.error("Failed to fetch images", err);
@@ -57,8 +108,6 @@ export default function ActiveSessionMockup() {
     fetchImages();
   }, []);
 
-
-  
   // 2. FETCH MATH QUESTIONS
   useEffect(() => {
     if (currentStep === "math" && questions.length === 0 && !isLoadingData) {
@@ -85,8 +134,6 @@ export default function ActiveSessionMockup() {
     }
   }, [currentStep]);
 
-
-
   // 3. TIMER TO ENABLE MATH INPUT (3-5s)
   useEffect(() => {
     if (currentStep === "math" && questions.length > 0) {
@@ -98,27 +145,20 @@ export default function ActiveSessionMockup() {
     }
   }, [currentStep, currentMathIndex, questions]);
 
-
-
-
   // 4. FETCH SURVEY DATA (questionnaires & questions)
   useEffect(() => {
     if (currentStep === "survey" && !isLoadingData) {
       const fetchSurveyData = async () => {
         setIsLoadingData(true);
         try {
-          // First, get all questionnaires
           const qRes = await getQuestionnaires();
-          // Get questions for a specific questionnaire
           if (!qRes.ok) throw new Error("Failed to fetch questionnaires");
           const qData = await qRes.json();
           setQuestionnaires(qData);
 
-
           if (qData.length > 0) {
             const firstId = qData[0].questionnaire_id || qData[0].id;
             setSelectedQuestionnaireId(firstId);
-            // Now fetch questions for that questionnaire with the default language
             await fetchQuestionsForSurvey(firstId, selectedLanguage);
           }
         } catch (err) {
@@ -131,7 +171,6 @@ export default function ActiveSessionMockup() {
     }
   }, [currentStep]);
 
-  // Helper to fetch questions for a specific questionnaire & language
   const fetchQuestionsForSurvey = async (questionnaireId, language) => {
     try {
       const res = await getQuestionnaireQuestions(questionnaireId, language);
@@ -148,15 +187,12 @@ export default function ActiveSessionMockup() {
     }
   };
 
-  // Language change handler – refetch survey questions
   const handleLanguageChange = (lang) => {
     setSelectedLanguage(lang);
     if (selectedQuestionnaireId) {
       fetchQuestionsForSurvey(selectedQuestionnaireId, lang);
     }
   };
-
-
 
   // EVENT LOGGING HELPERS
   const logImageShown = async (imageId) => {
@@ -166,7 +202,7 @@ export default function ActiveSessionMockup() {
       const res = await createEvent(sessionId, { image_id: imageId });
       if (res.ok) {
         const data = await res.json();
-        currentEventIdRef.current = data.event_id || data.id; 
+        currentEventIdRef.current = data.event_id || data.id;
       }
     } catch (err) { console.error("Event start failed", err); }
   };
@@ -201,9 +237,7 @@ export default function ActiveSessionMockup() {
     } catch (err) { console.error("Question event hide failed", err); }
   };
 
-
-
-  // 5. IMAGES: AUTO-ADVANCE EVERY 10 SECONDS
+  // 5. IMAGES: AUTO-ADVANCE
   useEffect(() => {
     let timer;
     if (currentStep === "images" && images.length > 0) {
@@ -220,8 +254,6 @@ export default function ActiveSessionMockup() {
     }
     return () => clearTimeout(timer);
   }, [currentStep, currentImageIndex, images]);
-
-
 
   // 6. START SESSION & POLL
   const handleStartRecording = async () => {
@@ -262,22 +294,16 @@ export default function ActiveSessionMockup() {
           setPollingError("headset not recording — check the bridge PC");
         }
       }, 1000);
-
     } catch (err) {
       setIsWaitingForBridge(false);
       setPollingError("Network error while connecting to the database.");
     }
   };
 
-
-
   // 7. MATH NAVIGATION
   const handleMathAnswerChange = (value) => {
     if (!mathInputEnabled) return;
-    setMathAnswers(prev => ({
-      ...prev,
-      [currentMathIndex]: value
-    }));
+    setMathAnswers((prev) => ({ ...prev, [currentMathIndex]: value }));
   };
 
   const handleNextMath = async () => {
@@ -285,9 +311,7 @@ export default function ActiveSessionMockup() {
       alert("Please provide an answer before proceeding.");
       return;
     }
-
     await logQuestionHidden();
-
     if (currentMathIndex < questions.length - 1) {
       const nextIdx = currentMathIndex + 1;
       setCurrentMathIndex(nextIdx);
@@ -297,7 +321,6 @@ export default function ActiveSessionMockup() {
       await endSessionAndGoToSurvey();
     }
   };
-
 
   // 8. END SESSION
   const endSessionAndGoToSurvey = async () => {
@@ -314,7 +337,6 @@ export default function ActiveSessionMockup() {
 
   // 9. SURVEY NAVIGATION
   const handleSubmitSurvey = async () => {
-    // Check all answered
     const allAnswered = surveyQuestions.every(
       (_, idx) => surveyAnswers[idx] && surveyAnswers[idx].trim() !== ""
     );
@@ -325,10 +347,9 @@ export default function ActiveSessionMockup() {
 
     try {
       const sessionId = localStorage.getItem("currentSessionId");
-      // Build answers array
       const answers = surveyQuestions.map((q, idx) => ({
         question_id: q.question_id,
-        answer_value: parseInt(surveyAnswers[idx], 10) || 0, // numeric answer
+        answer_value: parseInt(surveyAnswers[idx], 10) || 0,
       }));
 
       const res = await submitQuestionnaireAnswers(sessionId, selectedQuestionnaireId, answers);
@@ -346,44 +367,44 @@ export default function ActiveSessionMockup() {
     }
   };
 
-
-
-  // UI RENDER FUNCTIONS
+  // ── UI RENDER FUNCTIONS ──────────────────────────────────────
   const renderReadyState = () => (
-    <div className="bg-white p-12 rounded-xl shadow-md border border-slate-200 max-w-2xl mx-auto text-center animate-in fade-in">
-      <div className="w-16 h-16 bg-green-100 text-green-600 rounded-full flex items-center justify-center mx-auto mb-6 text-3xl">✓</div>
-      <h2 className="text-3xl font-bold mb-4 text-slate-800">Session Claimed</h2>
-      <p className="text-slate-500 mb-8">Ready to trigger the C# bridge sequence.</p>
-      <button onClick={handleStartRecording} className="w-full bg-blue-600 hover:bg-blue-700 text-white font-bold py-4 rounded-lg transition-all shadow-sm flex justify-center items-center gap-2 text-lg">
-        Start Session 🟢
-      </button>
-    </div>
+    <Card className="max-w-2xl mx-auto p-10 text-center anim-pop">
+      <div className="mx-auto mb-6 grid h-16 w-16 place-items-center rounded-full bg-good-soft text-good text-3xl">✓</div>
+      <h2 className="text-2xl font-bold tracking-tight text-ink mb-2">Session claimed</h2>
+      <p className="text-muted mb-8">The headset is paired. Start the session to begin recording.</p>
+      <Button size="lg" fullWidth onClick={handleStartRecording}>
+        Start session
+      </Button>
+    </Card>
   );
 
   const renderConnecting = () => (
-    <div className="bg-white p-12 rounded-xl shadow-md border border-slate-200 max-w-2xl mx-auto text-center animate-in zoom-in-95">
-      <h2 className="text-3xl font-bold mb-4 text-slate-800">Awaiting Bridge</h2>
+    <Card className="max-w-2xl mx-auto p-10 text-center anim-pop">
+      <h2 className="text-2xl font-bold tracking-tight text-ink mb-6">Waiting for the headset</h2>
       {isWaitingForBridge ? (
         <div className="flex flex-col items-center gap-4">
-          <div className="w-12 h-12 border-4 border-blue-200 border-t-blue-600 rounded-full animate-spin"></div>
-          <p className="text-blue-600 font-bold animate-pulse">Polling API for bridge_recording_at... ⏳</p>
+          <Spinner size={40} className="text-accent" />
+          <p className="text-accent-strong font-semibold">Confirming the bridge has started recording…</p>
         </div>
-      ) : pollingError && (
-        <div className="flex flex-col items-center gap-4">
-          <div className="p-4 bg-red-50 border border-red-200 text-red-700 rounded-lg text-sm font-medium uppercase tracking-wide">⚠️ {pollingError}</div>
-          <button onClick={() => setCurrentStep("ready")} className="px-6 py-2 bg-slate-200 hover:bg-slate-300 text-slate-700 rounded-lg font-bold transition-colors">← Try Again</button>
-        </div>
+      ) : (
+        pollingError && (
+          <div className="flex flex-col items-center gap-5">
+            <Alert tone="crit" className="uppercase tracking-wide">{pollingError}</Alert>
+            <Button variant="subtle" onClick={() => setCurrentStep("ready")}>← Try again</Button>
+          </div>
+        )
       )}
-    </div>
+    </Card>
   );
 
   const renderImageStimuli = () => {
     if (images.length === 0) {
       return (
-        <div className="bg-white p-12 rounded-xl shadow-md border border-slate-200 max-w-4xl mx-auto text-center">
-          <h2 className="text-2xl font-bold mb-4 text-slate-800">No images found in database!</h2>
-          <button onClick={() => setCurrentStep("math")} className="px-6 py-2 bg-slate-200 rounded-lg font-bold">Skip to Math ⏭️</button>
-        </div>
+        <Card className="max-w-4xl mx-auto p-10 text-center">
+          <h2 className="text-xl font-bold text-ink mb-4">No images found in the database.</h2>
+          <Button variant="subtle" onClick={() => setCurrentStep("math")}>Skip to math →</Button>
+        </Card>
       );
     }
 
@@ -391,130 +412,121 @@ export default function ActiveSessionMockup() {
     const hasImage = currentImg.url && currentImg.url.trim() !== "";
 
     return (
-      <div className="bg-white p-12 rounded-xl shadow-md border border-slate-200 max-w-4xl mx-auto text-center animate-in zoom-in-95">
-        <div className="flex justify-between items-center mb-4 border-b border-slate-100 pb-4">
-          <span className="text-slate-500 font-mono text-sm">
-            Image {currentImageIndex + 1} of {images.length}
-          </span>
-          {currentImg.category && (
-            <span className="text-sm font-medium text-slate-600 bg-slate-100 px-3 py-1 rounded-full">
-              {currentImg.category}
-            </span>
-          )}
+      <Card className="max-w-4xl mx-auto p-6 anim-fade">
+        <div className="flex justify-between items-center mb-4">
+          <Label>Image {currentImageIndex + 1} of {images.length}</Label>
+          {currentImg.category && <Pill tone="neutral">{currentImg.category}</Pill>}
         </div>
-        <div className="w-full h-96 bg-slate-100 rounded-lg flex items-center justify-center border border-slate-200 shadow-inner overflow-hidden relative">
+        <div className="w-full aspect-[16/10] bg-inset rounded-xl flex items-center justify-center border border-border overflow-hidden">
           {hasImage ? (
-            <img 
-              src={currentImg.url} 
-              alt={currentImg.filename || "Stimulus"} 
-              className="w-full h-full object-contain" 
+            <img
+              src={currentImg.url}
+              alt={currentImg.filename || "Stimulus"}
+              className="w-full h-full object-contain"
               onError={(e) => {
-                e.target.style.display = 'none';
-                const parent = e.target.parentNode;
-                const fallback = document.createElement('div');
-                fallback.className = 'text-slate-400 font-medium';
-                fallback.textContent = 'Image not available';
-                parent.appendChild(fallback);
-              }} 
+                e.target.style.display = "none";
+                const fallback = document.createElement("div");
+                fallback.className = "text-muted font-medium";
+                fallback.textContent = "Image not available";
+                e.target.parentNode.appendChild(fallback);
+              }}
             />
           ) : (
-            <div className="text-slate-400 font-medium">Image not available</div>
+            <div className="text-muted font-medium">Image not available</div>
           )}
         </div>
-      </div>
+        <div className="mt-4 flex gap-1.5">
+          {images.map((_, i) => (
+            <span
+              key={i}
+              className={`h-1 flex-1 rounded-full ${i < currentImageIndex ? "bg-accent" : i === currentImageIndex ? "bg-accent ring-2 ring-accent/25" : "bg-border"}`}
+            />
+          ))}
+        </div>
+      </Card>
     );
   };
 
   const renderMathTest = () => {
     if (questions.length === 0) {
       return (
-        <div className="bg-white p-12 rounded-xl shadow-md border border-slate-200 max-w-4xl mx-auto text-center">
-          <p className="text-slate-500">Loading questions...</p>
-        </div>
+        <Card className="max-w-4xl mx-auto p-10 text-center">
+          <Spinner size={20} className="mr-2 align-[-3px] text-accent" />
+          <span className="text-muted">Loading questions…</span>
+        </Card>
       );
     }
     const currentQ = questions[currentMathIndex];
     const answer = mathAnswers[currentMathIndex] || "";
     return (
-      <div className="bg-white p-8 rounded-xl shadow-md border border-slate-200 max-w-4xl mx-auto animate-in zoom-in-95">
-        <div className="flex justify-between items-center mb-6 border-b border-slate-100 pb-4">
-          <span className="text-red-600 font-bold animate-pulse flex items-center gap-2"><span className="h-3 w-3 bg-red-600 rounded-full"></span>EEG RECORDING ACTIVE</span>
-          <span className="text-slate-500 font-mono text-sm">Question {currentMathIndex + 1} of {questions.length}</span>
+      <Card className="max-w-4xl mx-auto p-8 anim-pop">
+        <div className="flex justify-between items-center mb-6 pb-4 border-b border-border">
+          <Pill tone="crit" dot live>EEG recording</Pill>
+          <Label>Question {currentMathIndex + 1} of {questions.length}</Label>
         </div>
-        <div className="mb-4">
-          <p className="text-3xl font-bold text-blue-600">{currentQ.prompt}</p>
-          {currentQ.difficulty && (
-            <p className="text-sm text-slate-500 mt-2">Difficulty: {currentQ.difficulty}</p>
-          )}
+        <div className="mb-6">
+          <p className="text-4xl font-bold tracking-tight text-accent tnum">{currentQ.prompt}</p>
+          {currentQ.difficulty && <p className="text-sm text-muted mt-2">Difficulty: {currentQ.difficulty}</p>}
         </div>
-        <div className="mt-6">
-          <input
+        <Field hint={!mathInputEnabled ? "Input unlocks in a few seconds — take a moment to read the question." : undefined}>
+          <Input
             type="text"
-            placeholder="Type your answer..."
+            inputMode="numeric"
+            placeholder="Type your answer…"
             value={answer}
             onChange={(e) => handleMathAnswerChange(e.target.value)}
             disabled={!mathInputEnabled}
-            className={`w-full p-3 border rounded-lg focus:ring-2 focus:ring-blue-500 ${!mathInputEnabled ? 'bg-slate-100 text-slate-400 cursor-not-allowed' : 'border-slate-300'}`}
           />
-          {!mathInputEnabled && (
-            <p className="text-xs text-slate-400 mt-1">Input will be enabled in a few seconds to give you time to read...</p>
-          )}
-        </div>
+        </Field>
         <div className="flex justify-end mt-6">
-          <button
-            onClick={handleNextMath}
-            disabled={!mathInputEnabled || !answer.trim()}
-            className={`bg-blue-600 hover:bg-blue-700 text-white font-bold py-3 px-8 rounded-lg shadow-sm disabled:bg-slate-300 disabled:cursor-not-allowed`}
-          >
-            {currentMathIndex < questions.length - 1 ? "Next Question" : "Finish & End Session"}
-          </button>
+          <Button onClick={handleNextMath} disabled={!mathInputEnabled || !answer.trim()}>
+            {currentMathIndex < questions.length - 1 ? "Next question" : "Finish & end session"}
+          </Button>
         </div>
-      </div>
+      </Card>
     );
   };
 
   const renderSurvey = () => {
     if (isLoadingData) {
       return (
-        <div className="bg-white p-12 rounded-xl shadow-md border border-slate-200 max-w-4xl mx-auto text-center">
-          <p className="text-slate-500">Loading survey...</p>
-        </div>
+        <Card className="max-w-4xl mx-auto p-10 text-center">
+          <Spinner size={20} className="mr-2 align-[-3px] text-accent" />
+          <span className="text-muted">Loading survey…</span>
+        </Card>
       );
     }
     if (surveyComplete) {
       return (
-        <div className="bg-white p-12 rounded-xl shadow-md border border-slate-200 max-w-4xl mx-auto text-center">
-          <h2 className="text-2xl font-bold text-slate-800">Survey Submitted</h2>
-          <p className="text-slate-500 mt-2">Redirecting to completion...</p>
-        </div>
+        <Card className="max-w-4xl mx-auto p-10 text-center">
+          <h2 className="text-2xl font-bold text-ink">Survey submitted</h2>
+          <p className="text-muted mt-2">Redirecting to completion…</p>
+        </Card>
       );
     }
     if (surveyQuestions.length === 0) {
       return (
-        <div className="bg-white p-12 rounded-xl shadow-md border border-slate-200 max-w-4xl mx-auto text-center">
-          <p className="text-slate-500">No survey questions available.</p>
-        </div>
+        <Card className="max-w-4xl mx-auto p-10 text-center">
+          <p className="text-muted">No survey questions available.</p>
+        </Card>
       );
     }
 
-    // Check if all answered
     const allAnswered = surveyQuestions.every(
       (_, idx) => surveyAnswers[idx] && surveyAnswers[idx].trim() !== ""
     );
 
     return (
-      <div className="bg-white p-8 rounded-xl shadow-md border border-slate-200 max-w-4xl mx-auto">
-        <div className="flex justify-between items-center mb-6 border-b border-slate-100 pb-4">
-          <h2 className="text-2xl font-bold text-slate-800">Post‑Session Survey</h2>
-          <div className="flex gap-2">
-            {['en', 'ms', 'zh'].map(lang => (
+      <Card className="max-w-4xl mx-auto p-8">
+        <div className="flex justify-between items-center mb-6 pb-4 border-b border-border">
+          <h2 className="text-xl font-bold tracking-tight text-ink">Post-session survey</h2>
+          <div className="flex gap-1.5">
+            {["en", "ms", "zh"].map((lang) => (
               <button
                 key={lang}
                 onClick={() => handleLanguageChange(lang)}
-                className={`px-3 py-1 text-xs font-bold rounded-full transition-colors ${
-                  selectedLanguage === lang
-                    ? 'bg-blue-600 text-white'
-                    : 'bg-slate-100 text-slate-600 hover:bg-slate-200'
+                className={`px-3 py-1 text-[11px] font-bold rounded-full transition-colors ${
+                  selectedLanguage === lang ? "bg-accent text-on-accent" : "bg-inset text-ink-2 hover:bg-border/60"
                 }`}
               >
                 {lang.toUpperCase()}
@@ -523,63 +535,74 @@ export default function ActiveSessionMockup() {
           </div>
         </div>
 
-        <div className="space-y-6">
+        <div className="space-y-5">
           {surveyQuestions.map((q, idx) => {
             const statementObj = q.statement || {};
             const questionText = statementObj[selectedLanguage] || statementObj.en || "Question text not available";
             const answer = surveyAnswers[idx] || "";
             return (
-              <div key={q.question_id || idx} className="mb-4">
-                <p className="text-sm font-medium text-slate-700 mb-1">
-                  {idx + 1}. {questionText}
-                </p>
-                <input
+              <Field key={q.question_id || idx} label={`Question ${idx + 1}`}>
+                <p className="text-[15px] text-ink mb-2 -mt-1">{questionText}</p>
+                <Input
                   type="text"
+                  inputMode="numeric"
                   placeholder="Your answer (number)"
                   value={answer}
-                  onChange={(e) => setSurveyAnswers(prev => ({ ...prev, [idx]: e.target.value }))}
-                  className="w-full p-3 border border-slate-300 rounded-lg focus:ring-2 focus:ring-blue-500"
+                  onChange={(e) => setSurveyAnswers((prev) => ({ ...prev, [idx]: e.target.value }))}
                 />
-              </div>
+              </Field>
             );
           })}
         </div>
 
-        <div className="flex justify-end pt-4 border-t border-slate-100 mt-6">
-          <button
-            onClick={handleSubmitSurvey}
-            disabled={!allAnswered}
-            className={`bg-blue-600 hover:bg-blue-700 text-white font-bold py-3 px-8 rounded-lg shadow-sm disabled:bg-slate-300 disabled:cursor-not-allowed`}
-          >
-            Finish Survey
-          </button>
+        <div className="flex justify-end pt-5 mt-6 border-t border-border">
+          <Button onClick={handleSubmitSurvey} disabled={!allAnswered}>
+            Finish survey
+          </Button>
         </div>
-      </div>
+      </Card>
     );
   };
 
+  const recording = currentStep === "images" || currentStep === "math";
+
   return (
-    <main className="min-h-screen bg-slate-50 p-8 font-sans flex flex-col items-center justify-center">
-      <div className="w-full max-w-6xl mb-8">
-        <button onClick={() => router.push("/session")} className="text-slate-400 hover:text-slate-800 font-medium text-sm flex items-center gap-2">
-          ← Abort Session
-        </button>
+    <main className="min-h-screen bg-ground flex flex-col">
+      <SessionTopBar
+        onBack={() => router.push("/session")}
+        backLabel="Abort session"
+        patient={patientName}
+        right={
+          recording ? (
+            <Pill tone="crit" dot live>REC</Pill>
+          ) : currentStep === "complete" ? (
+            <Pill tone="good" dot>Complete</Pill>
+          ) : (
+            <Pill tone="neutral">Idle</Pill>
+          )
+        }
+      />
+
+      <div className="border-b border-border bg-surface/60 py-4">
+        <Stepper step={currentStep} />
       </div>
-      <div className="w-full">
-        {currentStep === "ready" && renderReadyState()}
-        {currentStep === "connecting" && renderConnecting()}
-        {currentStep === "images" && renderImageStimuli()}
-        {currentStep === "math" && renderMathTest()}
-        {currentStep === "survey" && renderSurvey()}
-        {currentStep === "complete" && (
-          <div className="text-center animate-in zoom-in">
-            <div className="text-6xl mb-4">🎉</div>
-            <h2 className="text-3xl font-bold text-slate-800 mb-2">Session Completed & Saved</h2>
-            <button onClick={() => router.push("/history")} className="px-6 py-2 bg-slate-200 text-slate-700 rounded-lg font-bold mt-4">
-              Return to Dashboard
-            </button>
-          </div>
-        )}
+
+      <div className="flex-1 flex items-center justify-center px-5 py-10">
+        <div className="w-full">
+          {currentStep === "ready" && renderReadyState()}
+          {currentStep === "connecting" && renderConnecting()}
+          {currentStep === "images" && renderImageStimuli()}
+          {currentStep === "math" && renderMathTest()}
+          {currentStep === "survey" && renderSurvey()}
+          {currentStep === "complete" && (
+            <div className="max-w-2xl mx-auto text-center anim-pop">
+              <div className="mx-auto mb-6 grid h-16 w-16 place-items-center rounded-full bg-good-soft text-good text-3xl">✓</div>
+              <h2 className="text-2xl font-bold tracking-tight text-ink mb-2">Session completed &amp; saved</h2>
+              <p className="text-muted mb-8">All data has been recorded to the database.</p>
+              <Button size="lg" onClick={() => router.push("/history")}>Return to dashboard</Button>
+            </div>
+          )}
+        </div>
       </div>
     </main>
   );
