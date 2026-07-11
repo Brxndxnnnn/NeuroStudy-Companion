@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 
 namespace NeuuroBridge
 {
@@ -43,44 +44,55 @@ namespace NeuuroBridge
         /// <summary>
         /// Feed one filtered frame from assignFilteredDataDelegate.
         /// Layout: [ch0 block][ch1 block][ch2 block][ch3 block] — same as raw frames.
+        /// BLE delivers filtered frames in uneven bursts (see DbUploader's raw-frame notes), so a
+        /// single call's samplesPerCh can straddle — or span several multiples of — a FftSize window
+        /// boundary. Consume the frame in a loop so the leftover tail past a boundary carries into
+        /// the next window (and a big-enough burst can fire OnBandPowers more than once) instead of
+        /// being silently discarded, which previously dropped ~half the windows.
         /// </summary>
         public void AddFilteredFrame(float[] frame)
         {
             if (frame == null || frame.Length < ChannelCount) return;
             int samplesPerCh = frame.Length / ChannelCount;
 
-            float[][] snapshot = null;
+            List<float[][]> snapshots = null;
 
             lock (_lock)
             {
-                for (int ch = 0; ch < ChannelCount; ch++)
+                int i = 0;
+                while (i < samplesPerCh)
                 {
-                    int start = ch * samplesPerCh;
-                    for (int i = 0; i < samplesPerCh; i++)
-                    {
-                        if (_pos[ch] < FftSize)
-                            _buf[ch][_pos[ch]++] = frame[start + i];
-                    }
-                }
-
-                // All channels fill at the same rate; ch0 reaching FftSize means all are ready.
-                if (_pos[0] >= FftSize)
-                {
-                    snapshot = new float[ChannelCount][];
+                    int take = Math.Min(FftSize - _pos[0], samplesPerCh - i);
                     for (int ch = 0; ch < ChannelCount; ch++)
                     {
-                        snapshot[ch] = (float[])_buf[ch].Clone();
-                        _pos[ch] = 0;
+                        Array.Copy(frame, ch * samplesPerCh + i, _buf[ch], _pos[ch], take);
+                        _pos[ch] += take;
+                    }
+                    i += take;
+
+                    // All channels fill at the same rate; ch0 reaching FftSize means all are ready.
+                    if (_pos[0] >= FftSize)
+                    {
+                        var snapshot = new float[ChannelCount][];
+                        for (int ch = 0; ch < ChannelCount; ch++)
+                        {
+                            snapshot[ch] = (float[])_buf[ch].Clone();
+                            _pos[ch] = 0;
+                        }
+                        (snapshots ?? (snapshots = new List<float[][]>())).Add(snapshot);
                     }
                 }
             }
 
-            if (snapshot == null) return;
+            if (snapshots == null) return;
 
-            var powers = new BandPowers[ChannelCount];
-            for (int ch = 0; ch < ChannelCount; ch++)
-                powers[ch] = ComputeBands(snapshot[ch]);
-            OnBandPowers?.Invoke(powers);
+            foreach (var snapshot in snapshots)
+            {
+                var powers = new BandPowers[ChannelCount];
+                for (int ch = 0; ch < ChannelCount; ch++)
+                    powers[ch] = ComputeBands(snapshot[ch]);
+                OnBandPowers?.Invoke(powers);
+            }
         }
 
         // ── FFT + band integration ───────────────────────────────────────────
