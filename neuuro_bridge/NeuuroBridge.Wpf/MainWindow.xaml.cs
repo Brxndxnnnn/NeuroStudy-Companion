@@ -14,6 +14,10 @@ namespace NeuuroBridge.Wpf
         private readonly DispatcherTimer _refresh = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(500) };
         private DispatcherTimer _scanTimer;
 
+        // Signal-quality accumulation over the recording window (local only, never uploaded):
+        // one tick per 500 ms refresh while recording, bucketed good/fair/poor.
+        private int _qGoodTicks, _qFairTicks, _qPoorTicks;
+
         private static readonly Brush Good = (Brush)new BrushConverter().ConvertFromString("#22C55E");
         private static readonly Brush Warn = (Brush)new BrushConverter().ConvertFromString("#F59E0B");
         private static readonly Brush Bad  = (Brush)new BrushConverter().ConvertFromString("#EF4444");
@@ -121,23 +125,6 @@ namespace NeuuroBridge.Wpf
             }
         }
 
-        private void BtnStartSession_Click(object sender, RoutedEventArgs e)
-        {
-            // The button is only enabled once the session is claimed, so a press here pre-empts the
-            // website's automatic start (the bridge auto-starts when sync_status flips to "recording").
-            var r = MessageBox.Show(
-                "Recording will be started automatically when the website starts the session.\n\n" +
-                "Are you sure you want to start it manually now?",
-                "Start recording manually?", MessageBoxButton.YesNo, MessageBoxImage.Question);
-            if (r != MessageBoxResult.Yes) return;
-
-            BtnStartSession.IsEnabled = false;
-            bool dbOk = _ctl.StartSession();
-            BtnStopSession.IsEnabled = true;
-            Log(dbOk ? "Session started — uploading to database." :
-                       "Session started — DB unreachable, NOT uploading (capture still works).");
-        }
-
         private void BtnStopSession_Click(object sender, RoutedEventArgs e)
         {
             BtnStopSession.IsEnabled = false;
@@ -150,13 +137,13 @@ namespace NeuuroBridge.Wpf
             {
                 _ctl.StartCapture();
                 BtnCapture.Content = "Stop & save";
-                TxtCapture.Text = "capturing…";
+                TxtCapture.Text = "recording…";
             }
             else
             {
                 int frames = _ctl.StopCapture();
                 string path = _ctl.WriteCsv();
-                BtnCapture.Content = "Start capture";
+                BtnCapture.Content = "Start test recording";
                 TxtCapture.Text = path == null ? "no frames captured" : $"saved {frames} frames";
                 if (path != null) Log("Capture saved → " + path);
             }
@@ -174,7 +161,7 @@ namespace NeuuroBridge.Wpf
             BtnDisconnect.IsEnabled = true;
             BtnReauth.IsEnabled = true;
             BtnCapture.IsEnabled = true;
-            RefreshStartGate();   // stays disabled until the website claims the session
+            RefreshSessionHint();   // shows "waiting to pair" until the website claims the session
         }
 
         // Transient BLE drop — the bridge is auto-reconnecting to the same device, session preserved.
@@ -203,7 +190,6 @@ namespace NeuuroBridge.Wpf
             BtnConnect.IsEnabled = CmbDevices.Items.Count > 0;
             BtnDisconnect.IsEnabled = false;
             BtnReauth.IsEnabled = false;
-            BtnStartSession.IsEnabled = false;
             BtnStopSession.IsEnabled = false;
             BtnCapture.IsEnabled = false;
             TxtPairHint.Visibility = Visibility.Collapsed;
@@ -212,6 +198,9 @@ namespace NeuuroBridge.Wpf
             TxtPairing.Text = "—"; TxtSessionId.Text = "—"; TxtStarted.Text = "—";
             BtnCopyPairing.IsEnabled = false;
             TxtSyncStatus.Text = "—"; SyncDot.Fill = Mut;
+            ResetProgressSteps();
+            TxtQualitySummary.Visibility = Visibility.Collapsed;
+            TxtDbSummary.Visibility = Visibility.Collapsed;
             LivePanel.Clear();
         }
 
@@ -237,7 +226,7 @@ namespace NeuuroBridge.Wpf
         {
             if (_ctl.IsStreaming)
                 Log("Live preview started — signal/contact now, waveform once authenticated. " +
-                    "Press “Start session” to begin uploading to the database.");
+                    "Recording begins automatically when the website starts the session.");
         }
 
         private void OnSessionPrepared()
@@ -261,24 +250,77 @@ namespace NeuuroBridge.Wpf
                 // unclaimed = amber (waiting on frontend), claimed = green, completed = muted (done).
                 SyncDot.Fill = s == "claimed" ? Good : s == "completed" ? Mut : Warn;
             }
-            RefreshStartGate();   // claim state drives whether manual Start is available
+            RefreshSessionHint();
         }
 
         private void OnSessionStarted()
         {
             BtnStopSession.IsEnabled = true;
-            RefreshStartGate();
+            // Fresh recording window: restart the quality tally and clear last session's verdicts.
+            _qGoodTicks = _qFairTicks = _qPoorTicks = 0;
+            TxtQualitySummary.Visibility = Visibility.Collapsed;
+            TxtDbSummary.Visibility = Visibility.Collapsed;
+            RefreshSessionHint();
         }
 
         private void OnSessionStopped()
         {
-            // Device stays connected, but Start stays gated until a fresh session is claimed.
             BtnStopSession.IsEnabled = false;
-            RefreshStartGate();
+            RefreshSessionHint();
+            ShowEndOfSessionSummary();
+        }
+
+        // End-of-session reconciliation: expected rows (recording duration × known stream rates)
+        // vs actually-sent rows, plus the signal-quality time breakdown — the technician's proof
+        // that the session's data really landed in the DB.
+        private void ShowEndOfSessionSummary()
+        {
+            double secs = _ctl.RecordingElapsed.TotalSeconds;
             var db = _ctl.Db;
-            Log(db != null
-                ? $"Session stopped — {db.RawRowsSent:N0} raw rows uploaded this session."
-                : "Session stopped.");
+            if (db == null || secs <= 0) { Log("Session stopped."); return; }
+
+            // "Expected" is measured against BLE uptime (recording time minus signal dropout), so the
+            // percentage isolates upload fidelity from Bluetooth loss. Dropout is reported separately.
+            double uptime = Math.Max(0, secs - db.RawGapSeconds);
+            long sent = db.RawRowsSent + db.FiltRowsSent + db.EegRowsSent + db.BandRowsSent;
+            long expected = ExpectedRows(uptime, DbUploader.RawRowsPerSecond)
+                          + ExpectedRows(uptime, DbUploader.FilteredRowsPerSecond)
+                          + ExpectedRows(uptime, DbUploader.SummaryRowsPerSecond)
+                          + ExpectedRows(uptime, DbUploader.BandRowsPerSecond);
+            double pct = expected > 0 ? Math.Min(100.0, 100.0 * sent / expected) : 0;
+            string mb = (db.ApproxBytesSent / (1024.0 * 1024.0)).ToString("F1");
+
+            string dropNote = db.RawGapSeconds >= 0.5
+                ? $" {db.RawGapSeconds:F1}s of Bluetooth signal dropout across {db.RawResyncs} gap(s) was not recorded by the headset."
+                : "";
+            TxtDbSummary.Text = $"Session complete — uploaded {sent:N0} of ~{expected:N0} expected rows " +
+                                $"({pct:F1}% of received signal) · ≈{mb} MB over {FmtDur(secs)}.{dropNote}";
+            TxtDbSummary.Foreground = pct >= 98 ? Good : pct >= 90 ? Warn : Bad;
+            TxtDbSummary.Visibility = Visibility.Visible;
+            Log(TxtDbSummary.Text);
+
+            int total = _qGoodTicks + _qFairTicks + _qPoorTicks;
+            if (total > 0)
+            {
+                int g = (int)Math.Round(100.0 * _qGoodTicks / total);
+                int f = (int)Math.Round(100.0 * _qFairTicks / total);
+                int p = Math.Max(0, 100 - g - f);
+                TxtQualitySummary.Text = $"Signal quality during this {FmtDur(secs)} recording: " +
+                                         $"GOOD {g}% · FAIR {f}% · POOR {p}% of the time.";
+                TxtQualitySummary.Foreground = g >= 75 ? Good : g + f >= 75 ? Warn : Bad;
+                TxtQualitySummary.Visibility = Visibility.Visible;
+                Log(TxtQualitySummary.Text);
+            }
+        }
+
+        private static long ExpectedRows(double seconds, double rowsPerSecond)
+            => (long)Math.Round(seconds * rowsPerSecond);
+
+        private static string FmtDur(double seconds)
+        {
+            var t = TimeSpan.FromSeconds(seconds);
+            return t.TotalHours >= 1 ? $"{(int)t.TotalHours}:{t.Minutes:D2}:{t.Seconds:D2}"
+                                     : $"{(int)t.TotalMinutes:D2}:{t.Seconds:D2}";
         }
 
         // ── Periodic refresh ─────────────────────────────────────────────────
@@ -311,8 +353,42 @@ namespace NeuuroBridge.Wpf
                 }
                 else { TxtDbState.Text = db.ClockAnchored ? "clock-synced — streaming" : "NOT connected"; TxtDbState.Foreground = db.ClockAnchored ? Good : Bad; }
                 TxtRawRows.Text = db.RawRowsSent.ToString("N0");
+                TxtFiltRows.Text = db.FiltRowsSent.ToString("N0");
                 TxtEegRows.Text = db.EegRowsSent.ToString("N0");
                 TxtBandRows.Text = db.BandRowsSent.ToString("N0");
+
+                // Sent-vs-expected: BLE-UPTIME × known stream rates. "Expected" subtracts detected
+                // signal dropout (RawGapSeconds) so the % reflects UPLOAD fidelity (bridge→DB), not
+                // Bluetooth loss upstream. Dropout is surfaced on its own line. Live while recording,
+                // frozen after stop (RecordingElapsed freezes) so the comparison stays on screen.
+                double secs = _ctl.RecordingElapsed.TotalSeconds;
+                if (secs > 0)
+                {
+                    double uptime = Math.Max(0, secs - db.RawGapSeconds);
+                    long expRaw  = ExpectedRows(uptime, DbUploader.RawRowsPerSecond);
+                    long expFilt = ExpectedRows(uptime, DbUploader.FilteredRowsPerSecond);
+                    long expEeg  = ExpectedRows(uptime, DbUploader.SummaryRowsPerSecond);
+                    long expBand = ExpectedRows(uptime, DbUploader.BandRowsPerSecond);
+                    TxtRawExp.Text  = $"of ~{expRaw:N0}";
+                    TxtFiltExp.Text = $"of ~{expFilt:N0}";
+                    TxtEegExp.Text  = $"of ~{expEeg:N0}";
+                    TxtBandExp.Text = $"of ~{expBand:N0}";
+
+                    long sent = db.RawRowsSent + db.FiltRowsSent + db.EegRowsSent + db.BandRowsSent;
+                    long expected = expRaw + expFilt + expEeg + expBand;
+                    double pct = expected > 0 ? Math.Min(100.0, 100.0 * sent / expected) : 0;
+                    double mb = db.ApproxBytesSent / (1024.0 * 1024.0);
+                    string dropout = db.RawGapSeconds >= 0.5
+                        ? $"  ·  ⚠ {db.RawGapSeconds:F1}s signal dropout ({db.RawResyncs} gap{(db.RawResyncs == 1 ? "" : "s")})"
+                        : "";
+                    TxtDbVolume.Text = $"≈{mb:F1} MB uploaded · {pct:F1}% of expected for {FmtDur(uptime)} of signal{dropout}";
+                }
+                else
+                {
+                    TxtRawExp.Text = TxtFiltExp.Text = TxtEegExp.Text = TxtBandExp.Text = "";
+                    TxtDbVolume.Text = "";
+                }
+
                 var extra = new List<string>();
                 if (db.RawResyncs > 0) extra.Add($"{db.RawResyncs} resync(s)");
                 long drops = db.Dropped + db.RawDropped;
@@ -328,6 +404,15 @@ namespace NeuuroBridge.Wpf
             TxtQuality.Text = $"{q}/100 · {SignalQuality.Label(q)}";
             BarQuality.Value = q;
             BarQuality.Foreground = q >= 75 ? Good : q >= 40 ? Warn : Bad;
+
+            // Tally quality over the recording window (one tick per refresh) for the end-of-session
+            // breakdown. Buckets match the bar colours: good ≥75, fair ≥40, poor below.
+            if (_ctl.SessionActive)
+            {
+                if (q >= 75) _qGoodTicks++;
+                else if (q >= 40) _qFairTicks++;
+                else _qPoorTicks++;
+            }
             TxtSignal.Text = s.SignalReady == null ? "(no data)" : s.SignalReady.Value ? "READY" : "settling…";
             TxtBattery.Text = s.Battery == null ? "(no data)" : s.Battery + "%";
             TxtHeartRate.Text = s.HeartRate == null ? "—" : s.HeartRate.Value + " bpm";
@@ -347,6 +432,45 @@ namespace NeuuroBridge.Wpf
             ChannelList.ItemsSource = rows;
 
             LivePanel.SetCognitive(s.Attention, s.Relaxation, s.MentalWorkload);
+
+            // Session progress checklist (advisory DB poll; see BridgeController.Progress).
+            // Three states: green = done, yellow = the stage currently underway, grey = not started.
+            // A stage counts as DONE only once a later stage has begun (e.g. "Showing images" stays
+            // yellow while images are on screen and goes green when math questions start).
+            var pg = _ctl.Progress;
+            bool prepared = _ctl.IsPrepared;
+            SetStep(DotPgPair, TxtPgPair,
+                pg.Claimed ? StepState.Done : prepared ? StepState.Active : StepState.Pending);
+            SetStep(DotPgRec, TxtPgRec,
+                pg.RecordingConfirmed ? StepState.Done : pg.Claimed ? StepState.Active : StepState.Pending);
+            SetStep(DotPgImg, TxtPgImg,
+                pg.ImagesShown && (pg.QuestionsShown || pg.Ended) ? StepState.Done :
+                pg.ImagesShown ? StepState.Active : StepState.Pending);
+            SetStep(DotPgMath, TxtPgMath,
+                pg.QuestionsShown && pg.Ended ? StepState.Done :
+                pg.QuestionsShown ? StepState.Active : StepState.Pending);
+            SetStep(DotPgEnd, TxtPgEnd,
+                pg.Ended ? StepState.Done : StepState.Pending);
+            SetStep(DotPgSurvey, TxtPgSurvey,
+                pg.SurveySubmitted ? StepState.Done : pg.Ended ? StepState.Active : StepState.Pending);
+        }
+
+        private enum StepState { Pending, Active, Done }
+
+        private static void SetStep(System.Windows.Shapes.Ellipse dot, System.Windows.Controls.TextBlock label, StepState state)
+        {
+            dot.Fill = state == StepState.Done ? Good : state == StepState.Active ? Warn : Mut;
+            label.Opacity = state == StepState.Pending ? 0.55 : 1.0;
+        }
+
+        private void ResetProgressSteps()
+        {
+            SetStep(DotPgPair, TxtPgPair, StepState.Pending);
+            SetStep(DotPgRec, TxtPgRec, StepState.Pending);
+            SetStep(DotPgImg, TxtPgImg, StepState.Pending);
+            SetStep(DotPgMath, TxtPgMath, StepState.Pending);
+            SetStep(DotPgEnd, TxtPgEnd, StepState.Pending);
+            SetStep(DotPgSurvey, TxtPgSurvey, StepState.Pending);
         }
 
         private void RefreshDeviceList()
@@ -399,15 +523,11 @@ namespace NeuuroBridge.Wpf
         private void SetConn(string text, Brush dot) { ConnPill.Text = text; ConnDot.Fill = dot; }
         private void SetAuth(string text, Brush dot) { TxtAuth.Text = text; AuthDot.Fill = dot; }
 
-        // Gate manual Start on pairing: it's only enabled once the website has claimed the session
-        // (and we're connected + not already recording). While connected but still unclaimed, show a
-        // "waiting to pair" hint instead. Called whenever connection or sync status changes.
-        private void RefreshStartGate()
+        // While connected but not yet claimed by the website, show the "waiting to pair" hint.
+        // (Recording itself starts automatically via the sync-status handshake — no manual Start.)
+        private void RefreshSessionHint()
         {
             string s = _ctl.SyncStatus;
-            bool claimed = s == "claimed";
-            BtnStartSession.IsEnabled = _ctl.IsConnected && claimed && !_ctl.SessionActive;
-
             bool waiting = _ctl.IsConnected && !_ctl.SessionActive
                            && (string.IsNullOrEmpty(s) || s == "unclaimed");
             TxtPairHint.Visibility = waiting ? Visibility.Visible : Visibility.Collapsed;
