@@ -281,11 +281,11 @@ namespace NeuuroBridge.Wpf
 
             // "Expected" is measured against BLE uptime (recording time minus signal dropout), so the
             // percentage isolates upload fidelity from Bluetooth loss. Dropout is reported separately.
+            // eeg_readings (summary) rows are excluded — display-only snapshot, not a reconciled stream.
             double uptime = Math.Max(0, secs - db.RawGapSeconds);
-            long sent = db.RawRowsSent + db.FiltRowsSent + db.EegRowsSent + db.BandRowsSent;
+            long sent = db.RawRowsSent + db.FiltRowsSent + db.BandRowsSent;
             long expected = ExpectedRows(uptime, DbUploader.RawRowsPerSecond)
                           + ExpectedRows(uptime, DbUploader.FilteredRowsPerSecond)
-                          + ExpectedRows(uptime, DbUploader.SummaryRowsPerSecond)
                           + ExpectedRows(uptime, DbUploader.BandRowsPerSecond);
             double pct = expected > 0 ? Math.Min(100.0, 100.0 * sent / expected) : 0;
             string mb = (db.ApproxBytesSent / (1024.0 * 1024.0)).ToString("F1");
@@ -354,28 +354,27 @@ namespace NeuuroBridge.Wpf
                 else { TxtDbState.Text = db.ClockAnchored ? "clock-synced — streaming" : "NOT connected"; TxtDbState.Foreground = db.ClockAnchored ? Good : Bad; }
                 TxtRawRows.Text = db.RawRowsSent.ToString("N0");
                 TxtFiltRows.Text = db.FiltRowsSent.ToString("N0");
-                TxtEegRows.Text = db.EegRowsSent.ToString("N0");
                 TxtBandRows.Text = db.BandRowsSent.ToString("N0");
 
                 // Sent-vs-expected: BLE-UPTIME × known stream rates. "Expected" subtracts detected
                 // signal dropout (RawGapSeconds) so the % reflects UPLOAD fidelity (bridge→DB), not
                 // Bluetooth loss upstream. Dropout is surfaced on its own line. Live while recording,
                 // frozen after stop (RecordingElapsed freezes) so the comparison stays on screen.
+                // eeg_readings (summary) rows are still written but excluded here — they're a
+                // display-only "latest state" snapshot, not one of the reconciled data streams.
                 double secs = _ctl.RecordingElapsed.TotalSeconds;
                 if (secs > 0)
                 {
                     double uptime = Math.Max(0, secs - db.RawGapSeconds);
                     long expRaw  = ExpectedRows(uptime, DbUploader.RawRowsPerSecond);
                     long expFilt = ExpectedRows(uptime, DbUploader.FilteredRowsPerSecond);
-                    long expEeg  = ExpectedRows(uptime, DbUploader.SummaryRowsPerSecond);
                     long expBand = ExpectedRows(uptime, DbUploader.BandRowsPerSecond);
                     TxtRawExp.Text  = $"of ~{expRaw:N0}";
                     TxtFiltExp.Text = $"of ~{expFilt:N0}";
-                    TxtEegExp.Text  = $"of ~{expEeg:N0}";
                     TxtBandExp.Text = $"of ~{expBand:N0}";
 
-                    long sent = db.RawRowsSent + db.FiltRowsSent + db.EegRowsSent + db.BandRowsSent;
-                    long expected = expRaw + expFilt + expEeg + expBand;
+                    long sent = db.RawRowsSent + db.FiltRowsSent + db.BandRowsSent;
+                    long expected = expRaw + expFilt + expBand;
                     double pct = expected > 0 ? Math.Min(100.0, 100.0 * sent / expected) : 0;
                     double mb = db.ApproxBytesSent / (1024.0 * 1024.0);
                     string dropout = db.RawGapSeconds >= 0.5
@@ -385,7 +384,7 @@ namespace NeuuroBridge.Wpf
                 }
                 else
                 {
-                    TxtRawExp.Text = TxtFiltExp.Text = TxtEegExp.Text = TxtBandExp.Text = "";
+                    TxtRawExp.Text = TxtFiltExp.Text = TxtBandExp.Text = "";
                     TxtDbVolume.Text = "";
                 }
 

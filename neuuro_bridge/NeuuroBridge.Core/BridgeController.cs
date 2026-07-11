@@ -1,6 +1,5 @@
 using System;
 using System.Collections.Generic;
-using System.Diagnostics;
 using System.Globalization;
 using System.IO;
 using System.Linq;
@@ -44,10 +43,10 @@ namespace NeuuroBridge
         private bool _recordingConfirmed;       // bridge_recording_at written for the active session (handshake ack)
         private Timer _syncPoll;                // advisory poll of sessions.sync_status (read-only + lifecycle react)
         private Timer _progressPoll;            // advisory poll of web-side progress; outlives the recording (survey lands after)
+        private Timer _summaryPoll;             // independent 2 Hz eeg_readings snapshot (see StartSummaryPoll)
         private int _progressBusy;              // 1 while a progress read is in flight (skip overlapping ticks)
         private string _dbConnString;           // cached for the progress poll (avoids re-reading .env every tick)
         private Guid _sessionGuid;
-        private readonly Stopwatch _dbEegThrottle = Stopwatch.StartNew();
 
         // Live snapshots (guarded by _stateLock).
         private int[] _lastRawInt;
@@ -242,6 +241,7 @@ namespace NeuuroBridge
                 SessionActive = false;
                 StopSyncPoll();
                 StopProgressPoll();
+                StopSummaryPoll();
                 _prepared = false;
                 SetSyncStatus("");
                 lock (_stateLock) { _heartRate = null; _spo2 = null; }
@@ -292,6 +292,7 @@ namespace NeuuroBridge
             StopSession();
             StopSyncPoll();          // StopSession only stops it if recording; stop here for the preview-only case
             StopProgressPoll();      // progress tracking ends with the connection, not the recording
+            StopSummaryPoll();
             StopStreaming();
             _prepared = false;
             SetSyncStatus("");
@@ -367,6 +368,7 @@ namespace NeuuroBridge
             RecordingStartUtc = DateTime.UtcNow;
             RecordingStopUtc = default(DateTime);
             SessionActive = true;
+            StartSummaryPoll();
             SessionStarted?.Invoke();
             return _db != null && _db.Streaming;
         }
@@ -383,6 +385,7 @@ namespace NeuuroBridge
             RecordingStopUtc = DateTime.UtcNow;   // freeze the recording window for expected-row math
             SessionActive = false;
             StopSyncPoll();
+            StopSummaryPoll();
             // NOTE: the progress poll deliberately keeps running — the survey is submitted on the
             // web AFTER the session completes, and the checklist tracks through to that point.
             // Stop is the technician's explicit "complete session": flag the row so disposal flips
@@ -417,6 +420,30 @@ namespace NeuuroBridge
         {
             try { _syncPoll?.Dispose(); } catch { /* ignore */ }
             _syncPoll = null;
+        }
+
+        // ── Summary snapshot: a genuine independent 2 Hz timer, NOT piggybacked on raw-frame
+        //    arrival. It previously rode inside HandleRawEeg gated by a Stopwatch, but BLE delivers
+        //    raw callbacks in uneven bursts (see CopyRaw's notes), so that throttle only got a chance
+        //    to fire as often as a callback happened to land — capping real throughput at roughly the
+        //    burst cadence (~1/s observed) instead of the intended 2/s, and made "expected" row counts
+        //    on the DB panel look like a shortfall when nothing was actually lost. ──
+        private void StartSummaryPoll()
+        {
+            if (_summaryPoll != null) return;
+            _summaryPoll = new Timer(_ => PollSummary(), null, 500, 500);
+        }
+
+        private void StopSummaryPoll()
+        {
+            try { _summaryPoll?.Dispose(); } catch { /* ignore */ }
+            _summaryPoll = null;
+        }
+
+        private void PollSummary()
+        {
+            if (!SessionActive || _db == null || !_db.Streaming) return;
+            UploadEegSnapshot();
         }
 
         private void PollSyncStatus()
@@ -537,14 +564,7 @@ namespace NeuuroBridge
                 // Capture a local ref: StopSession may dispose _db on another thread mid-frame.
                 var db = _db;
                 if (SessionActive && db != null && db.Streaming)
-                {
                     db.EnqueueRaw(db.ToDbTime(frame.ArrivalUtc), frame.IntSamples);
-                    if (_dbEegThrottle.ElapsedMilliseconds >= 500)
-                    {
-                        _dbEegThrottle.Restart();
-                        UploadEegSnapshot();
-                    }
-                }
             }
 
             // Combined CSV capture: record raw ADC + raw µV for this frame, tagged with the
@@ -760,6 +780,7 @@ namespace NeuuroBridge
             _streaming = false;
             StopSyncPoll();
             StopProgressPoll();
+            StopSummaryPoll();
             try { _svc.StopStream(); } catch { /* ignore */ }
             try { _db?.Dispose(); } catch { /* ignore */ }
             try { _svc.Shutdown(); } catch { /* ignore */ }
