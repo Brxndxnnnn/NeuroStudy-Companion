@@ -128,7 +128,7 @@ namespace NeuuroBridge.Wpf
         private void BtnStopSession_Click(object sender, RoutedEventArgs e)
         {
             BtnStopSession.IsEnabled = false;
-            _ctl.StopSession();   // flushes + closes upload; device stays connected
+            _ctl.StopSession();   // drains in-flight BLE frames briefly, then flushes + closes upload; device stays connected
         }
 
         private void BtnCapture_Click(object sender, RoutedEventArgs e)
@@ -279,10 +279,11 @@ namespace NeuuroBridge.Wpf
             var db = _ctl.Db;
             if (db == null || secs <= 0) { Log("Session stopped."); return; }
 
-            // "Expected" is measured against BLE uptime (recording time minus signal dropout), so the
-            // percentage isolates upload fidelity from Bluetooth loss. Dropout is reported separately.
-            // eeg_readings (summary) rows are excluded — display-only snapshot, not a reconciled stream.
-            double uptime = Math.Max(0, secs - db.RawGapSeconds);
+            // "Expected" is measured against BLE uptime (recording time minus signal dropout and any
+            // stop-grace tail loss), so the percentage isolates upload fidelity from those two,
+            // separately-reported causes. eeg_readings (summary) rows are excluded — display-only
+            // snapshot, not a reconciled stream.
+            double uptime = Math.Max(0, secs - db.RawGapSeconds - _ctl.TailLossSeconds);
             long sent = db.RawRowsSent + db.FiltRowsSent + db.BandRowsSent;
             long expected = ExpectedRows(uptime, DbUploader.RawRowsPerSecond)
                           + ExpectedRows(uptime, DbUploader.FilteredRowsPerSecond)
@@ -293,8 +294,13 @@ namespace NeuuroBridge.Wpf
             string dropNote = db.RawGapSeconds >= 0.5
                 ? $" {db.RawGapSeconds:F1}s of Bluetooth signal dropout across {db.RawResyncs} gap(s) was not recorded by the headset."
                 : "";
+            // Normally zero — the stop-grace window (see BridgeController.StopGraceMs) drains the
+            // in-flight BLE tail before the session closes. Only shows if that window wasn't enough.
+            string tailNote = _ctl.TailLossSeconds >= 0.5
+                ? $" {_ctl.TailLossSeconds:F1}s of buffered signal was still in flight when the grace window closed and was not recorded."
+                : "";
             TxtDbSummary.Text = $"Session complete — uploaded {sent:N0} of ~{expected:N0} expected rows " +
-                                $"({pct:F1}% of received signal) · ≈{mb} MB over {FmtDur(secs)}.{dropNote}";
+                                $"({pct:F1}% of received signal) · ≈{mb} MB over {FmtDur(secs)}.{dropNote}{tailNote}";
             TxtDbSummary.Foreground = pct >= 98 ? Good : pct >= 90 ? Warn : Bad;
             TxtDbSummary.Visibility = Visibility.Visible;
             Log(TxtDbSummary.Text);
@@ -357,15 +363,16 @@ namespace NeuuroBridge.Wpf
                 TxtBandRows.Text = db.BandRowsSent.ToString("N0");
 
                 // Sent-vs-expected: BLE-UPTIME × known stream rates. "Expected" subtracts detected
-                // signal dropout (RawGapSeconds) so the % reflects UPLOAD fidelity (bridge→DB), not
-                // Bluetooth loss upstream. Dropout is surfaced on its own line. Live while recording,
-                // frozen after stop (RecordingElapsed freezes) so the comparison stays on screen.
-                // eeg_readings (summary) rows are still written but excluded here — they're a
-                // display-only "latest state" snapshot, not one of the reconciled data streams.
+                // signal dropout (RawGapSeconds) and any stop-grace tail loss so the % reflects UPLOAD
+                // fidelity (bridge→DB), not Bluetooth loss upstream. Both are surfaced on their own
+                // line if non-zero. Live while recording, frozen after stop (RecordingElapsed freezes)
+                // so the comparison stays on screen. eeg_readings (summary) rows are still written but
+                // excluded here — they're a display-only "latest state" snapshot, not one of the
+                // reconciled data streams.
                 double secs = _ctl.RecordingElapsed.TotalSeconds;
                 if (secs > 0)
                 {
-                    double uptime = Math.Max(0, secs - db.RawGapSeconds);
+                    double uptime = Math.Max(0, secs - db.RawGapSeconds - _ctl.TailLossSeconds);
                     long expRaw  = ExpectedRows(uptime, DbUploader.RawRowsPerSecond);
                     long expFilt = ExpectedRows(uptime, DbUploader.FilteredRowsPerSecond);
                     long expBand = ExpectedRows(uptime, DbUploader.BandRowsPerSecond);
@@ -380,7 +387,10 @@ namespace NeuuroBridge.Wpf
                     string dropout = db.RawGapSeconds >= 0.5
                         ? $"  ·  ⚠ {db.RawGapSeconds:F1}s signal dropout ({db.RawResyncs} gap{(db.RawResyncs == 1 ? "" : "s")})"
                         : "";
-                    TxtDbVolume.Text = $"≈{mb:F1} MB uploaded · {pct:F1}% of expected for {FmtDur(uptime)} of signal{dropout}";
+                    string tail = _ctl.TailLossSeconds >= 0.5
+                        ? $"  ·  ⚠ {_ctl.TailLossSeconds:F1}s stop-grace tail loss"
+                        : "";
+                    TxtDbVolume.Text = $"≈{mb:F1} MB uploaded · {pct:F1}% of expected for {FmtDur(uptime)} of signal{dropout}{tail}";
                 }
                 else
                 {
