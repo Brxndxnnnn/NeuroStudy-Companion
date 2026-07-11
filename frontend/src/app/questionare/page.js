@@ -1,81 +1,53 @@
 "use client";
-import { useState, useEffect, useRef } from "react";
+import { useState, useEffect } from "react";
 import { useRouter } from "next/navigation";
-
 import {
-  fetchWithAuth,
-  getImages,
-  getQuestions,
   getQuestionnaires,
   getQuestionnaireQuestions,
   submitQuestionnaireAnswers,
 } from "@/utils/api";
+import { SessionTopBar } from "@/components/TopNav";
+import { Card, Button, Field, Input, Spinner } from "@/components/ui";
 
-export default function ActiveSessionMockup() {
+export default function QuestionnairePage() {
   const router = useRouter();
-  
-  const [currentStep, setCurrentStep] = useState("survey"); 
-  const [isWaitingForBridge, setIsWaitingForBridge] = useState(false);
-  const [pollingError, setPollingError] = useState("");
-
-  const [images, setImages] = useState([]);
-  const [questions, setQuestions] = useState([]);
 
   const [surveyQuestions, setSurveyQuestions] = useState([]);
   const [isLoadingData, setIsLoadingData] = useState(false);
-  const [currentSurveyIndex, setCurrentSurveyIndex] = useState(0);
   const [surveyComplete, setSurveyComplete] = useState(false);
   const [selectedLanguage, setSelectedLanguage] = useState("en");
-  const [questionnaires, setQuestionnaires] = useState([]);
   const [selectedQuestionnaireId, setSelectedQuestionnaireId] = useState("");
   const [surveyAnswers, setSurveyAnswers] = useState({});
-  const [currentImageIndex, setCurrentImageIndex] = useState(0);
-  const currentEventIdRef = useRef(null);
-  const [currentMathIndex, setCurrentMathIndex] = useState(0);
-  const [mathAnswers, setMathAnswers] = useState({});
-  const [mathInputEnabled, setMathInputEnabled] = useState(false);
-  const currentMathEventIdRef = useRef(null);
 
-    // 4. FETCH SURVEY DATA (questionnaires & questions)
+  // Load the questionnaire + its questions on mount.
   useEffect(() => {
-    if (currentStep === "survey" && !isLoadingData) {
-      const fetchSurveyData = async () => {
-        setIsLoadingData(true);
-        try {
-          // First, get all questionnaires
-          const qRes = await getQuestionnaires();
-          console.log(qRes)
-          // Get questions for a specific questionnaire
-          if (!qRes.ok) throw new Error("Failed to fetch questionnaires");
-          const qData = await qRes.json();
-          setQuestionnaires(qData);
-          console.log(qData)
+    const fetchSurveyData = async () => {
+      setIsLoadingData(true);
+      try {
+        const qRes = await getQuestionnaires();
+        if (!qRes.ok) throw new Error("Failed to fetch questionnaires");
+        const qData = await qRes.json();
 
-          if (qData.length > 0) {
-            const firstId = qData[0].questionnaire_id || qData[0].id;
-            setSelectedQuestionnaireId(firstId);
-            // Now fetch questions for that questionnaire with the default language
-            await fetchQuestionsForSurvey(firstId, selectedLanguage);
-          }
-        } catch (err) {
-          console.error("Error loading survey:", err);
-        } finally {
-          setIsLoadingData(false);
+        if (qData.length > 0) {
+          const firstId = qData[0].questionnaire_id || qData[0].id;
+          setSelectedQuestionnaireId(firstId);
+          await fetchQuestionsForSurvey(firstId, selectedLanguage);
         }
-      };
-      fetchSurveyData();
-    }
-  }, [currentStep]);
+      } catch (err) {
+        console.error("Error loading survey:", err);
+      } finally {
+        setIsLoadingData(false);
+      }
+    };
+    fetchSurveyData();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
-  // Helper to fetch questions for a specific questionnaire & language
-  const fetchQuestionsForSurvey = async (questionnaireId) => {
+  const fetchQuestionsForSurvey = async (questionnaireId, language) => {
     try {
-      console.log(questionnaireId)
-      const res = await getQuestionnaireQuestions(questionnaireId);
-      console.log(res)
+      const res = await getQuestionnaireQuestions(questionnaireId, language);
       if (res.ok) {
         const data = await res.json();
-        console.log(data)
         setSurveyQuestions(data);
         setSurveyAnswers({});
       } else {
@@ -87,7 +59,6 @@ export default function ActiveSessionMockup() {
     }
   };
 
-  // Language change handler – refetch survey questions
   const handleLanguageChange = (lang) => {
     setSelectedLanguage(lang);
     if (selectedQuestionnaireId) {
@@ -95,9 +66,7 @@ export default function ActiveSessionMockup() {
     }
   };
 
-    // 9. SURVEY NAVIGATION
   const handleSubmitSurvey = async () => {
-    // Check all answered
     const allAnswered = surveyQuestions.every(
       (_, idx) => surveyAnswers[idx] && surveyAnswers[idx].trim() !== ""
     );
@@ -108,10 +77,9 @@ export default function ActiveSessionMockup() {
 
     try {
       const sessionId = localStorage.getItem("currentSessionId");
-      // Build answers array
       const answers = surveyQuestions.map((q, idx) => ({
         question_id: q.question_id,
-        answer_value: parseInt(surveyAnswers[idx], 10) || 0, // numeric answer
+        answer_value: parseInt(surveyAnswers[idx], 10) || 0,
       }));
 
       const res = await submitQuestionnaireAnswers(sessionId, selectedQuestionnaireId, answers);
@@ -120,99 +88,92 @@ export default function ActiveSessionMockup() {
         alert("Failed to submit survey. Please try again.");
         return;
       }
-
       setSurveyComplete(true);
-      setCurrentStep("complete");
     } catch (err) {
       console.error("Error submitting survey:", err);
       alert("Network error. Please try again.");
     }
   };
 
-  const renderSurvey = () => {
+  const allAnswered =
+    surveyQuestions.length > 0 &&
+    surveyQuestions.every((_, idx) => surveyAnswers[idx] && surveyAnswers[idx].trim() !== "");
+
+  const renderBody = () => {
     if (isLoadingData) {
       return (
-        <div className="bg-white p-12 rounded-xl shadow-md border border-slate-200 max-w-4xl mx-auto text-center">
-          <p className="text-slate-500">Loading survey...</p>
+        <div className="py-8 text-center">
+          <Spinner size={22} className="text-accent" />
+          <p className="text-muted mt-3">Loading survey…</p>
         </div>
       );
     }
     if (surveyComplete) {
       return (
-        <div className="bg-white p-12 rounded-xl shadow-md border border-slate-200 max-w-4xl mx-auto text-center">
-          <h2 className="text-2xl font-bold text-slate-800">Survey Submitted</h2>
-          <p className="text-slate-500 mt-2">Redirecting to completion...</p>
+        <div className="py-8 text-center">
+          <div className="mx-auto mb-5 grid h-14 w-14 place-items-center rounded-full bg-good-soft text-good text-2xl">✓</div>
+          <h2 className="text-xl font-bold text-ink">Survey submitted</h2>
+          <p className="text-muted mt-2 mb-6">Thank you — your responses have been saved.</p>
+          <Button variant="subtle" onClick={() => router.push("/history")}>Return to dashboard</Button>
         </div>
       );
     }
     if (surveyQuestions.length === 0) {
-      return (
-        <div className="bg-white p-12 rounded-xl shadow-md border border-slate-200 max-w-4xl mx-auto text-center">
-          <p className="text-slate-500">No survey questions available.</p>
-        </div>
-      );
+      return <p className="py-8 text-center text-muted">No survey questions available.</p>;
     }
 
-    // Check if all answered
-    const allAnswered = surveyQuestions.every(
-      (_, idx) => surveyAnswers[idx] && surveyAnswers[idx].trim() !== ""
-    );
-
     return (
-      <div className="bg-white p-8 rounded-xl shadow-md border border-slate-200 max-w-4xl mx-auto">
-        <div className="flex justify-between items-center mb-6 border-b border-slate-100 pb-4">
-          <h2 className="text-2xl font-bold text-slate-800">Post‑Session Survey</h2>
-          <div className="flex gap-2">
-            {['en', 'ms', 'zh'].map(lang => (
-              <button
-                key={lang}
-                onClick={() => handleLanguageChange(lang)}
-                className={`px-3 py-1 text-xs font-bold rounded-full transition-colors ${
-                  selectedLanguage === lang
-                    ? 'bg-blue-600 text-white'
-                    : 'bg-slate-100 text-slate-600 hover:bg-slate-200'
-                }`}
-              >
-                {lang.toUpperCase()}
-              </button>
-            ))}
-          </div>
-        </div>
-
-        <div className="space-y-6">
+      <>
+        <div className="space-y-5">
           {surveyQuestions.map((q, idx) => {
             const statementObj = q.statement || {};
             const questionText = statementObj[selectedLanguage] || statementObj.en || "Question text not available";
             const answer = surveyAnswers[idx] || "";
             return (
-              <div key={q.question_id || idx} className="mb-4">
-                <p className="text-sm font-medium text-slate-700 mb-1">
-                  {idx + 1}. {questionText}
-                </p>
-                <input
+              <Field key={q.question_id || idx} label={`Question ${idx + 1}`}>
+                <p className="text-[15px] text-ink mb-2 -mt-1">{questionText}</p>
+                <Input
                   type="text"
+                  inputMode="numeric"
                   placeholder="Your answer (number)"
                   value={answer}
-                  onChange={(e) => setSurveyAnswers(prev => ({ ...prev, [idx]: e.target.value }))}
-                  className="w-full p-3 border border-slate-300 rounded-lg focus:ring-2 focus:ring-blue-500"
+                  onChange={(e) => setSurveyAnswers((prev) => ({ ...prev, [idx]: e.target.value }))}
                 />
-              </div>
+              </Field>
             );
           })}
         </div>
-
-        <div className="flex justify-end pt-4 border-t border-slate-100 mt-6">
-          <button
-            onClick={handleSubmitSurvey}
-            disabled={!allAnswered}
-            className={`bg-blue-600 hover:bg-blue-700 text-white font-bold py-3 px-8 rounded-lg shadow-sm disabled:bg-slate-300 disabled:cursor-not-allowed`}
-          >
-            Finish Survey
-          </button>
+        <div className="flex justify-end pt-5 mt-6 border-t border-border">
+          <Button onClick={handleSubmitSurvey} disabled={!allAnswered}>Finish survey</Button>
         </div>
-      </div>
+      </>
     );
   };
 
-
+  return (
+    <main className="min-h-screen bg-ground flex flex-col">
+      <SessionTopBar onBack={() => router.push("/history")} backLabel="Dashboard" />
+      <div className="flex-1 flex items-start justify-center px-5 py-10">
+        <Card className="w-full max-w-3xl p-8 anim-rise">
+          <div className="flex justify-between items-center mb-6 pb-4 border-b border-border">
+            <h1 className="text-xl font-bold tracking-tight text-ink">Post-session survey</h1>
+            <div className="flex gap-1.5">
+              {["en", "ms", "zh"].map((lang) => (
+                <button
+                  key={lang}
+                  onClick={() => handleLanguageChange(lang)}
+                  className={`px-3 py-1 text-[11px] font-bold rounded-full transition-colors ${
+                    selectedLanguage === lang ? "bg-accent text-on-accent" : "bg-inset text-ink-2 hover:bg-border/60"
+                  }`}
+                >
+                  {lang.toUpperCase()}
+                </button>
+              ))}
+            </div>
+          </div>
+          {renderBody()}
+        </Card>
+      </div>
+    </main>
+  );
 }
