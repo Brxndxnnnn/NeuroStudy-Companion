@@ -166,7 +166,7 @@
                         <StackPanel>
                             <TextBlock Style="{StaticResource CardTitle}" Text="DATABASE UPLOAD"/>
                             <TextBlock x:Name="TxtDbState" Text="not started" FontWeight="SemiBold"/>
-                            <UniformGrid Columns="4" Margin="0,8,0,0">
+                            <UniformGrid Columns="3" Margin="0,8,0,0">
                                 <StackPanel>
                                     <TextBlock x:Name="TxtRawRows" Text="0" FontSize="17" FontWeight="Bold"/>
                                     <TextBlock Text="raw rows" Foreground="{StaticResource Muted2}" FontSize="10"/>
@@ -176,11 +176,6 @@
                                     <TextBlock x:Name="TxtFiltRows" Text="0" FontSize="17" FontWeight="Bold"/>
                                     <TextBlock Text="filtered rows" Foreground="{StaticResource Muted2}" FontSize="10"/>
                                     <TextBlock x:Name="TxtFiltExp" Text="" Foreground="{StaticResource Muted2}" FontSize="10"/>
-                                </StackPanel>
-                                <StackPanel>
-                                    <TextBlock x:Name="TxtEegRows" Text="0" FontSize="17" FontWeight="Bold"/>
-                                    <TextBlock Text="summary rows" Foreground="{StaticResource Muted2}" FontSize="10"/>
-                                    <TextBlock x:Name="TxtEegExp" Text="" Foreground="{StaticResource Muted2}" FontSize="10"/>
                                 </StackPanel>
                                 <StackPanel>
                                     <TextBlock x:Name="TxtBandRows" Text="0" FontSize="17" FontWeight="Bold"/>
