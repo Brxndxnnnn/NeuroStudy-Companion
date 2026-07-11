@@ -108,16 +108,56 @@
                                 <TextBlock Grid.Row="1" Grid.Column="1" x:Name="TxtStarted" Text="—" FontSize="11"/>
                             </Grid>
                             <StackPanel Orientation="Horizontal" Margin="0,12,0,0">
-                                <Button x:Name="BtnStartSession" Content="Start session &amp; upload"
-                                        Click="BtnStartSession_Click" IsEnabled="False" Background="{StaticResource Good}"
-                                        ToolTip="Enabled once the session is paired (claimed) on the website. Recording also starts automatically when the website starts the session."/>
-                                <Button x:Name="BtnStopSession" Content="Stop session"
+                                <Button x:Name="BtnStopSession" Content="Stop session (failsafe)"
                                         Click="BtnStopSession_Click" IsEnabled="False" Background="{StaticResource Bad}"
-                                        ToolTip="Stop recording, flush and close the upload. The band stays connected."/>
+                                        ToolTip="Hardware-side abort: use only if the website cannot end the session (browser crash, network loss). Flushes and closes the upload; the band stays connected."/>
                             </StackPanel>
+                            <TextBlock Text="Recording starts and stops automatically with the session on the website."
+                                       Foreground="{StaticResource Muted2}" FontSize="11" Margin="0,6,0,0" TextWrapping="Wrap"/>
                             <TextBlock x:Name="TxtPairHint" Text="Waiting to pair with website…"
-                                       Foreground="{StaticResource Warn}" FontSize="11" Margin="0,6,0,0"
+                                       Foreground="{StaticResource Warn}" FontSize="11" Margin="0,4,0,0"
                                        Visibility="Collapsed"/>
+                        </StackPanel>
+                    </Border>
+
+                    <!-- Session progress: the web-side journey, paired → survey submitted -->
+                    <Border Style="{StaticResource Card}">
+                        <StackPanel>
+                            <DockPanel Margin="0,0,0,4">
+                                <TextBlock Style="{StaticResource CardTitle}" Text="SESSION PROGRESS" Margin="0" VerticalAlignment="Center"/>
+                                <StackPanel Orientation="Horizontal" HorizontalAlignment="Right">
+                                    <Ellipse Width="7" Height="7" Fill="{StaticResource Good}" VerticalAlignment="Center" Margin="0,0,3,0"/>
+                                    <TextBlock Text="done" FontSize="10" Foreground="{StaticResource Muted2}" VerticalAlignment="Center" Margin="0,0,8,0"/>
+                                    <Ellipse Width="7" Height="7" Fill="{StaticResource Warn}" VerticalAlignment="Center" Margin="0,0,3,0"/>
+                                    <TextBlock Text="in progress" FontSize="10" Foreground="{StaticResource Muted2}" VerticalAlignment="Center" Margin="0,0,8,0"/>
+                                    <Ellipse Width="7" Height="7" Fill="{StaticResource Muted}" VerticalAlignment="Center" Margin="0,0,3,0"/>
+                                    <TextBlock Text="not started" FontSize="10" Foreground="{StaticResource Muted2}" VerticalAlignment="Center"/>
+                                </StackPanel>
+                            </DockPanel>
+                            <StackPanel Orientation="Horizontal" Margin="0,1,0,3">
+                                <Ellipse x:Name="DotPgPair" Width="9" Height="9" Fill="{StaticResource Muted}" VerticalAlignment="Center" Margin="0,0,8,0"/>
+                                <TextBlock x:Name="TxtPgPair" Text="Paired with website" FontSize="12" Opacity="0.55"/>
+                            </StackPanel>
+                            <StackPanel Orientation="Horizontal" Margin="0,1,0,3">
+                                <Ellipse x:Name="DotPgRec" Width="9" Height="9" Fill="{StaticResource Muted}" VerticalAlignment="Center" Margin="0,0,8,0"/>
+                                <TextBlock x:Name="TxtPgRec" Text="Session started — recording" FontSize="12" Opacity="0.55"/>
+                            </StackPanel>
+                            <StackPanel Orientation="Horizontal" Margin="0,1,0,3">
+                                <Ellipse x:Name="DotPgImg" Width="9" Height="9" Fill="{StaticResource Muted}" VerticalAlignment="Center" Margin="0,0,8,0"/>
+                                <TextBlock x:Name="TxtPgImg" Text="Showing images" FontSize="12" Opacity="0.55"/>
+                            </StackPanel>
+                            <StackPanel Orientation="Horizontal" Margin="0,1,0,3">
+                                <Ellipse x:Name="DotPgMath" Width="9" Height="9" Fill="{StaticResource Muted}" VerticalAlignment="Center" Margin="0,0,8,0"/>
+                                <TextBlock x:Name="TxtPgMath" Text="Showing math questions" FontSize="12" Opacity="0.55"/>
+                            </StackPanel>
+                            <StackPanel Orientation="Horizontal" Margin="0,1,0,3">
+                                <Ellipse x:Name="DotPgEnd" Width="9" Height="9" Fill="{StaticResource Muted}" VerticalAlignment="Center" Margin="0,0,8,0"/>
+                                <TextBlock x:Name="TxtPgEnd" Text="Session ended" FontSize="12" Opacity="0.55"/>
+                            </StackPanel>
+                            <StackPanel Orientation="Horizontal" Margin="0,1,0,0">
+                                <Ellipse x:Name="DotPgSurvey" Width="9" Height="9" Fill="{StaticResource Muted}" VerticalAlignment="Center" Margin="0,0,8,0"/>
+                                <TextBlock x:Name="TxtPgSurvey" Text="Survey submitted → saved to DB" FontSize="12" Opacity="0.55"/>
+                            </StackPanel>
                         </StackPanel>
                     </Border>
 
@@ -128,18 +168,24 @@
                             <TextBlock x:Name="TxtDbState" Text="not started" FontWeight="SemiBold"/>
                             <UniformGrid Columns="3" Margin="0,8,0,0">
                                 <StackPanel>
-                                    <TextBlock x:Name="TxtRawRows" Text="0" FontSize="20" FontWeight="Bold"/>
+                                    <TextBlock x:Name="TxtRawRows" Text="0" FontSize="17" FontWeight="Bold"/>
                                     <TextBlock Text="raw rows" Foreground="{StaticResource Muted2}" FontSize="10"/>
+                                    <TextBlock x:Name="TxtRawExp" Text="" Foreground="{StaticResource Muted2}" FontSize="10"/>
                                 </StackPanel>
                                 <StackPanel>
-                                    <TextBlock x:Name="TxtEegRows" Text="0" FontSize="20" FontWeight="Bold"/>
-                                    <TextBlock Text="eeg rows" Foreground="{StaticResource Muted2}" FontSize="10"/>
+                                    <TextBlock x:Name="TxtFiltRows" Text="0" FontSize="17" FontWeight="Bold"/>
+                                    <TextBlock Text="filtered rows" Foreground="{StaticResource Muted2}" FontSize="10"/>
+                                    <TextBlock x:Name="TxtFiltExp" Text="" Foreground="{StaticResource Muted2}" FontSize="10"/>
                                 </StackPanel>
                                 <StackPanel>
-                                    <TextBlock x:Name="TxtBandRows" Text="0" FontSize="20" FontWeight="Bold"/>
+                                    <TextBlock x:Name="TxtBandRows" Text="0" FontSize="17" FontWeight="Bold"/>
                                     <TextBlock Text="band rows" Foreground="{StaticResource Muted2}" FontSize="10"/>
+                                    <TextBlock x:Name="TxtBandExp" Text="" Foreground="{StaticResource Muted2}" FontSize="10"/>
                                 </StackPanel>
                             </UniformGrid>
+                            <TextBlock x:Name="TxtDbVolume" Text="" Foreground="{StaticResource Muted2}" FontSize="11" Margin="0,6,0,0"/>
+                            <TextBlock x:Name="TxtDbSummary" Text="" FontSize="11" FontWeight="SemiBold" TextWrapping="Wrap"
+                                       Margin="0,6,0,0" Visibility="Collapsed"/>
                             <TextBlock x:Name="TxtDbExtra" Text="" Foreground="{StaticResource Muted2}" FontSize="11" Margin="0,6,0,0"/>
                             <TextBlock x:Name="TxtDbError" Text="" Foreground="{StaticResource Bad}" FontSize="11" TextWrapping="Wrap"/>
                         </StackPanel>
@@ -167,16 +213,19 @@
                                 <TextBlock Grid.Column="1" x:Name="TxtBattery" Text="—"/>
                             </Grid>
                             <ItemsControl x:Name="ChannelList" Margin="0,8,0,0"/>
+                            <TextBlock x:Name="TxtQualitySummary" Text="" FontSize="11" FontWeight="SemiBold"
+                                       TextWrapping="Wrap" Margin="0,8,0,0" Visibility="Collapsed"/>
                         </StackPanel>
                     </Border>
 
                     <!-- Capture -->
                     <Border Style="{StaticResource Card}">
                         <StackPanel>
-                            <TextBlock Style="{StaticResource CardTitle}" Text="EXPORT CAPTURE → CSV"/>
+                            <TextBlock Style="{StaticResource CardTitle}" Text="TEST RECORDING → CSV"/>
                             <StackPanel Orientation="Horizontal">
-                                <Button x:Name="BtnCapture" Content="Start capture" Click="BtnCapture_Click" IsEnabled="False"
-                                        ToolTip="Record everything to one CSV: raw ADC, raw µV, filtered µV, heart rate, SpO₂, attention, relaxation, mental workload and signal quality (independent of the database upload)."/>
+                                <Button x:Name="BtnCapture" Content="Start test recording" Click="BtnCapture_Click" IsEnabled="False"
+                                        Background="{StaticResource Good}"
+                                        ToolTip="Record band data WITHOUT conducting a client session — for equipment testing and standalone data collection. Saves one CSV: raw ADC, raw µV, filtered µV, heart rate, SpO₂, attention, relaxation, mental workload and signal quality (independent of the database upload)."/>
                                 <TextBlock x:Name="TxtCapture" Text="idle" VerticalAlignment="Center" Foreground="{StaticResource Muted2}"/>
                             </StackPanel>
                         </StackPanel>

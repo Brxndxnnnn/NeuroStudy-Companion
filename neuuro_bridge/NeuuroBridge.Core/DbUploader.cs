@@ -61,6 +61,23 @@ namespace NeuuroBridge
     }
 
     /// <summary>
+    /// Advisory snapshot of how far the web-driven session flow has progressed, read from the DB
+    /// (sessions + events + session_questionnaire_responses). Everything here is display-only for
+    /// the technician; it never gates the write path.
+    /// </summary>
+    public struct SessionProgress
+    {
+        public bool Known;                 // false = not read yet / read failed this tick
+        public string SyncStatus;
+        public bool Claimed;               // website paired (claimed / recording / completed)
+        public bool RecordingConfirmed;    // sessions.bridge_recording_at stamped
+        public bool ImagesShown;           // ≥1 image event exists
+        public bool QuestionsShown;        // ≥1 math-question event exists
+        public bool Ended;                 // sync_status = 'completed'
+        public bool SurveySubmitted;       // ≥1 questionnaire response row exists
+    }
+
+    /// <summary>
     /// Write-only bridge → TimescaleDB sink (TS1.6). Owns the session row, anchors the
     /// bridge clock to DB time once, then streams batched EEG and per-second band powers
     /// via binary COPY. Fire-and-forget: a DB hiccup never blocks or crashes streaming —
@@ -79,6 +96,19 @@ namespace NeuuroBridge
         // (clients.clinic_id, users.role_id) are satisfied on a fresh DB without the dev seed.
         private const string PlaceholderClinicId = "33333333-3333-3333-3333-333333333333";
         private const string PlaceholderRoleId   = "44444444-4444-4444-4444-444444444444";
+
+        // ── Expected steady-state row rates while recording (sent-vs-expected reconciliation).
+        // Raw and filtered stream one row per hardware sample (true 250 Hz); the summary row is
+        // throttled to one per 500 ms in BridgeController; the band row fires once per
+        // 256-sample FFT window (EegProcessor.FftSize) at the true 250 Hz hardware rate.
+        public const double RawRowsPerSecond      = 250.0;
+        public const double FilteredRowsPerSecond = 250.0;
+        public const double SummaryRowsPerSecond  = 2.0;
+        public const double BandRowsPerSecond     = 250.0 / 256.0;
+
+        // Approximate per-row size on the binary-COPY wire (2 B column count + 4 B length prefix
+        // per column + column data) — lets the UI show a human-scale upload volume.
+        public const int RawRowBytes = 66, FilteredRowBytes = 66, SummaryRowBytes = 162, BandRowBytes = 242;
 
         private const int ChannelCount    = 4;        // Fp1, Fp2, T4, T3 (SDK frame order)
         private const int FlushIntervalMs = 500;     // batch window for eeg_readings (~2 flushes/s)
@@ -110,6 +140,7 @@ namespace NeuuroBridge
         private long _rawBaseTicks;                     // DB-time ticks of global sample index 0 (µs-aligned)
         private long _rawSampleIndex;                   // monotonic 250 Hz sample counter
         private long _rawResyncs;                       // dropped-frame resync events (diagnostic)
+        private long _rawGapSamples;                    // total samples skipped at resyncs (= BLE dropout, not upload loss)
         // Filtered stream's own independent sample-counter clock (same scheme as the raw one above;
         // the two streams arrive on separate SDK callbacks and are anchored independently).
         private bool _filtAnchored;
@@ -151,7 +182,15 @@ namespace NeuuroBridge
         /// <summary>Times the sample-counter clock resynced to arrival time (≈ genuine upstream frame loss).</summary>
         public long RawResyncs   => Interlocked.Read(ref _rawResyncs);
         public long FiltResyncs  => Interlocked.Read(ref _filtResyncs);
+        /// <summary>Seconds of raw signal that never arrived over BLE (skipped at resyncs). This is
+        /// upstream dropout, NOT rows lost between the bridge and DB — expected-row math subtracts it.</summary>
+        public double RawGapSeconds => Interlocked.Read(ref _rawGapSamples) / (double)_sampleRate;
         public string LastError  => _lastError;
+
+        /// <summary>Approximate bytes shipped to the DB so far (binary-COPY wire sizes).</summary>
+        public long ApproxBytesSent =>
+            RawRowsSent * RawRowBytes + FiltRowsSent * FilteredRowBytes +
+            EegRowsSent * SummaryRowBytes + BandRowsSent * BandRowBytes;
 
         /// <summary>Bridge clock mapped onto the DB timeline (see clock-sync note in the design doc).</summary>
         public DateTime DbNow => DateTime.UtcNow + _clockOffset;
@@ -300,6 +339,48 @@ namespace NeuuroBridge
             }
             catch (Exception ex) { _lastError = ex.Message; return null; }
             finally { Monitor.Exit(_ioLock); }
+        }
+
+        /// <summary>
+        /// Reads the web-side session progress (paired / recording / images / questions / ended /
+        /// survey submitted) for advisory display. Uses its OWN pooled connection — independent of
+        /// the uploader's write connection — so it never contends with the write path and keeps
+        /// working after the uploader is disposed (the survey is submitted AFTER the session ends).
+        /// Best-effort: any failure returns Known=false and the caller just skips this tick.
+        /// </summary>
+        public static SessionProgress TryReadProgress(string connString, Guid sessionId)
+        {
+            var p = new SessionProgress();
+            try
+            {
+                using (var conn = new NpgsqlConnection(connString))
+                {
+                    conn.Open();
+                    using (var cmd = new NpgsqlCommand(
+                        "SELECT s.sync_status, s.bridge_recording_at IS NOT NULL, " +
+                        "EXISTS(SELECT 1 FROM events e WHERE e.session_id = s.session_id AND e.image_id IS NOT NULL), " +
+                        "EXISTS(SELECT 1 FROM events e WHERE e.session_id = s.session_id AND e.question_id IS NOT NULL), " +
+                        "EXISTS(SELECT 1 FROM session_questionnaire_responses r WHERE r.session_id = s.session_id) " +
+                        "FROM sessions s WHERE s.session_id = @sid", conn))
+                    {
+                        cmd.Parameters.AddWithValue("sid", NpgsqlDbType.Uuid, sessionId);
+                        using (var rd = cmd.ExecuteReader())
+                        {
+                            if (!rd.Read()) return p;
+                            p.SyncStatus = rd.IsDBNull(0) ? "" : rd.GetString(0);
+                            p.RecordingConfirmed = rd.GetBoolean(1);
+                            p.ImagesShown = rd.GetBoolean(2);
+                            p.QuestionsShown = rd.GetBoolean(3);
+                            p.SurveySubmitted = rd.GetBoolean(4);
+                            p.Claimed = p.SyncStatus == "claimed" || p.SyncStatus == "recording" || p.SyncStatus == "completed";
+                            p.Ended = p.SyncStatus == "completed";
+                            p.Known = true;
+                        }
+                    }
+                }
+            }
+            catch { /* advisory only — a failed read means "unknown this tick" */ }
+            return p;
         }
 
         /// <summary>
@@ -460,6 +541,7 @@ namespace NeuuroBridge
                         long resyncIndex = (long)Math.Round((double)(f.FrameEnd.Ticks - _rawBaseTicks) / periodTicks) - (spc - 1);
                         if (resyncIndex > _rawSampleIndex)
                         {
+                            Interlocked.Add(ref _rawGapSamples, resyncIndex - _rawSampleIndex);
                             _rawSampleIndex = resyncIndex;
                             Interlocked.Increment(ref _rawResyncs);
                         }
