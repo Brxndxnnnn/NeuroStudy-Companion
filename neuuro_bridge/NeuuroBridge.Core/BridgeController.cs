@@ -47,6 +47,18 @@ namespace NeuuroBridge
         private int _progressBusy;              // 1 while a progress read is in flight (skip overlapping ticks)
         private string _dbConnString;           // cached for the progress poll (avoids re-reading .env every tick)
         private Guid _sessionGuid;
+        private bool _draining;                 // Stop clicked; still accepting in-flight raw/filt/band frames (see StopGraceMs)
+        private Timer _stopGraceTimer;           // one-shot; fires FinalizeStop after the drain window
+        private long _tailLostSamples;           // raw samples rejected AFTER the drain window closed (see TailLossSeconds)
+        // How long to keep accepting raw/filt/band frames after Stop before actually closing the
+        // session out. BLE delivers frames in uneven bursts (see DbUploader's CopyRaw notes) — a
+        // frame representing signal from BEFORE Stop was pressed can still be in flight and arrive
+        // slightly after, and without this window it was silently dropped (observed ~4s tail on a
+        // real session). Sized with margin over that observed worst case.
+        private const int StopGraceMs = 4000;
+        // How much further past the drain window to keep attributing a rejected frame to "the
+        // session that just stopped" (vs. unrelated later live-preview traffic) for TailLossSeconds.
+        private const int TailTrackMarginMs = 2000;
 
         // Live snapshots (guarded by _stateLock).
         private int[] _lastRawInt;
@@ -138,6 +150,11 @@ namespace NeuuroBridge
                 return end > RecordingStartUtc ? end - RecordingStartUtc : TimeSpan.Zero;
             }
         }
+        /// <summary>Seconds of raw signal that arrived just after the stop-grace window closed and
+        /// was rejected — the rare case where <see cref="StopGraceMs"/> wasn't quite long enough to
+        /// drain the in-flight BLE tail. Normally zero; surfaced separately (like the DbUploader's
+        /// RawGapSeconds) so a residual is explained instead of silently absorbed into "expected."</summary>
+        public double TailLossSeconds => Interlocked.Read(ref _tailLostSamples) / (double)CaptureSampleRateHz;
         /// <summary>Latest advisory snapshot of the web-side session flow (see <see cref="SessionProgress"/>).</summary>
         public SessionProgress Progress { get; private set; }
         /// <summary>Last-known sessions.sync_status (unclaimed/claimed/completed). Advisory, refreshed by poll.</summary>
@@ -237,6 +254,9 @@ namespace NeuuroBridge
                 // than dangling on 'recording' (StopSession is a no-op when nothing was recording). A later
                 // reconnect re-arms the auto-preview + a fresh session prepare.
                 if (SessionActive) StopSession();
+                // Device is gone — no more frames are coming, so there's no point waiting out the
+                // rest of a drain window that just started (or was already in progress).
+                if (_draining) FinalizeStop();
                 _streaming = false;
                 SessionActive = false;
                 StopSyncPoll();
@@ -290,6 +310,7 @@ namespace NeuuroBridge
         public void Disconnect()
         {
             StopSession();
+            if (_draining) FinalizeStop();   // device is going away — don't wait out the rest of the drain window
             StopSyncPoll();          // StopSession only stops it if recording; stop here for the preview-only case
             StopProgressPoll();      // progress tracking ends with the connection, not the recording
             StopSummaryPoll();
@@ -367,6 +388,7 @@ namespace NeuuroBridge
             if (!_prepared) PrepareSession();  // safety net: connect-time prepare didn't run
             RecordingStartUtc = DateTime.UtcNow;
             RecordingStopUtc = default(DateTime);
+            Interlocked.Exchange(ref _tailLostSamples, 0);
             SessionActive = true;
             StartSummaryPoll();
             SessionStarted?.Invoke();
@@ -374,20 +396,38 @@ namespace NeuuroBridge
         }
 
         /// <summary>
-        /// Ends the recording window: flushes + closes the DB upload and marks the session
-        /// 'completed', while LEAVING the live preview streaming and the device connected. Stops the
-        /// sync-status poll. The disposed uploader is kept referenced so its final row counts stay
-        /// visible; a fresh <see cref="StartSession"/> prepares a new session row + code. Idempotent.
+        /// Ends the recording window. Freezes <see cref="RecordingElapsed"/> and flips the UI-facing
+        /// <see cref="SessionActive"/> off immediately, but keeps accepting raw/filt/band frames for
+        /// <see cref="StopGraceMs"/> more (see <see cref="_draining"/>) to drain whatever was still in
+        /// flight over BLE when Stop was pressed, before <see cref="FinalizeStop"/> actually closes
+        /// the DB upload out. Idempotent (a second call while draining/stopped is a no-op).
         /// </summary>
         public void StopSession()
         {
             if (!SessionActive) return;
             RecordingStopUtc = DateTime.UtcNow;   // freeze the recording window for expected-row math
             SessionActive = false;
+            _draining = true;
             StopSyncPoll();
             StopSummaryPoll();
             // NOTE: the progress poll deliberately keeps running — the survey is submitted on the
             // web AFTER the session completes, and the checklist tracks through to that point.
+            try { _stopGraceTimer?.Dispose(); } catch { /* ignore */ }
+            _stopGraceTimer = new Timer(_ => FinalizeStop(), null, StopGraceMs, Timeout.Infinite);
+        }
+
+        /// <summary>
+        /// Runs once, <see cref="StopGraceMs"/> after Stop (or immediately, if the device disconnects
+        /// mid-drain — see <see cref="Disconnect"/>/OnDisconnected). Closes out what StopSession used
+        /// to do synchronously: flush + close the DB upload and mark the session 'completed'. The
+        /// disposed uploader is kept referenced so its final row counts stay visible. Idempotent.
+        /// </summary>
+        private void FinalizeStop()
+        {
+            if (!_draining) return;
+            _draining = false;
+            try { _stopGraceTimer?.Dispose(); } catch { /* ignore */ }
+            _stopGraceTimer = null;
             // Stop is the technician's explicit "complete session": flag the row so disposal flips
             // sessions.sync_status → 'completed' after the final data flush (unclaimed → claimed →
             // completed; the frontend owns the middle 'claimed' transition).
@@ -397,6 +437,15 @@ namespace NeuuroBridge
             _recordingConfirmed = false;
             SetSyncStatus("completed");
             SessionStopped?.Invoke();
+        }
+
+        /// <summary>True while a raw frame arriving right now would still plausibly belong to the
+        /// session that just stopped (drain window + a margin) — i.e. worth counting as tail loss
+        /// rather than ordinary un-recorded live-preview traffic from whatever comes next.</summary>
+        private bool IsWithinTailTrackWindow()
+        {
+            if (RecordingStopUtc == default(DateTime)) return false;
+            return (DateTime.UtcNow - RecordingStopUtc).TotalMilliseconds <= StopGraceMs + TailTrackMarginMs;
         }
 
         private void GenerateSession(string bleAddress)
@@ -563,8 +612,10 @@ namespace NeuuroBridge
 
                 // Capture a local ref: StopSession may dispose _db on another thread mid-frame.
                 var db = _db;
-                if (SessionActive && db != null && db.Streaming)
+                if ((SessionActive || _draining) && db != null && db.Streaming)
                     db.EnqueueRaw(db.ToDbTime(frame.ArrivalUtc), frame.IntSamples);
+                else if (IsWithinTailTrackWindow())
+                    Interlocked.Add(ref _tailLostSamples, frame.IntSamples.Length / ChannelCount);
             }
 
             // Combined CSV capture: record raw ADC + raw µV for this frame, tagged with the
@@ -604,13 +655,13 @@ namespace NeuuroBridge
             if (frame == null) return;
             // Local ref: StopSession may dispose _db on another thread mid-frame.
             var db = _db;
-            if (SessionActive && db != null && db.Streaming)
+            if ((SessionActive || _draining) && db != null && db.Streaming)
                 db.EnqueueFiltered(db.DbNow, frame);
         }
 
         private void UploadBandPowers(BandPowers[] powers)
         {
-            if (!SessionActive || _db == null || !_db.Streaming) return;
+            if (!(SessionActive || _draining) || _db == null || !_db.Streaming) return;
             float att, rel, mwl; bool? ready; bool[] channels; int? hr, spo2;
             lock (_stateLock)
             {
@@ -781,6 +832,7 @@ namespace NeuuroBridge
             StopSyncPoll();
             StopProgressPoll();
             StopSummaryPoll();
+            if (_draining) FinalizeStop();   // app shutting down — don't leave a grace timer dangling
             try { _svc.StopStream(); } catch { /* ignore */ }
             try { _db?.Dispose(); } catch { /* ignore */ }
             try { _svc.Shutdown(); } catch { /* ignore */ }
