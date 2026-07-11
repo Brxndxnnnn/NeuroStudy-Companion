@@ -1,16 +1,25 @@
 import sessionModel from '../models/session.model.js'
 import catchAsync from '../utils/catchAsync.js'
-import { BadRequestError, NotFoundError } from '../utils/AppError.js'
+import { BadRequestError, NotFoundError, AppError } from '../utils/AppError.js'
+import fs from 'fs'
 
 // ── GET /api/sessions ──────────────────────────────────────────────────────────
 const listSessions = catchAsync(async (req, res) => {
-    const sessions = await sessionModel.findAll(req.dbClient)
+    const clinic_id = req.user.role === 'admin' ? req.query.clinic_id : req.user.clinic_id // from JWT for technician, undefined for admin
+    const { sync_status, start_date, end_date } = req.query
+    const validStatuses = ['unclaimed', 'claimed', 'recording', 'completed'];
+    if (sync_status && !validStatuses.includes(sync_status))
+        throw new BadRequestError(`Invalid sync_status value. Must be one of: ${validStatuses.join(', ')}`)
+    if (start_date && isNaN(Date.parse(start_date)))
+        throw new BadRequestError('Invalid start_date value. Must be a valid date string.')
+    if (end_date && isNaN(Date.parse(end_date)))
+        throw new BadRequestError('Invalid end_date value. Must be a valid date string.')
+    const sessions = await sessionModel.findAll({ clinic_id, sync_status, start_date, end_date }, req.dbClient)
     return res.json(sessions)
 })
 
 // ── GET /api/sessions/:session_id ─────────────────────────────────────────────
 const getSessionById = catchAsync(async (req, res) => {
-    console.log(`Fetching session by ID: ${req.params.session_id}`)
     const { session_id } = req.params
     if (!session_id)
         throw new BadRequestError('Missing required field: session_id is required')
@@ -86,7 +95,6 @@ const endSession = catchAsync(async (req, res) => {
 
 // ── GET /api/sessions/:session_id/results ────────────────────────────────────────────
 const getSessionResult = catchAsync(async (req, res) => {
-    console.log(`Fetching session results for session_id: ${req.params.session_id}`)
     const { session_id } = req.params
     const results = await sessionModel.getSessionResult(session_id, req.dbClient)
 
@@ -104,6 +112,10 @@ const getSessionEEGResults = catchAsync(async (req, res) => {
         throw new NotFoundError('Session not found')
     const session = sessions[0]
 
+    if (req.query.start_seconds && isNaN(req.query.start_seconds))
+        throw new BadRequestError('Invalid start_seconds value')
+    if (req.query.end_seconds && isNaN(req.query.end_seconds))
+        throw new BadRequestError('Invalid end_seconds value')
     const startSeconds = parseFloat(req.query.start_seconds)
     const endSeconds = parseFloat(req.query.end_seconds)
     if (isNaN(startSeconds) || isNaN(endSeconds) || startSeconds < 0 || endSeconds < 0 || endSeconds <= startSeconds)
@@ -116,6 +128,50 @@ const getSessionEEGResults = catchAsync(async (req, res) => {
         session_id, sample_rate: session.sample_rate, start_time: session.start_time, end_time: session.end_time
     },
         fromTs, toTs, rawOrFiltered, req.dbClient)
+
+    
+    // res.setHeader('Content-Type', 'application/json');
+    // const stream = fs.createReadStream(results.samples_file_path);
+    // stream.on('error', (err) => {
+    //     console.error('Error reading EEG results file:', err);
+    //     throw new AppError('Failed to read EEG results file', 500);
+    // });
+    // stream.on('end', () => {
+    //     fs.unlink(results.samples_file_path, (err) => {
+    //         if (err) console.error('Error deleting temporary EEG results file:', err);
+    //     });
+    // });
+    // stream.pipe(res);
     return res.json(results)
 })
-export default { listSessions, getSessionById, pairSessions, startSession, endSession, getSessionResult, getSessionEEGResults }
+
+// ── GET /api/sessions/:session_id/results/bandpower ────────────────────────────────────────────
+const getSessionBandPowerResults = catchAsync(async (req, res) => {
+    const { session_id } = req.params
+    if (!session_id)
+        throw new BadRequestError('Missing required field: session_id is required')
+    const sessions = await sessionModel.findById(session_id, req.dbClient)
+    if (!sessions || sessions.length === 0)
+        throw new NotFoundError('Session not found')
+    const session = sessions[0]
+
+    // Validate and compute start and end timestamps based on query parameters
+    if (req.query.start_seconds && isNaN(req.query.start_seconds))
+        throw new BadRequestError('Invalid start_seconds value')
+    if (req.query.end_seconds && isNaN(req.query.end_seconds))
+        throw new BadRequestError('Invalid end_seconds value')
+    const startSeconds = parseFloat(req.query.start_seconds) || 0
+    const endSeconds = parseFloat(req.query.end_seconds) || (new Date(session.end_time).getTime() - new Date(session.start_time).getTime()) / 1000
+    // Default to the full session duration if not provided
+    if (isNaN(startSeconds) || isNaN(endSeconds) || startSeconds < 0 || endSeconds < 0 || endSeconds <= startSeconds)
+        throw new BadRequestError('Invalid start_seconds or end_seconds values')
+    const fromTs = new Date(new Date(session.start_time).getTime() + startSeconds * 1000)
+    const toTs = new Date(new Date(session.start_time).getTime() + endSeconds * 1000)
+
+    const results = await sessionModel.getSessionBandPowerResults({
+        session_id, start_time: session.start_time, end_time: session.end_time
+    },
+        fromTs, toTs, req.dbClient)
+    return res.json(results)
+})
+export default { listSessions, getSessionById, pairSessions, startSession, endSession, getSessionResult, getSessionEEGResults, getSessionBandPowerResults }

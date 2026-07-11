@@ -41,7 +41,6 @@ const findQuestionsByQuestionnaireId = async (questionnaire_id, languages, clien
         if (cn) sql += `, statement->>'${cn}' as ${cn}_statement`
     }
     sql += ` FROM questionnaire_questions WHERE questionnaire_id = $1 ORDER BY question_no ASC`
-    console.log('Constructed SQL query:', sql)
     const { rows } = await query(client, sql, [questionnaire_id]);
     return rows;
 }
