@@ -32,7 +32,12 @@ const getQuestionsByQuestionnaireId = catchAsync(async (req, res) => {
     const { questionnaire_id } = req.params
     if (!questionnaire_id)
         throw new BadRequestError('Missing required field: questionnaire_id is required')
+
     const languages = req.query.languages ? req.query.languages.split(',') : []
+    const validLanguages = ['en', 'ms', 'zh']
+    if (languages.some(lang => !validLanguages.includes(lang)))
+        throw new BadRequestError(`Invalid language code(s). Valid codes are: ${validLanguages.join(', ')}`)
+    
     const results = await questionnaireModel.findQuestionsByQuestionnaireId(questionnaire_id, languages, req.dbClient)
     if (!results || results.length === 0)
         throw new NotFoundError('No questions found for the given questionnaire_id')
