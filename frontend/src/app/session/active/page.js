@@ -242,12 +242,12 @@ export default function ActiveSessionMockup() {
     let timer;
     if (currentStep === "images" && images.length > 0) {
       timer = setTimeout(async () => {
-        await logImageHidden();
         if (currentImageIndex < images.length - 1) {
           const nextIdx = currentImageIndex + 1;
           setCurrentImageIndex(nextIdx);
           await logImageShown(images[nextIdx].image_id);
         } else {
+          await logImageHidden();
           setCurrentStep("math");
         }
       }, 1000);
