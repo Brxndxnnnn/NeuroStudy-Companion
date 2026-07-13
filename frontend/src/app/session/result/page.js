@@ -46,18 +46,26 @@ function lowerBound(rows, target) {
   return lo;
 }
 
+// A live electrode swings by tens of µV; a railed one (SDK reports "connected" while the
+// ADC sits on a constant) lands here as a sub-0.1 µV DC residue left by the SDK's filter.
+// Below this peak-to-peak, the channel recorded nothing and must be called dead rather
+// than autoscaled into a convincing-looking trace.
+const FLAT_PKPK_UV = 0.5;
+
 function channelStats(samples, key, from, to) {
   const start = lowerBound(samples, from);
   const end = lowerBound(samples, to);
-  let sum = 0, peak = 0, count = 0;
+  let sum = 0, peak = 0, count = 0, min = Infinity, max = -Infinity;
   for (let i = start; i < end; i++) {
     const v = samples[i][key];
     if (v == null || Number.isNaN(v)) continue;
     sum += v;
     if (Math.abs(v) > peak) peak = Math.abs(v);
+    if (v < min) min = v;
+    if (v > max) max = v;
     count++;
   }
-  if (!count) return { mean: null, peak: null, sd: null, count: 0 };
+  if (!count) return { mean: null, peak: null, sd: null, pkpk: null, flat: false, count: 0 };
   const mean = sum / count;
   let sq = 0;
   for (let i = start; i < end; i++) {
@@ -65,7 +73,8 @@ function channelStats(samples, key, from, to) {
     if (v == null || Number.isNaN(v)) continue;
     sq += (v - mean) * (v - mean);
   }
-  return { mean, peak, sd: Math.sqrt(sq / count), count };
+  const pkpk = max - min;
+  return { mean, peak, sd: Math.sqrt(sq / count), pkpk, flat: pkpk < FLAT_PKPK_UV, count };
 }
 
 // mean / min / max for a 1 Hz series, skipping nulls (the bridge leaves HR and
@@ -90,6 +99,14 @@ const hasAny = (rows, key) => rows.some((r) => r[key] != null && !Number.isNaN(r
 
 function fmt(v, digits = 1) {
   return v == null ? "—" : v.toFixed(digits);
+}
+
+// EEG µV values span orders of magnitude (a railed channel sits near 0.02), so a fixed
+// 1 decimal place would render every reading on a dead channel as a plausible-looking "0.0".
+function fmtUv(v) {
+  if (v == null || Number.isNaN(v)) return "—";
+  const a = Math.abs(v);
+  return v.toFixed(a >= 10 ? 1 : a >= 1 ? 2 : 3);
 }
 
 function fmtDuration(sec) {
@@ -436,16 +453,29 @@ export default function SessionResults() {
                 </div>
                 <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
                   {stats.map((ch) => (
-                    <div key={ch.key} className="rounded-xl border border-border bg-inset/40 px-4 py-3">
+                    <div
+                      key={ch.key}
+                      className={`rounded-xl border px-4 py-3 ${
+                        ch.flat ? "border-crit/40 bg-crit-soft/30" : "border-border bg-inset/40"
+                      }`}
+                    >
                       <div className="flex items-center gap-2 mb-2">
                         <span className="h-2.5 w-2.5 rounded-sm" style={{ background: `var(${ch.color})` }} />
                         <span className="font-mono text-[12px] font-semibold text-ink">{ch.label}</span>
+                        {ch.flat && <Pill tone="crit">No signal</Pill>}
                       </div>
-                      <dl className="space-y-1">
-                        <StatLine label="Mean" value={`${fmt(ch.mean)} µV`} />
-                        <StatLine label="Peak |µV|" value={fmt(ch.peak)} />
-                        <StatLine label="SD" value={fmt(ch.sd)} />
-                      </dl>
+                      {ch.flat ? (
+                        <p className="text-[11px] leading-snug text-muted">
+                          Flat line ({fmtUv(ch.pkpk)} µV peak-to-peak) — this electrode recorded
+                          nothing. Reseat it before the next session.
+                        </p>
+                      ) : (
+                        <dl className="space-y-1">
+                          <StatLine label="Mean" value={`${fmtUv(ch.mean)} µV`} />
+                          <StatLine label="Peak |µV|" value={fmtUv(ch.peak)} />
+                          <StatLine label="SD" value={fmtUv(ch.sd)} />
+                        </dl>
+                      )}
                     </div>
                   ))}
                 </div>
@@ -492,6 +522,8 @@ export default function SessionResults() {
                     <TimeSeriesChart
                       samples={bandRows}
                       panels={bandPanels}
+                      events={events}
+                      onEventClick={setSelectedEvent}
                       onVisibleRangeChange={onBandRange}
                       height={220}
                     />
@@ -548,6 +580,8 @@ export default function SessionResults() {
                     <TimeSeriesChart
                       samples={bandRows}
                       panels={mentalPanels}
+                      events={events}
+                      onEventClick={setSelectedEvent}
                       onVisibleRangeChange={onMentalRange}
                       height={220}
                     />
@@ -597,6 +631,8 @@ export default function SessionResults() {
                         <TimeSeriesChart
                           samples={bandRows}
                           panels={vitalPanels}
+                          events={events}
+                          onEventClick={setSelectedEvent}
                           onVisibleRangeChange={onVitalsRange}
                           height={170}
                         />
