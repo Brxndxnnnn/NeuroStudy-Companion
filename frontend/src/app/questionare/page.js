@@ -7,7 +7,8 @@ import {
   submitQuestionnaireAnswers,
 } from "@/utils/api";
 import { SessionTopBar } from "@/components/TopNav";
-import { Card, Button, Field, Input, Spinner } from "@/components/ui";
+import { Card, Button, Spinner } from "@/components/ui";
+import LikertSurvey, { allAnswered as allSurveyAnswered } from "@/components/LikertSurvey";
 
 export default function QuestionnairePage() {
   const router = useRouter();
@@ -67,10 +68,7 @@ export default function QuestionnairePage() {
   };
 
   const handleSubmitSurvey = async () => {
-    const allAnswered = surveyQuestions.every(
-      (_, idx) => surveyAnswers[idx] && surveyAnswers[idx].trim() !== ""
-    );
-    if (!allAnswered) {
+    if (!allSurveyAnswered(surveyQuestions, surveyAnswers)) {
       alert("Please answer all questions.");
       return;
     }
@@ -79,7 +77,7 @@ export default function QuestionnairePage() {
       const sessionId = localStorage.getItem("currentSessionId");
       const answers = surveyQuestions.map((q, idx) => ({
         question_id: q.question_id,
-        answer_value: parseInt(surveyAnswers[idx], 10) || 0,
+        answer_value: Number(surveyAnswers[idx]),
       }));
 
       const res = await submitQuestionnaireAnswers(sessionId, selectedQuestionnaireId, answers);
@@ -95,9 +93,7 @@ export default function QuestionnairePage() {
     }
   };
 
-  const allAnswered =
-    surveyQuestions.length > 0 &&
-    surveyQuestions.every((_, idx) => surveyAnswers[idx] && surveyAnswers[idx].trim() !== "");
+  const ready = allSurveyAnswered(surveyQuestions, surveyAnswers);
 
   const renderBody = () => {
     if (isLoadingData) {
@@ -114,7 +110,10 @@ export default function QuestionnairePage() {
           <div className="mx-auto mb-5 grid h-14 w-14 place-items-center rounded-full bg-good-soft text-good text-2xl">✓</div>
           <h2 className="text-xl font-bold text-ink">Survey submitted</h2>
           <p className="text-muted mt-2 mb-6">Thank you — your responses have been saved.</p>
-          <Button variant="subtle" onClick={() => router.push("/history")}>Return to dashboard</Button>
+          <div className="flex flex-col sm:flex-row gap-3 justify-center">
+            <Button onClick={() => router.push("/session/result")}>View session results →</Button>
+            <Button variant="subtle" onClick={() => router.push("/history")}>Return to dashboard</Button>
+          </div>
         </div>
       );
     }
@@ -124,27 +123,14 @@ export default function QuestionnairePage() {
 
     return (
       <>
-        <div className="space-y-5">
-          {surveyQuestions.map((q, idx) => {
-            const statementObj = q.statement || {};
-            const questionText = statementObj[selectedLanguage] || statementObj.en || "Question text not available";
-            const answer = surveyAnswers[idx] || "";
-            return (
-              <Field key={q.question_id || idx} label={`Question ${idx + 1}`}>
-                <p className="text-[15px] text-ink mb-2 -mt-1">{questionText}</p>
-                <Input
-                  type="text"
-                  inputMode="numeric"
-                  placeholder="Your answer (number)"
-                  value={answer}
-                  onChange={(e) => setSurveyAnswers((prev) => ({ ...prev, [idx]: e.target.value }))}
-                />
-              </Field>
-            );
-          })}
-        </div>
+        <LikertSurvey
+          questions={surveyQuestions}
+          answers={surveyAnswers}
+          language={selectedLanguage}
+          onChange={(idx, value) => setSurveyAnswers((prev) => ({ ...prev, [idx]: value }))}
+        />
         <div className="flex justify-end pt-5 mt-6 border-t border-border">
-          <Button onClick={handleSubmitSurvey} disabled={!allAnswered}>Finish survey</Button>
+          <Button onClick={handleSubmitSurvey} disabled={!ready}>Finish survey</Button>
         </div>
       </>
     );

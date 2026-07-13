@@ -203,6 +203,18 @@ export async function getSessionResultsFiltered(sessionId, startSeconds, endSeco
   );
   return res;
 }
+// Band powers, mental-state indices and vitals — one row/second, so the whole
+// session is cheap to pull. Omit the bounds to get the full session.
+export async function getSessionResultsBandPower(sessionId, startSeconds, endSeconds) {
+  const qs = new URLSearchParams();
+  if (startSeconds != null) qs.set("start_seconds", startSeconds);
+  if (endSeconds != null) qs.set("end_seconds", endSeconds);
+  const suffix = qs.toString() ? `?${qs}` : "";
+  const res = await fetchWithAuth(
+    `${BASE_URL}/sessions/${sessionId}/results/bandpower${suffix}`
+  );
+  return res;
+}
 
 
 

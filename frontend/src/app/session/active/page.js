@@ -16,6 +16,7 @@ import {
 } from "@/utils/api";
 import { SessionTopBar } from "@/components/TopNav";
 import { Card, Button, Label, Pill, Alert, Spinner, Field, Input } from "@/components/ui";
+import LikertSurvey, { allAnswered as allSurveyAnswered } from "@/components/LikertSurvey";
 
 const PHASES = [
   { key: "connect", label: "Connect" },
@@ -337,10 +338,7 @@ export default function ActiveSessionMockup() {
 
   // 9. SURVEY NAVIGATION
   const handleSubmitSurvey = async () => {
-    const allAnswered = surveyQuestions.every(
-      (_, idx) => surveyAnswers[idx] && surveyAnswers[idx].trim() !== ""
-    );
-    if (!allAnswered) {
+    if (!allSurveyAnswered(surveyQuestions, surveyAnswers)) {
       alert("Please answer all questions.");
       return;
     }
@@ -349,7 +347,7 @@ export default function ActiveSessionMockup() {
       const sessionId = localStorage.getItem("currentSessionId");
       const answers = surveyQuestions.map((q, idx) => ({
         question_id: q.question_id,
-        answer_value: parseInt(surveyAnswers[idx], 10) || 0,
+        answer_value: Number(surveyAnswers[idx]),
       }));
 
       const res = await submitQuestionnaireAnswers(sessionId, selectedQuestionnaireId, answers);
@@ -412,12 +410,12 @@ export default function ActiveSessionMockup() {
     const hasImage = currentImg.url && currentImg.url.trim() !== "";
 
     return (
-      <Card className="max-w-4xl mx-auto p-6 anim-fade">
-        <div className="flex justify-between items-center mb-4">
+      <Card className="max-w-7xl mx-auto p-4 sm:p-5 anim-fade">
+        <div className="flex justify-between items-center mb-3">
           <Label>Image {currentImageIndex + 1} of {images.length}</Label>
           {currentImg.category && <Pill tone="neutral">{currentImg.category}</Pill>}
         </div>
-        <div className="w-full aspect-[16/10] bg-inset rounded-xl flex items-center justify-center border border-border overflow-hidden">
+        <div className="w-full h-[72vh] min-h-[420px] bg-inset rounded-xl flex items-center justify-center border border-border overflow-hidden">
           {hasImage ? (
             <img
               src={currentImg.url}
@@ -512,9 +510,7 @@ export default function ActiveSessionMockup() {
       );
     }
 
-    const allAnswered = surveyQuestions.every(
-      (_, idx) => surveyAnswers[idx] && surveyAnswers[idx].trim() !== ""
-    );
+    const ready = allSurveyAnswered(surveyQuestions, surveyAnswers);
 
     return (
       <Card className="max-w-4xl mx-auto p-8">
@@ -535,28 +531,15 @@ export default function ActiveSessionMockup() {
           </div>
         </div>
 
-        <div className="space-y-5">
-          {surveyQuestions.map((q, idx) => {
-            const statementObj = q.statement || {};
-            const questionText = statementObj[selectedLanguage] || statementObj.en || "Question text not available";
-            const answer = surveyAnswers[idx] || "";
-            return (
-              <Field key={q.question_id || idx} label={`Question ${idx + 1}`}>
-                <p className="text-[15px] text-ink mb-2 -mt-1">{questionText}</p>
-                <Input
-                  type="text"
-                  inputMode="numeric"
-                  placeholder="Your answer (number)"
-                  value={answer}
-                  onChange={(e) => setSurveyAnswers((prev) => ({ ...prev, [idx]: e.target.value }))}
-                />
-              </Field>
-            );
-          })}
-        </div>
+        <LikertSurvey
+          questions={surveyQuestions}
+          answers={surveyAnswers}
+          language={selectedLanguage}
+          onChange={(idx, value) => setSurveyAnswers((prev) => ({ ...prev, [idx]: value }))}
+        />
 
         <div className="flex justify-end pt-5 mt-6 border-t border-border">
-          <Button onClick={handleSubmitSurvey} disabled={!allAnswered}>
+          <Button onClick={handleSubmitSurvey} disabled={!ready}>
             Finish survey
           </Button>
         </div>
@@ -599,7 +582,14 @@ export default function ActiveSessionMockup() {
               <div className="mx-auto mb-6 grid h-16 w-16 place-items-center rounded-full bg-good-soft text-good text-3xl">✓</div>
               <h2 className="text-2xl font-bold tracking-tight text-ink mb-2">Session completed &amp; saved</h2>
               <p className="text-muted mb-8">All data has been recorded to the database.</p>
-              <Button size="lg" onClick={() => router.push("/history")}>Return to dashboard</Button>
+              <div className="flex flex-col sm:flex-row gap-3 justify-center">
+                <Button size="lg" onClick={() => router.push("/session/result")}>
+                  View session results →
+                </Button>
+                <Button size="lg" variant="subtle" onClick={() => router.push("/history")}>
+                  Return to dashboard
+                </Button>
+              </div>
             </div>
           )}
         </div>
