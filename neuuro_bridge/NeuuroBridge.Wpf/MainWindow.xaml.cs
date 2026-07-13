@@ -409,7 +409,7 @@ namespace NeuuroBridge.Wpf
 
             // Signal & contact
             var s = _ctl.Snapshot();
-            int q = SignalQuality.Compute(s.SignalReady, s.Channels);
+            int q = SignalQuality.Compute(s.SignalReady, s.Channels, s.ChannelLive);
             TxtQuality.Text = $"{q}/100 · {SignalQuality.Label(q)}";
             BarQuality.Value = q;
             BarQuality.Foreground = q >= 75 ? Good : q >= 40 ? Warn : Bad;
@@ -434,9 +434,12 @@ namespace NeuuroBridge.Wpf
                 string loc = ch < BridgeController.ChannelLocations.Length ? BridgeController.ChannelLocations[ch] : "";
                 bool? ok = s.Channels != null && ch < s.Channels.Length ? s.Channels[ch] : (bool?)null;
                 float k = s.Impedance != null && ch < s.Impedance.Length ? s.Impedance[ch] : float.NaN;
-                string contact = ok == null ? "?" : ok.Value ? "OK" : "--";
-                string kTxt = float.IsNaN(k) ? "n/a" : $"{k:F1} kΩ ({SignalQuality.GradeImpedance(k)})";
-                rows.Add($"{lbl} · {loc}  —  contact={contact,-2}   {kTxt}");
+                // A flat-lined electrode is dead however cheerful the SDK's contact flag is —
+                // say so loudly, since this is the failure that reads as healthy.
+                bool flat = s.ChannelLive != null && ch < s.ChannelLive.Length && !s.ChannelLive[ch];
+                string contact = flat ? "FLAT" : ok == null ? "?" : ok.Value ? "OK" : "--";
+                rows.Add($"{lbl} · {loc}  —  contact={contact,-4}   {SignalQuality.FormatImpedance(k)}"
+                    + (flat ? "   ⚠ NO SIGNAL — reseat this electrode" : ""));
             }
             ChannelList.ItemsSource = rows;
 

@@ -308,8 +308,7 @@ namespace NeuuroBridge
                         bool? ok = channels != null && ch < channels.Length ? channels[ch] : (bool?)null;
                         float k = imp != null && ch < imp.Length ? imp[ch] : float.NaN;
                         string contact = ok == null ? "?" : ok.Value ? "OK" : "--";
-                        string kTxt = float.IsNaN(k) ? "   n/a" : $"{k,6:F1}";
-                        Print($"     {ChannelLabels[ch],-4} contact={contact,-2}  impedance={kTxt} kΩ ({SignalQuality.GradeImpedance(k)})");
+                        Print($"     {ChannelLabels[ch],-4} contact={contact,-2}  impedance={SignalQuality.FormatImpedance(k)}");
                     }
                 }
                 Thread.Sleep(50);
