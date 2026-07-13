@@ -1,7 +1,12 @@
 "use client";
 import { useState, useEffect, useMemo, useCallback } from "react";
 import { useRouter } from "next/navigation";
-import { getSession, getSessionResultsFiltered, getSessionResultsBandPower } from "@/utils/api";
+import {
+  getSession,
+  getSessionResultsFiltered,
+  getSessionResultsBandPower,
+  getSessionResultEvents,
+} from "@/utils/api";
 import { SessionTopBar } from "@/components/TopNav";
 import { Card, CardHeader, Button, Label, Pill, Alert, Spinner } from "@/components/ui";
 import EegStripChart from "@/components/EegStripChart";
@@ -94,11 +99,36 @@ function fmtDuration(sec) {
   return m > 0 ? `${m}m ${s}s` : `${s}s`;
 }
 
+// Event rows → chart marker windows on the session's t_seconds axis. Handles both
+// the rich /results rows (url, prompt, per-event averages) and the slimmer
+// events_timing rows bundled with /results/filtered, which this falls back to.
+// Images and questions are numbered independently ("Image 3", "Question 2").
+function buildEventWindows(rows, startTime, durSec) {
+  const startMs = new Date(startTime).getTime();
+  const out = [];
+  let nImg = 0;
+  let nQ = 0;
+  for (const r of rows || []) {
+    const type = r.stimulus_type || (r.image_id != null ? "image" : "question");
+    const label = type === "image" ? `Image ${++nImg}` : `Question ${++nQ}`;
+    const from = (new Date(r.shown_at).getTime() - startMs) / 1000;
+    // hidden_at is coalesced server-side (next event / session end), but a still-
+    // open window would collapse the band to zero width — give it a visible span.
+    let to = r.hidden_at ? (new Date(r.hidden_at).getTime() - startMs) / 1000 : from + 1;
+    if (!(to > from)) to = from + 0.5;
+    if (Number.isNaN(from) || to <= 0 || from >= durSec) continue;
+    out.push({ ...r, type, label, from: Math.max(0, from), to: Math.min(durSec, to) });
+  }
+  return out;
+}
+
 export default function SessionResults() {
   const router = useRouter();
   const [samples, setSamples] = useState([]);
   const [bandRows, setBandRows] = useState([]);
   const [bandError, setBandError] = useState("");
+  const [events, setEvents] = useState([]);
+  const [selectedEvent, setSelectedEvent] = useState(null);
   const [isLoading, setIsLoading] = useState(true);
   const [error, setError] = useState("");
   const [patientName, setPatientName] = useState("");
@@ -146,12 +176,13 @@ export default function SessionResults() {
         }
         setDuration(durSec);
 
-        // 2. Filtered EEG (full-resolution; the chart decimates) and the 1 Hz
-        //    band-power stream, in parallel. A band-power failure only blanks the
-        //    lower cards — the EEG waveform still renders.
-        const [fRes, bRes] = await Promise.all([
+        // 2. Filtered EEG (full-resolution; the chart decimates), the 1 Hz
+        //    band-power stream, and the per-event summary, in parallel. Band or
+        //    event failures degrade their own features — the EEG still renders.
+        const [fRes, bRes, eRes] = await Promise.all([
           getSessionResultsFiltered(sessionId, 0, Math.ceil(durSec) + 1),
           getSessionResultsBandPower(sessionId).catch(() => null),
+          getSessionResultEvents(sessionId).catch(() => null),
         ]);
 
         if (!fRes.ok) throw new Error("filtered");
@@ -164,6 +195,19 @@ export default function SessionResults() {
         }
         setSamples(rows);
         setRange({ from: rows[0].t_seconds, to: rows[rows.length - 1].t_seconds });
+
+        // Stimulus markers: prefer the rich per-event rows (image URL, question
+        // prompt, per-event averages); fall back to the bare timing array that
+        // rides along with the filtered payload.
+        let eventRows = null;
+        if (eRes && eRes.ok) {
+          const eData = await eRes.json();
+          if (Array.isArray(eData) && eData.length) eventRows = eData;
+        }
+        if (!eventRows && Array.isArray(fData.events_timing) && fData.events_timing.length) {
+          eventRows = fData.events_timing;
+        }
+        if (eventRows) setEvents(buildEventWindows(eventRows, session.start_time, durSec));
 
         if (!bRes || !bRes.ok) {
           setBandError("Failed to load band powers, mental state and vitals.");
@@ -342,7 +386,11 @@ export default function SessionResults() {
             <Card className="overflow-hidden">
               <CardHeader
                 title="Filtered EEG"
-                subtitle="µV. Drag to zoom, scroll to pan — the stats update to the visible window."
+                subtitle={
+                  events.length
+                    ? "µV. Drag to zoom, scroll to pan — the stats update to the visible window. Shaded bands mark stimuli (teal = image, amber = question); click one to see what was shown."
+                    : "µV. Drag to zoom, scroll to pan — the stats update to the visible window."
+                }
                 actions={
                   <div
                     role="group"
@@ -373,6 +421,8 @@ export default function SessionResults() {
                   samples={samples}
                   channels={eegChannels}
                   overlay={eegView === "overlay"}
+                  events={events}
+                  onEventClick={setSelectedEvent}
                   onVisibleRangeChange={onEegRange}
                 />
               </div>
@@ -589,7 +639,103 @@ export default function SessionResults() {
           </>
         )}
       </div>
+
+      {selectedEvent != null && events[selectedEvent] && (
+        <StimulusModal event={events[selectedEvent]} onClose={() => setSelectedEvent(null)} />
+      )}
     </main>
+  );
+}
+
+// Click-through from an event band: the image (or math question) that was on
+// screen during that window, plus the band-power averages recorded while it showed.
+function StimulusModal({ event, onClose }) {
+  useEffect(() => {
+    const onKey = (e) => {
+      if (e.key === "Escape") onClose();
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [onClose]);
+
+  const isImage = event.type === "image";
+  const averages = [
+    { label: "Attention", value: event.avg_attention, digits: 2 },
+    { label: "Relaxation", value: event.avg_relaxation, digits: 2 },
+    { label: "Workload", value: event.avg_mental_workload, digits: 2 },
+    { label: "Heart rate", value: event.avg_heart_rate, digits: 0, unit: "bpm" },
+    { label: "SpO₂", value: event.avg_spo2, digits: 0, unit: "%" },
+  ].filter((a) => a.value != null);
+
+  return (
+    <div
+      className="fixed inset-0 z-50 grid place-items-center p-4 sm:p-8 bg-black/50 anim-fade"
+      role="dialog"
+      aria-modal="true"
+      aria-label={event.label}
+      onClick={onClose}
+    >
+      <div
+        className="w-full max-w-2xl rounded-2xl border border-border bg-surface shadow-2xl overflow-hidden"
+        onClick={(e) => e.stopPropagation()}
+      >
+        <div className="flex items-center justify-between gap-3 px-5 py-4 border-b border-border">
+          <div className="flex items-center gap-3">
+            <span className="font-semibold text-ink">{event.label}</span>
+            {event.category && <Pill tone="neutral">{event.category}</Pill>}
+            {event.difficulty && <Pill tone="neutral">{event.difficulty}</Pill>}
+          </div>
+          <button
+            onClick={onClose}
+            aria-label="Close"
+            className="grid h-8 w-8 place-items-center rounded-lg text-muted hover:text-ink hover:bg-inset transition-colors"
+          >
+            ✕
+          </button>
+        </div>
+
+        {isImage ? (
+          <div className="bg-inset grid place-items-center">
+            {event.url ? (
+              <img
+                src={event.url}
+                alt={event.filename || event.label}
+                className="max-h-[55vh] w-full object-contain"
+              />
+            ) : (
+              <p className="py-14 text-muted text-sm">Image details unavailable for this event.</p>
+            )}
+          </div>
+        ) : (
+          <div className="px-6 py-12 text-center">
+            {event.prompt ? (
+              <p className="font-mono text-3xl font-semibold text-ink tnum">{event.prompt}</p>
+            ) : (
+              <p className="text-muted text-sm">Question details unavailable for this event.</p>
+            )}
+          </div>
+        )}
+
+        <div className="px-5 py-4 border-t border-border flex flex-wrap items-center justify-between gap-x-6 gap-y-2">
+          <span className="font-mono text-[12px] text-muted tnum">
+            Shown {event.from.toFixed(1)}s – {event.to.toFixed(1)}s · {(event.to - event.from).toFixed(1)}s
+          </span>
+          {averages.length > 0 && (
+            <div className="flex flex-wrap gap-x-5 gap-y-1">
+              {averages.map((a) => (
+                <span key={a.label} className="text-[12px] text-muted">
+                  {a.label}{" "}
+                  <b className="font-mono text-ink tnum">
+                    {Number(a.value).toFixed(a.digits)}
+                    {a.unit ? ` ${a.unit}` : ""}
+                  </b>
+                </span>
+              ))}
+            </div>
+          )}
+        </div>
+      </div>
+    </div>
   );
 }
 
