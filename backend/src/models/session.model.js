@@ -80,10 +80,55 @@ const endSession = async (session_id, client = pool) => {
 
 const getSessionResult = async (session_id, client = pool) => {
     const { rows } = await query(client,
-        `SELECT e.image_id, avg(b.attention)  AS avg_attention, avg(b.relaxation) AS avg_relaxation
-        FROM events e JOIN band_powers b ON b.session_id = e.session_id AND b.time >= e.shown_at + interval '300 ms' AND b.time < e.hidden_at
-        WHERE e.session_id = $1 GROUP BY e.image_id`, [session_id]
-    )
+        `WITH event_windows AS (
+            SELECT
+                e.event_id, e.session_id, e.image_id, e.question_id, e.shown_at,
+                -- Fall back to next event or session end if hidden_at is missing
+                COALESCE(
+                    e.hidden_at,
+                    LEAD(e.shown_at) OVER (PARTITION BY e.session_id ORDER BY e.shown_at, e.event_id),
+                    s.end_time
+                ) AS effective_hidden_at,
+                (ROW_NUMBER() OVER (PARTITION BY e.session_id ORDER BY e.shown_at, e.event_id))::integer AS sequence_no
+            FROM public.events e
+            JOIN public.sessions s ON s.session_id = e.session_id
+            WHERE e.session_id = $1::uuid
+        )
+        SELECT
+            ew.event_id,
+            ew.sequence_no,
+            ew.shown_at,
+            ew.effective_hidden_at AS hidden_at,
+            CASE WHEN ew.image_id IS NOT NULL THEN 'image' ELSE 'question' END AS stimulus_type,
+            CASE 
+                WHEN ew.effective_hidden_at IS NULL THEN NULL
+                ELSE EXTRACT(EPOCH FROM (ew.effective_hidden_at - ew.shown_at))::double precision
+            END AS duration_s,
+            -- Image & Question specific fields
+            ew.image_id, i.filename, i.category, i.url,
+            ew.question_id, q.question_no, q.prompt, q.difficulty,
+            -- Aggregated statistics
+            stats.avg_attention, stats.avg_relaxation, stats.avg_mental_workload,
+            stats.avg_heart_rate, stats.avg_spo2, stats.sample_count
+        FROM event_windows ew
+        LEFT JOIN public.images i ON i.image_id = ew.image_id
+        LEFT JOIN public.questions q ON q.question_id = ew.question_id
+        LEFT JOIN LATERAL (
+            SELECT
+                AVG(b.attention)::double precision AS avg_attention,
+                AVG(b.relaxation)::double precision AS avg_relaxation,
+                AVG(b.mental_workload)::double precision AS avg_mental_workload,
+                AVG(b.heart_rate)::double precision AS avg_heart_rate,
+                AVG(b.spo2)::double precision AS avg_spo2,
+                COUNT(b."time")::integer AS sample_count
+            FROM public.band_powers b
+            WHERE b.session_id = ew.session_id
+            AND ew.effective_hidden_at IS NOT NULL
+            -- Account for latency / clock skew
+            AND b."time" >= ew.shown_at + ($2::integer * INTERVAL '1 millisecond')
+            AND b."time" < ew.effective_hidden_at
+        ) stats ON TRUE
+        ORDER BY ew.sequence_no ASC;`, [session_id, 300])
     return rows
 }
 const backfillSessionResults = async (session_id, client = pool) => {
@@ -143,6 +188,18 @@ const getSessionEEGResults = async ({ session_id, sample_rate, start_time, end_t
         [session_id, start_time, fromTs, toTs]
     )
 
+    const eventsTimingResult = await client.query(
+        `SELECT e.image_id, e.question_id, e.shown_at, e.hidden_at,
+            EXTRACT(EPOCH FROM (e.shown_at - $2::timestamptz))::double precision AS shown_at_seconds,
+            EXTRACT(EPOCH FROM (e.hidden_at - $2::timestamptz))::double precision AS hidden_at_seconds
+        FROM events e
+        WHERE e.session_id = $1::uuid
+          AND e.shown_at >= $3::timestamptz
+          AND e.shown_at < $4::timestamptz
+        ORDER BY e.shown_at ASC`,
+        [session_id, start_time, fromTs, toTs]
+    );
+
     return {
         session: {
             session_id,
@@ -151,7 +208,9 @@ const getSessionEEGResults = async ({ session_id, sample_rate, start_time, end_t
             end_time
         },
         sample_length: samplesResult.rowCount,
-        samples: samplesResult.rows
+        samples: samplesResult.rows,
+        events_length: eventsTimingResult.rowCount,
+        events_timing: eventsTimingResult.rows
     }
 }
 
