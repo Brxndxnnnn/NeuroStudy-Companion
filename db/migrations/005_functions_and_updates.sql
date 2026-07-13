@@ -162,3 +162,22 @@ GRANT SELECT            ON eeg_filtered_samples TO app_user;
 ALTER TABLE band_powers
       ADD COLUMN heart_rate integer,
       ADD COLUMN spo2       integer;
+
+CREATE TABLE elliptic_band_stats (
+    session_id      uuid        NOT NULL REFERENCES sessions(session_id) ON DELETE CASCADE,
+    time_start      timestamptz NOT NULL,
+    time_end        timestamptz NOT NULL,
+    window_size_s   real        NOT NULL,
+    step_s          real        NOT NULL,
+    channel         text        NOT NULL,
+    band            text        NOT NULL,
+    mean            real        NOT NULL,
+    std             real        NOT NULL,
+    peak            real        NOT NULL,
+    PRIMARY KEY (session_id, time_start, channel, band, window_size_s),
+    CONSTRAINT chk_channel CHECK (channel IN ('fp1','fp2','t3','t4')),
+    CONSTRAINT chk_band    CHECK (band IN ('delta','theta','alpha','beta','gamma'))
+);
+
+SELECT create_hypertable('elliptic_band_stats', by_range('time_start'));
+SELECT set_chunk_time_interval('elliptic_band_stats', INTERVAL '1 day');
