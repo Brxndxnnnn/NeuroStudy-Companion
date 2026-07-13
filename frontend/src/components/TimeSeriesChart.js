@@ -2,6 +2,9 @@
 import { useEffect, useRef } from "react";
 import * as echarts from "echarts";
 
+// Stable default so omitting the prop doesn't re-init the chart every render.
+const NO_EVENTS = [];
+
 /**
  * Multi-panel time-series line chart for the ~1 Hz band-power stream.
  *
@@ -13,15 +16,26 @@ import * as echarts from "echarts";
  *   samples   [{ t_seconds, ... }]                    ascending in t_seconds
  *   panels    [{ label, unit, series, min, max }]     one grid each, top→bottom
  *               series: [{ key, label, color }]       color may be a CSS var name
+ *   events    [{ from, to, label, type }]             stimulus windows (seconds); type "image"|"question"
  *   onVisibleRangeChange(startSec, endSec)            fired on zoom/pan
+ *   onEventClick(index)                               fired when an event band is clicked
  *   height    px per panel (default 190)
  */
-export default function TimeSeriesChart({ samples, panels, onVisibleRangeChange, height = 190 }) {
+export default function TimeSeriesChart({
+  samples,
+  panels,
+  events = NO_EVENTS,
+  onVisibleRangeChange,
+  onEventClick,
+  height = 190,
+}) {
   const elRef = useRef(null);
   const rangeCbRef = useRef(onVisibleRangeChange);
+  const eventCbRef = useRef(onEventClick);
   useEffect(() => {
     rangeCbRef.current = onVisibleRangeChange;
-  }, [onVisibleRangeChange]);
+    eventCbRef.current = onEventClick;
+  }, [onVisibleRangeChange, onEventClick]);
 
   const buildOption = () => {
     const s = getComputedStyle(document.documentElement);
@@ -38,6 +52,29 @@ export default function TimeSeriesChart({ samples, panels, onVisibleRangeChange,
     // every rebuild — that's also what recolors the traces on a theme flip.
     const resolve = (col) => (col.startsWith("--") ? v(col) : col);
 
+    // Same stimulus bands as the EEG strip chart: translucent, silent until
+    // hovered, click bubbles the event index so the page can show the stimulus.
+    const buildMarkArea = (showLabel) => {
+      if (!events.length) return undefined;
+      const imgColor = v("--accent-soft");
+      const qColor = v("--warn-soft");
+      return {
+        silent: false,
+        label: { show: false, position: "insideTop", fontSize: 10, color: c.muted },
+        emphasis: { label: { show: showLabel }, itemStyle: { opacity: 1 } },
+        itemStyle: { opacity: 0.65 },
+        data: events.map((ev, i) => [
+          {
+            xAxis: ev.from,
+            name: ev.label,
+            eventIndex: i,
+            itemStyle: { color: ev.type === "question" ? qColor : imgColor },
+          },
+          { xAxis: ev.to },
+        ]),
+      };
+    };
+
     const n = panels.length;
     // A panel whose series are all direct-labelled at the line end needs room on
     // the right for those labels; a legend-only panel doesn't.
@@ -45,7 +82,9 @@ export default function TimeSeriesChart({ samples, panels, onVisibleRangeChange,
     const rightPad = anyEndLabels ? 92 : 24;
     const showLegend = panels.some((p) => p.series.length > 1);
 
-    const topPad = showLegend ? 34 : 12;
+    // Event bands print their hover label at the top of the first panel; give
+    // it headroom or the text gets clipped by the canvas edge.
+    const topPad = (showLegend ? 34 : 12) + (events.length ? 16 : 0);
     const gap = 30;
     const grids = [];
     const xAxes = [];
@@ -87,9 +126,12 @@ export default function TimeSeriesChart({ samples, panels, onVisibleRangeChange,
       });
 
       const directLabel = panel.series.length > 1 && panel.series.length <= 4;
-      panel.series.forEach((ser) => {
+      panel.series.forEach((ser, si) => {
         const color = resolve(ser.color);
         series.push({
+          // Bands attach to one series per grid (they'd stack translucency
+          // otherwise); the hover label only prints on the top panel.
+          markArea: si === 0 ? buildMarkArea(i === 0) : undefined,
           name: ser.label,
           type: "line",
           xAxisIndex: i,
@@ -209,6 +251,13 @@ export default function TimeSeriesChart({ samples, panels, onVisibleRangeChange,
     chart.on("datazoom", emitRange);
     emitRange();
 
+    // Event-band clicks bubble the band's index back to the page, which shows
+    // the stimulus that was on screen during that window.
+    chart.on("click", (params) => {
+      if (params.componentType === "markArea" && params.data?.eventIndex != null)
+        eventCbRef.current?.(params.data.eventIndex);
+    });
+
     const ro = new ResizeObserver(() => chart.resize());
     ro.observe(elRef.current);
 
@@ -225,9 +274,14 @@ export default function TimeSeriesChart({ samples, panels, onVisibleRangeChange,
       chart.dispose();
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [samples, panels, height]);
+  }, [samples, panels, height, events]);
 
   const showLegend = panels.some((p) => p.series.length > 1);
-  const totalH = panels.length * height + (showLegend ? 34 : 12) + 46 + 30 * (panels.length - 1);
+  const totalH =
+    panels.length * height +
+    (showLegend ? 34 : 12) +
+    (events.length ? 16 : 0) +
+    46 +
+    30 * (panels.length - 1);
   return <div ref={elRef} className="w-full" style={{ height: `${totalH}px` }} />;
 }

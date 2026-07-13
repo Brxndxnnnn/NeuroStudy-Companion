@@ -18,6 +18,9 @@ import { SessionTopBar } from "@/components/TopNav";
 import { Card, Button, Label, Pill, Alert, Spinner, Field, Input } from "@/components/ui";
 import LikertSurvey, { allAnswered as allSurveyAnswered } from "@/components/LikertSurvey";
 
+// How long each stimulus image stays on screen (ms).
+const IMAGE_DISPLAY_MS = 3000;
+
 const PHASES = [
   { key: "connect", label: "Connect" },
   { key: "images", label: "Images" },
@@ -277,7 +280,7 @@ export default function ActiveSessionMockup() {
           await logImageHidden();
           setCurrentStep("math");
         }
-      }, 1000);
+      }, IMAGE_DISPLAY_MS);
     }
     return () => clearTimeout(timer);
   }, [currentStep, currentImageIndex, images]);

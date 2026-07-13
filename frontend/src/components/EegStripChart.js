@@ -5,6 +5,35 @@ import * as echarts from "echarts";
 // Stable default so omitting the prop doesn't re-init the chart every render.
 const NO_EVENTS = [];
 
+// A live electrode swings by tens of µV. A railed one — the SDK keeps reporting it as
+// "connected" while its ADC sits on a constant — arrives as a sub-0.1 µV DC residue. Left to
+// autoscale, that dither fills the strip and reads as a healthy waveform, so a channel under
+// this peak-to-peak gets a fixed axis instead and is drawn (and labelled) as the flat line it is.
+const FLAT_PKPK_UV = 0.5;
+const FLAT_AXIS_UV = 1; // half-height of the pinned axis for a flat channel
+
+// Peak-to-peak of one channel across the whole session.
+function channelPkPk(samples, key) {
+  let min = Infinity;
+  let max = -Infinity;
+  for (const s of samples) {
+    const v = s[key];
+    if (v == null || Number.isNaN(v)) continue;
+    if (v < min) min = v;
+    if (v > max) max = v;
+  }
+  if (min === Infinity) return { pkpk: 0, mid: 0, empty: true };
+  return { pkpk: max - min, mid: (min + max) / 2, empty: false };
+}
+
+// µV values span orders of magnitude here (a dead channel sits near 0.02), so a fixed
+// 1 decimal place would print every one of them as "0.0".
+function fmtUv(v) {
+  if (v == null || Number.isNaN(v)) return "—";
+  const a = Math.abs(v);
+  return v.toFixed(a >= 10 ? 1 : a >= 1 ? 2 : 3);
+}
+
 /**
  * Stacked "strip chart" small-multiples for the filtered EEG — one canvas panel
  * per channel, sharing a single time axis and one synced dataZoom (drag / scroll
@@ -99,7 +128,9 @@ export default function EegStripChart({
           textStyle: { color: c.ink, fontSize: 12 },
           inactiveColor: c.muted,
         },
-        grid: [{ left: 68, right: 18, top: 34, bottom: 56 }],
+        // Extra headroom when event bands exist: their hover label prints at the
+        // top of the band and would otherwise be clipped by the canvas edge.
+        grid: [{ left: 68, right: 18, top: events.length ? 50 : 34, bottom: 56 }],
         xAxis: [{
           type: "value",
           min: "dataMin",
@@ -145,7 +176,7 @@ export default function EegStripChart({
             if (!ps || !ps.length) return "";
             const t = ps[0].value[0];
             const rows = ps
-              .map((p) => `<div style="display:flex;justify-content:space-between;gap:16px"><span style="color:${p.color}">${p.seriesName}</span><b>${p.value[1]?.toFixed(1)} µV</b></div>`)
+              .map((p) => `<div style="display:flex;justify-content:space-between;gap:16px"><span style="color:${p.color}">${p.seriesName}</span><b>${fmtUv(p.value[1])} µV</b></div>`)
               .join("");
             return `<div style="font-family:monospace;font-size:11px;color:${c.muted};margin-bottom:4px">t = ${t.toFixed(2)} s</div>${rows}`;
           },
@@ -169,7 +200,9 @@ export default function EegStripChart({
     }
 
     // Stacked small-multiples: equal strips with small gaps, room for the slider.
-    const topPad = 3, bottomPad = 16, gap = 4;
+    // Event bands print their hover label at the top of the first strip, so give
+    // it headroom or the text gets clipped by the canvas edge.
+    const topPad = events.length ? 6 : 3, bottomPad = 16, gap = 4;
     const stripH = (100 - topPad - bottomPad - gap * (n - 1)) / n;
 
     const grids = [];
@@ -181,6 +214,8 @@ export default function EegStripChart({
       const color = chColor(ch);
       const top = topPad + i * (stripH + gap);
       const isLast = i === n - 1;
+      const { pkpk, mid, empty } = channelPkPk(samples, ch.key);
+      const flat = !empty && pkpk < FLAT_PKPK_UV;
       grids.push({ left: 68, right: 18, top: `${top}%`, height: `${stripH}%` });
       xAxes.push({
         type: "value",
@@ -195,11 +230,22 @@ export default function EegStripChart({
       yAxes.push({
         type: "value",
         gridIndex: i,
-        name: ch.label,
+        // Name the failure on the axis itself — the strip is the first thing read.
+        name: flat ? `${ch.label}\nNO SIGNAL` : ch.label,
         nameLocation: "middle",
         nameGap: 46,
-        nameTextStyle: { color, fontWeight: 700, fontSize: 12, fontFamily: "monospace" },
-        scale: true,
+        nameTextStyle: {
+          color: flat ? c.muted : color,
+          fontWeight: 700,
+          fontSize: 12,
+          fontFamily: "monospace",
+          lineHeight: 14,
+        },
+        // A flat channel gets a fixed axis so it draws as the flat line it is; autoscaling
+        // its sub-µV dither to fill the strip is what made a dead electrode look alive.
+        ...(flat
+          ? { min: mid - FLAT_AXIS_UV, max: mid + FLAT_AXIS_UV, scale: false }
+          : { scale: true }),
         axisLine: { show: false },
         axisTick: { show: false },
         axisLabel: { color: c.muted, fontSize: 10, showMinLabel: false, showMaxLabel: false },
@@ -246,7 +292,7 @@ export default function EegStripChart({
           if (!ps || !ps.length) return "";
           const t = ps[0].value[0];
           const rows = ps
-            .map((p) => `<div style="display:flex;justify-content:space-between;gap:16px"><span style="color:${p.color}">${p.seriesName}</span><b>${p.value[1]?.toFixed(1)} µV</b></div>`)
+            .map((p) => `<div style="display:flex;justify-content:space-between;gap:16px"><span style="color:${p.color}">${p.seriesName}</span><b>${fmtUv(p.value[1])} µV</b></div>`)
             .join("");
           return `<div style="font-family:monospace;font-size:11px;color:${c.muted};margin-bottom:4px">t = ${t.toFixed(2)} s</div>${rows}`;
         },
