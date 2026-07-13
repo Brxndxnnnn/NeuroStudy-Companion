@@ -2,6 +2,9 @@
 import { useEffect, useRef } from "react";
 import * as echarts from "echarts";
 
+// Stable default so omitting the prop doesn't re-init the chart every render.
+const NO_EVENTS = [];
+
 /**
  * Stacked "strip chart" small-multiples for the filtered EEG — one canvas panel
  * per channel, sharing a single time axis and one synced dataZoom (drag / scroll
@@ -11,15 +14,26 @@ import * as echarts from "echarts";
  *   samples   [{ t_seconds, <channel keys...> }]  ascending in t_seconds
  *   channels  [{ key, label, color }]             one strip each, top→bottom
  *   overlay   draw every channel on one shared µV axis instead of stacked strips
+ *   events    [{ from, to, label, type }]         stimulus windows (seconds); type "image"|"question"
  *   onVisibleRangeChange(startSec, endSec)         fired on zoom/pan (throttled by ECharts)
+ *   onEventClick(index)                            fired when an event band is clicked
  */
-export default function EegStripChart({ samples, channels, overlay = false, onVisibleRangeChange }) {
+export default function EegStripChart({
+  samples,
+  channels,
+  overlay = false,
+  events = NO_EVENTS,
+  onVisibleRangeChange,
+  onEventClick,
+}) {
   const elRef = useRef(null);
   const chartRef = useRef(null);
   const rangeCbRef = useRef(onVisibleRangeChange);
+  const eventCbRef = useRef(onEventClick);
   useEffect(() => {
     rangeCbRef.current = onVisibleRangeChange;
-  }, [onVisibleRangeChange]);
+    eventCbRef.current = onEventClick;
+  }, [onVisibleRangeChange, onEventClick]);
 
   // Read live theme colors from CSS variables so the canvas matches light/dark.
   const themeColors = () => {
@@ -43,6 +57,31 @@ export default function EegStripChart({ samples, channels, overlay = false, onVi
     const cssv = (name) => getComputedStyle(document.documentElement).getPropertyValue(name).trim();
     const chColor = (ch) => (ch.color.startsWith("--") ? cssv(ch.color) : ch.color);
     const n = channels.length;
+
+    // Stimulus windows as translucent bands behind the traces. Events are dense
+    // (~1 s each), so bands stay silent by default — the label surfaces on hover
+    // and the click hands off to the page (which shows the image / question).
+    // markArea click payloads carry our eventIndex back out.
+    const buildMarkArea = (showLabel = true) => {
+      if (!events.length) return undefined;
+      const imgColor = cssv("--accent-soft");
+      const qColor = cssv("--warn-soft");
+      return {
+        silent: false,
+        label: { show: false, position: "insideTop", fontSize: 10, color: c.muted },
+        emphasis: { label: { show: showLabel }, itemStyle: { opacity: 1 } },
+        itemStyle: { opacity: 0.65 },
+        data: events.map((ev, i) => [
+          {
+            xAxis: ev.from,
+            name: ev.label,
+            eventIndex: i,
+            itemStyle: { color: ev.type === "question" ? qColor : imgColor },
+          },
+          { xAxis: ev.to },
+        ]),
+      };
+    };
 
     // Overlay: every channel on one shared µV axis, so amplitudes can be compared
     // directly (and identical traces would sit exactly on top of one another).
@@ -81,7 +120,7 @@ export default function EegStripChart({ samples, channels, overlay = false, onVi
           axisLabel: { color: c.muted, fontSize: 10 },
           splitLine: { lineStyle: { color: c.border, opacity: 0.5 } },
         }],
-        series: channels.map((ch) => ({
+        series: channels.map((ch, i) => ({
           name: ch.label,
           type: "line",
           showSymbol: false,
@@ -90,6 +129,9 @@ export default function EegStripChart({ samples, channels, overlay = false, onVi
           lineStyle: { width: 1, color: chColor(ch), opacity: 0.85 },
           itemStyle: { color: chColor(ch) },
           emphasis: { focus: "series" },
+          // One grid — bands attach to the first series only, or the translucent
+          // fills would stack up once per channel.
+          markArea: i === 0 ? buildMarkArea() : undefined,
           data: samples.map((s) => [s.t_seconds, s[ch.key]]),
         })),
         axisPointer: { lineStyle: { color: c.muted, opacity: 0.5 }, label: { show: false } },
@@ -173,6 +215,10 @@ export default function EegStripChart({ samples, channels, overlay = false, onVi
         large: true,
         lineStyle: { width: 1, color },
         emphasis: { disabled: true },
+        // Each strip is its own grid, so every strip gets the bands — together
+        // they read as one column spanning the whole chart. Labels only surface
+        // on the top strip to avoid printing 4 copies on hover.
+        markArea: buildMarkArea(i === 0),
         data: samples.map((s) => [s.t_seconds, s[ch.key]]),
       });
     });
@@ -244,6 +290,13 @@ export default function EegStripChart({ samples, channels, overlay = false, onVi
     chart.on("datazoom", emitRange);
     emitRange(); // initial full-range stats
 
+    // Event-band clicks bubble the band's index back to the page, which shows
+    // the stimulus that was on screen during that window.
+    chart.on("click", (params) => {
+      if (params.componentType === "markArea" && params.data?.eventIndex != null)
+        eventCbRef.current?.(params.data.eventIndex);
+    });
+
     const ro = new ResizeObserver(() => chart.resize());
     ro.observe(elRef.current);
 
@@ -262,7 +315,7 @@ export default function EegStripChart({ samples, channels, overlay = false, onVi
       chartRef.current = null;
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [samples, channels, overlay]);
+  }, [samples, channels, overlay, events]);
 
   const height = overlay ? 360 : Math.max(280, channels.length * 96 + 48);
   return <div ref={elRef} className="w-full" style={{ height: `${height}px` }} />;

@@ -203,6 +203,13 @@ export async function getSessionResultsFiltered(sessionId, startSeconds, endSeco
   );
   return res;
 }
+// Per-event summary: one row per stimulus event (image or question) with its
+// shown/hidden window, the image URL / question prompt, and band-power averages
+// over the window. Drives the event markers + click-to-view on the results page.
+export async function getSessionResultEvents(sessionId) {
+  const res = await fetchWithAuth(`${BASE_URL}/sessions/${sessionId}/results`);
+  return res;
+}
 // Band powers, mental-state indices and vitals — one row/second, so the whole
 // session is cheap to pull. Omit the bounds to get the full session.
 export async function getSessionResultsBandPower(sessionId, startSeconds, endSeconds) {
