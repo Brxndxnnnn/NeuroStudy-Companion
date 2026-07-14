@@ -446,6 +446,10 @@ namespace NeuuroBridge
             // completed; the frontend owns the middle 'claimed' transition).
             try { _db?.RequestComplete(); } catch { /* ignore */ }
             try { _db?.Dispose(); } catch { /* ignore */ }
+            // After Dispose — its final drain is what advances the sample counter to the last frame
+            // that actually arrived, which is the reference point a trailing gap is measured from.
+            // Before SessionStopped, so the end-of-session summary reads the corrected dropout figure.
+            try { _db?.SealTrailingGap(RecordingStopUtc); } catch { /* ignore */ }
             _prepared = false;               // next Start prepares a new session row + pairing code
             _recordingConfirmed = false;
             SetSyncStatus("completed");
