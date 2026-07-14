@@ -90,7 +90,11 @@ function buildEllipticRows(rows, sessionStart) {
     const ms = new Date(r.time_start).getTime();
     let w = byWindow.get(ms);
     if (!w) {
-      w = { t_seconds: (ms - t0) / 1000 };
+      w = {
+        t_seconds: (ms - t0) / 1000,
+        t_end: (new Date(r.time_end).getTime() - t0) / 1000,
+        window_number: r.window_number,
+      };
       byWindow.set(ms, w);
     }
     for (const b of BANDS) {
@@ -225,6 +229,11 @@ export default function SessionResults() {
   const [ellipticChannel, setEllipticChannel] = useState("fp1");
   const [ellipticStat, setEllipticStat] = useState("std");
   const [ellipticRange, setEllipticRange] = useState({ from: 0, to: 0 });
+  // Window inspector: index into ellipticRows (not window_number — that is the
+  // worker's own 1-based counter and need not be contiguous if it ever skips a
+  // window, so it is displayed but never used to index).
+  const [ellipticIdx, setEllipticIdx] = useState(0);
+  const [ellipticView, setEllipticView] = useState("timeline"); // "timeline" | "window"
   const [events, setEvents] = useState([]);
   const [selectedEvent, setSelectedEvent] = useState(null);
   const [isLoading, setIsLoading] = useState(true);
@@ -480,6 +489,34 @@ export default function SessionResults() {
       ),
     }));
   }, [ellipticRows, ellipticStat, ellipticRange]);
+
+  // ── Single-window inspector ───────────────────────────────────────────────
+  // One window is a single instant on the timeline but a full 4-channel x 5-band
+  // x 3-stat snapshot underneath — 60 numbers the timeline can only show one
+  // slice of at a time. Stepping through windows is the way to read what the
+  // spectrum actually did while one image was on screen.
+  const ellipticWindow = ellipticRows[ellipticIdx] ?? null;
+
+  // Values for THIS window only — not averaged over the visible range, which is
+  // what the profile chart below the timeline shows.
+  const ellipticWindowProfile = useMemo(() => {
+    if (!ellipticWindow) return [];
+    return CHANNELS.map((ch) => ({
+      label: ch.label,
+      values: Object.fromEntries(
+        BANDS.map((b) => [b.key, ellipticWindow[`${ch.prefix}_${b.key}_${ellipticStat}`] ?? null])
+      ),
+    }));
+  }, [ellipticWindow, ellipticStat]);
+
+  // Which stimulus was on screen during this window. A window straddling two
+  // stimuli belongs cleanly to neither, so match on its midpoint and say when it
+  // sits in a gap rather than silently attributing it to the nearest one.
+  const ellipticWindowEvent = useMemo(() => {
+    if (!ellipticWindow || !events.length) return null;
+    const mid = (ellipticWindow.t_seconds + ellipticWindow.t_end) / 2;
+    return events.find((e) => mid >= e.from && mid < e.to) ?? null;
+  }, [ellipticWindow, events]);
 
   // A railed electrode still produces rows here — an elliptic filter over a
   // constant returns a near-zero amplitude, which plots as a perfectly flat trace
@@ -770,7 +807,26 @@ export default function SessionResults() {
                     }
                     actions={
                       ellipticRows.length ? (
-                        <div className="flex gap-2">
+                        <div className="flex flex-wrap gap-2">
+                          <div className="flex items-center gap-1 rounded-lg bg-inset p-1">
+                            {[
+                              { key: "timeline", label: "Timeline" },
+                              { key: "window", label: "By window" },
+                            ].map((v) => (
+                              <button
+                                key={v.key}
+                                onClick={() => setEllipticView(v.key)}
+                                aria-pressed={ellipticView === v.key}
+                                className={`px-3 py-1.5 rounded-md text-[12px] font-semibold transition-colors ${
+                                  ellipticView === v.key
+                                    ? "bg-surface text-ink shadow-sm"
+                                    : "text-muted hover:text-ink"
+                                }`}
+                              >
+                                {v.label}
+                              </button>
+                            ))}
+                          </div>
                           <div className="flex items-center gap-1 rounded-lg bg-inset p-1">
                             {ELLIPTIC_STATS.map((s) => (
                               <button
@@ -834,16 +890,140 @@ export default function SessionResults() {
                     </div>
                   ) : (
                     <>
-                      <div className="p-3 sm:p-4">
-                        <TimeSeriesChart
-                          samples={ellipticRows}
-                          panels={ellipticPanels}
-                          events={events}
-                          onEventClick={setSelectedEvent}
-                          onVisibleRangeChange={onEllipticRange}
-                          height={220}
-                        />
-                      </div>
+                      {ellipticView === "window" ? (
+                        <div className="p-4 sm:p-5 space-y-4">
+                          {/* Stepper. window_number is the worker's own 1-based
+                              counter — shown, but never used to index, so a skipped
+                              window can't shift the whole inspector by one. */}
+                          <div className="flex flex-wrap items-center gap-3">
+                            <Button
+                              variant="secondary"
+                              onClick={() => setEllipticIdx((i) => Math.max(0, i - 1))}
+                              disabled={ellipticIdx === 0}
+                            >
+                              ← Prev
+                            </Button>
+                            <div className="min-w-[13rem] text-center">
+                              <div className="font-mono text-[15px] font-semibold text-ink tnum">
+                                Window {ellipticWindow?.window_number ?? ellipticIdx + 1}
+                                <span className="text-muted font-normal">
+                                  {" "}
+                                  of {ellipticRows.length}
+                                </span>
+                              </div>
+                              <div className="font-mono text-[11px] text-muted tnum">
+                                {ellipticWindow
+                                  ? `${ellipticWindow.t_seconds.toFixed(2)}s – ${ellipticWindow.t_end.toFixed(2)}s`
+                                  : "—"}
+                              </div>
+                            </div>
+                            <Button
+                              variant="secondary"
+                              onClick={() =>
+                                setEllipticIdx((i) => Math.min(ellipticRows.length - 1, i + 1))
+                              }
+                              disabled={ellipticIdx >= ellipticRows.length - 1}
+                            >
+                              Next →
+                            </Button>
+
+                            <input
+                              type="range"
+                              min={0}
+                              max={Math.max(0, ellipticRows.length - 1)}
+                              value={ellipticIdx}
+                              onChange={(e) => setEllipticIdx(Number(e.target.value))}
+                              aria-label="Window"
+                              className="flex-1 min-w-[10rem] accent-[var(--accent)]"
+                            />
+                          </div>
+
+                          {/* What was on screen. A window straddling two stimuli
+                              belongs cleanly to neither — say "between stimuli"
+                              rather than attributing it to whichever is nearest. */}
+                          <div className="flex items-center gap-2">
+                            {ellipticWindowEvent ? (
+                              <button
+                                onClick={() =>
+                                  setSelectedEvent(events.indexOf(ellipticWindowEvent))
+                                }
+                                className="text-[12px] font-semibold text-accent hover:underline"
+                              >
+                                Showing: {ellipticWindowEvent.label} →
+                              </button>
+                            ) : (
+                              <span className="text-[12px] text-muted">
+                                Between stimuli — no image or question on screen.
+                              </span>
+                            )}
+                          </div>
+
+                          <div>
+                            <div className="mb-1">
+                              <Label>
+                                {ELLIPTIC_STATS.find((s) => s.key === ellipticStat)?.label} amplitude
+                                by channel · this window only (µV)
+                              </Label>
+                            </div>
+                            <BandProfileChart groups={ellipticWindowProfile} bands={BANDS} />
+                          </div>
+
+                          {/* The full 4x5 grid for this window — the timeline can
+                              only ever show one channel at a time. */}
+                          <div className="overflow-x-auto">
+                            <table className="w-full text-[12px] tnum">
+                              <thead>
+                                <tr className="text-muted">
+                                  <th className="text-left font-semibold py-2 pr-4">Channel</th>
+                                  {BANDS.map((b) => (
+                                    <th key={b.key} className="text-right font-semibold py-2 px-3">
+                                      <span className="inline-flex items-center gap-1.5">
+                                        <span
+                                          className="h-2 w-2 rounded-sm"
+                                          style={{ background: `var(${b.color})` }}
+                                        />
+                                        {b.greek} {b.label}
+                                      </span>
+                                    </th>
+                                  ))}
+                                </tr>
+                              </thead>
+                              <tbody>
+                                {CHANNELS.map((ch) => (
+                                  <tr key={ch.prefix} className="border-t border-border">
+                                    <td className="py-2 pr-4 font-mono font-semibold text-ink">
+                                      {ch.label}
+                                    </td>
+                                    {BANDS.map((b) => (
+                                      <td
+                                        key={b.key}
+                                        className="py-2 px-3 text-right font-mono text-ink"
+                                      >
+                                        {fmtUv(
+                                          ellipticWindow?.[
+                                            `${ch.prefix}_${b.key}_${ellipticStat}`
+                                          ]
+                                        )}
+                                      </td>
+                                    ))}
+                                  </tr>
+                                ))}
+                              </tbody>
+                            </table>
+                          </div>
+                        </div>
+                      ) : (
+                        <div className="p-3 sm:p-4">
+                          <TimeSeriesChart
+                            samples={ellipticRows}
+                            panels={ellipticPanels}
+                            events={events}
+                            onEventClick={setSelectedEvent}
+                            onVisibleRangeChange={onEllipticRange}
+                            height={220}
+                          />
+                        </div>
+                      )}
 
                       {ellipticStat === "mean" && (
                         <div className="px-5 pb-2">
@@ -855,14 +1035,14 @@ export default function SessionResults() {
                         </div>
                       )}
 
-                      {ellipticAxis.clipped > 0 && (
+                      {ellipticView === "timeline" && ellipticAxis.clipped > 0 && (
                         <div className="px-5 pb-2">
                           <Alert tone="warn">
                             Axis capped at {fmtUv(ellipticAxis.max)} µV — {ellipticAxis.clipped}{" "}
                             {ellipticAxis.clipped === 1 ? "value" : "values"} run above it, peaking
                             at {fmtUv(ellipticAxis.maxValue)} µV. Excursions that large are
                             electrode artefacts, not EEG; without the cap they would flatten every
-                            real trace onto the axis.
+                            real trace onto the axis. Step through them in “By window”.
                           </Alert>
                         </div>
                       )}
@@ -877,49 +1057,57 @@ export default function SessionResults() {
                         </div>
                       )}
 
-                      <div className="border-t border-border px-5 py-4">
-                        <div className="flex items-center justify-between mb-3">
-                          <Label>
-                            {ELLIPTIC_STATS.find((s) => s.key === ellipticStat)?.label} amplitude ·{" "}
-                            {CHANNELS.find((c) => c.prefix === ellipticChannel)?.label}
-                          </Label>
-                          <span className="font-mono text-[11px] text-muted tnum">
-                            {ellipticRange.from.toFixed(1)}s – {ellipticRange.to.toFixed(1)}s
-                          </span>
-                        </div>
-                        <div className="grid grid-cols-2 sm:grid-cols-5 gap-3">
-                          {ellipticStats.map((b) => (
-                            <div
-                              key={b.key}
-                              className="rounded-xl border border-border bg-inset/40 px-4 py-3"
-                            >
-                              <div className="flex items-center gap-2 mb-1.5">
-                                <span
-                                  className="h-2.5 w-2.5 rounded-sm"
-                                  style={{ background: `var(${b.color})` }}
-                                />
-                                <span className="text-[12px] font-semibold text-ink">
-                                  {b.greek} {b.label}
-                                </span>
-                              </div>
-                              <div className="font-mono text-[15px] font-semibold text-ink tnum">
-                                {fmtUv(b.mean)}
-                                <span className="ml-1 text-[11px] font-normal text-muted">µV</span>
-                              </div>
+                      {/* Averages over the chart's visible range — meaningless in
+                          the single-window view, which has no range. */}
+                      {ellipticView === "timeline" && (
+                        <>
+                          <div className="border-t border-border px-5 py-4">
+                            <div className="flex items-center justify-between mb-3">
+                              <Label>
+                                {ELLIPTIC_STATS.find((s) => s.key === ellipticStat)?.label} amplitude ·{" "}
+                                {CHANNELS.find((c) => c.prefix === ellipticChannel)?.label}
+                              </Label>
+                              <span className="font-mono text-[11px] text-muted tnum">
+                                {ellipticRange.from.toFixed(1)}s – {ellipticRange.to.toFixed(1)}s
+                              </span>
                             </div>
-                          ))}
-                        </div>
-                      </div>
+                            <div className="grid grid-cols-2 sm:grid-cols-5 gap-3">
+                              {ellipticStats.map((b) => (
+                                <div
+                                  key={b.key}
+                                  className="rounded-xl border border-border bg-inset/40 px-4 py-3"
+                                >
+                                  <div className="flex items-center gap-2 mb-1.5">
+                                    <span
+                                      className="h-2.5 w-2.5 rounded-sm"
+                                      style={{ background: `var(${b.color})` }}
+                                    />
+                                    <span className="text-[12px] font-semibold text-ink">
+                                      {b.greek} {b.label}
+                                    </span>
+                                  </div>
+                                  <div className="font-mono text-[15px] font-semibold text-ink tnum">
+                                    {fmtUv(b.mean)}
+                                    <span className="ml-1 text-[11px] font-normal text-muted">
+                                      µV
+                                    </span>
+                                  </div>
+                                </div>
+                              ))}
+                            </div>
+                          </div>
 
-                      <div className="border-t border-border px-3 sm:px-4 py-4">
-                        <div className="px-2 mb-1">
-                          <Label>
-                            Amplitude by channel · visible window ·{" "}
-                            {ELLIPTIC_STATS.find((s) => s.key === ellipticStat)?.label} µV
-                          </Label>
-                        </div>
-                        <BandProfileChart groups={ellipticProfile} bands={BANDS} />
-                      </div>
+                          <div className="border-t border-border px-3 sm:px-4 py-4">
+                            <div className="px-2 mb-1">
+                              <Label>
+                                Amplitude by channel · visible window ·{" "}
+                                {ELLIPTIC_STATS.find((s) => s.key === ellipticStat)?.label} µV
+                              </Label>
+                            </div>
+                            <BandProfileChart groups={ellipticProfile} bands={BANDS} />
+                          </div>
+                        </>
+                      )}
                     </>
                   )}
                 </Card>
