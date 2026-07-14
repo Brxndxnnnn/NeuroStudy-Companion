@@ -111,6 +111,39 @@ namespace NeuuroBridge
         public const int RawRowBytes = 66, FilteredRowBytes = 66, SummaryRowBytes = 162, BandRowBytes = 242;
 
         private const int ChannelCount    = 4;        // Fp1, Fp2, T4, T3 (SDK frame order)
+
+        /// <summary>
+        /// Channel positions within an SDK frame. The SenzeBand delivers its four channels in the
+        /// order Fp1, Fp2, T4, T3 — note that T4 comes BEFORE T3, so index 2 is T4 and index 3 is T3.
+        /// Every DB table stores them as fp1, fp2, t3, t4.
+        ///
+        /// Always address frame data through these names, never a bare index. Getting the temporal
+        /// pair backwards writes left-hemisphere signal into the right-hemisphere column: nothing
+        /// throws, no test fails, and the only symptom is that lateralised activity appears on the
+        /// wrong side of the head — which would silently invert any asymmetry result. Nothing
+        /// downstream can catch it either, because the backend, the frontend and ml_service all
+        /// address channels by COLUMN NAME and simply trust whatever the bridge wrote here.
+        /// </summary>
+        private static class FrameIdx
+        {
+            public const int Fp1 = 0;
+            public const int Fp2 = 1;
+            public const int T4  = 2;
+            public const int T3  = 3;
+        }
+
+        /// <summary>
+        /// Frame indices in the order every table lists its channel columns (fp1, fp2, t3, t4).
+        /// Every COPY below writes its channel columns in this order, so a column list and the
+        /// values filling it can only ever be read one way.
+        /// </summary>
+        private static readonly int[] SchemaChannelOrder = { FrameIdx.Fp1, FrameIdx.Fp2, FrameIdx.T3, FrameIdx.T4 };
+
+        // How far real (arrival) time may lead the sample counter before the shortfall is treated as
+        // genuine upstream frame loss rather than ordinary BLE burst latency (~1–2 s observed).
+        // Shared by the raw and filtered drift guards and by SealTrailingGap.
+        private static readonly long MaxDriftTicks = 3 * TimeSpan.TicksPerSecond;
+
         private const int FlushIntervalMs = 500;     // batch window for eeg_readings (~2 flushes/s)
         private const int MaxQueued       = 20000;    // bound each summary queue so a dead DB can't OOM us
         // Raw is 250 rows/s, and ML cannot tolerate gaps — give it a much deeper buffer
@@ -509,9 +542,7 @@ namespace NeuuroBridge
         {
             if (_rawQ.IsEmpty) return 0;
             long periodTicks = TimeSpan.TicksPerSecond / _sampleRate;   // 40000 ticks = 4 ms @ 250 Hz (µs-aligned)
-            // How far real (arrival) time may lead the counter before we treat the shortfall as
-            // genuine frame loss and resync. Must exceed normal burst latency (~1–2 s observed).
-            long maxDriftTicks = 3 * TimeSpan.TicksPerSecond;
+            long maxDriftTicks = MaxDriftTicks;
             int n = 0;
             using (var w = _conn.BeginBinaryImport(
                 "COPY eeg_raw_samples (session_id, time, fp1, fp2, t3, t4) FROM STDIN (FORMAT BINARY)"))
@@ -555,10 +586,10 @@ namespace NeuuroBridge
                         w.StartRow();
                         w.Write(_sessionId, NpgsqlDbType.Uuid);
                         w.Write(new DateTime(t, DateTimeKind.Utc), NpgsqlDbType.TimestampTz);
-                        w.Write(samples[0 * spc + i], NpgsqlDbType.Integer);  // fp1 = frame ch0
-                        w.Write(samples[1 * spc + i], NpgsqlDbType.Integer);  // fp2 = frame ch1
-                        w.Write(samples[3 * spc + i], NpgsqlDbType.Integer);  // t3  = frame ch3
-                        w.Write(samples[2 * spc + i], NpgsqlDbType.Integer);  // t4  = frame ch2
+                        w.Write(samples[FrameIdx.Fp1 * spc + i], NpgsqlDbType.Integer);
+                        w.Write(samples[FrameIdx.Fp2 * spc + i], NpgsqlDbType.Integer);
+                        w.Write(samples[FrameIdx.T3  * spc + i], NpgsqlDbType.Integer);
+                        w.Write(samples[FrameIdx.T4  * spc + i], NpgsqlDbType.Integer);
                         n++;
                     }
                 }
@@ -579,7 +610,7 @@ namespace NeuuroBridge
         {
             if (_filtQ.IsEmpty) return 0;
             long periodTicks = TimeSpan.TicksPerSecond / _sampleRate;
-            long maxDriftTicks = 3 * TimeSpan.TicksPerSecond;
+            long maxDriftTicks = MaxDriftTicks;
             int n = 0;
             using (var w = _conn.BeginBinaryImport(
                 "COPY eeg_filtered_samples (session_id, time, fp1, fp2, t3, t4) FROM STDIN (FORMAT BINARY)"))
@@ -618,10 +649,10 @@ namespace NeuuroBridge
                         w.StartRow();
                         w.Write(_sessionId, NpgsqlDbType.Uuid);
                         w.Write(new DateTime(t, DateTimeKind.Utc), NpgsqlDbType.TimestampTz);
-                        w.Write(samples[0 * spc + i], NpgsqlDbType.Real);  // fp1 = frame ch0
-                        w.Write(samples[1 * spc + i], NpgsqlDbType.Real);  // fp2 = frame ch1
-                        w.Write(samples[3 * spc + i], NpgsqlDbType.Real);  // t3  = frame ch3
-                        w.Write(samples[2 * spc + i], NpgsqlDbType.Real);  // t4  = frame ch2
+                        w.Write(samples[FrameIdx.Fp1 * spc + i], NpgsqlDbType.Real);
+                        w.Write(samples[FrameIdx.Fp2 * spc + i], NpgsqlDbType.Real);
+                        w.Write(samples[FrameIdx.T3  * spc + i], NpgsqlDbType.Real);
+                        w.Write(samples[FrameIdx.T4  * spc + i], NpgsqlDbType.Real);
                         n++;
                     }
                 }
@@ -638,20 +669,18 @@ namespace NeuuroBridge
                 "COPY eeg_readings (session_id, time, " +
                 "fp1_raw_last, fp2_raw_last, t3_raw_last, t4_raw_last, " +
                 "fp1_raw_pkpk, fp2_raw_pkpk, t3_raw_pkpk, t4_raw_pkpk, " +
-                "fp1_filt_last, fp2_filt_last, t4_filt_last, t3_filt_last, " +
-                "fp1_filt_pkpk, fp2_filt_pkpk, t4_filt_pkpk, t3_filt_pkpk) FROM STDIN (FORMAT BINARY)"))
+                "fp1_filt_last, fp2_filt_last, t3_filt_last, t4_filt_last, " +
+                "fp1_filt_pkpk, fp2_filt_pkpk, t3_filt_pkpk, t4_filt_pkpk) FROM STDIN (FORMAT BINARY)"))
             {
                 while (_eegQ.TryDequeue(out var r))
                 {
                     w.StartRow();
                     w.Write(_sessionId, NpgsqlDbType.Uuid);
                     w.Write(r.Time, NpgsqlDbType.TimestampTz);
-                    // Column order pairs the channel index map [0]=Fp1 [1]=Fp2 [2]=T4 [3]=T3
-                    // with the schema's fp1,fp2,t3,t4 ordering — note t3/t4 swap per family.
-                    WriteCh(w, r.RawLast, 0); WriteCh(w, r.RawLast, 1); WriteCh(w, r.RawLast, 3); WriteCh(w, r.RawLast, 2);
-                    WriteCh(w, r.RawPkpk, 0); WriteCh(w, r.RawPkpk, 1); WriteCh(w, r.RawPkpk, 3); WriteCh(w, r.RawPkpk, 2);
-                    WriteCh(w, r.FiltLast, 0); WriteCh(w, r.FiltLast, 1); WriteCh(w, r.FiltLast, 2); WriteCh(w, r.FiltLast, 3);
-                    WriteCh(w, r.FiltPkpk, 0); WriteCh(w, r.FiltPkpk, 1); WriteCh(w, r.FiltPkpk, 2); WriteCh(w, r.FiltPkpk, 3);
+                    WriteChannels(w, r.RawLast);
+                    WriteChannels(w, r.RawPkpk);
+                    WriteChannels(w, r.FiltLast);
+                    WriteChannels(w, r.FiltPkpk);
                     n++;
                 }
                 w.Complete();
@@ -668,8 +697,8 @@ namespace NeuuroBridge
                 "heart_rate, spo2, " +
                 "fp1_alpha, fp1_beta, fp1_delta, fp1_theta, fp1_gamma, " +
                 "fp2_alpha, fp2_beta, fp2_delta, fp2_theta, fp2_gamma, " +
-                "t4_alpha, t4_beta, t4_delta, t4_theta, t4_gamma, " +
-                "t3_alpha, t3_beta, t3_delta, t3_theta, t3_gamma) FROM STDIN (FORMAT BINARY)"))
+                "t3_alpha, t3_beta, t3_delta, t3_theta, t3_gamma, " +
+                "t4_alpha, t4_beta, t4_delta, t4_theta, t4_gamma) FROM STDIN (FORMAT BINARY)"))
             {
                 while (_bandQ.TryDequeue(out var r))
                 {
@@ -682,8 +711,7 @@ namespace NeuuroBridge
                     w.Write(r.SignalQuality, NpgsqlDbType.Integer);
                     WriteNullableInt(w, r.HeartRate);
                     WriteNullableInt(w, r.Spo2);
-                    // Bands order Fp1, Fp2, T4, T3 — matches the schema's column grouping.
-                    foreach (int ch in new[] { 0, 1, 2, 3 })
+                    foreach (int ch in SchemaChannelOrder)
                         WriteBand(w, r.Bands, ch);
                     n++;
                 }
@@ -705,6 +733,13 @@ namespace NeuuroBridge
             WriteReal(w, b.Delta);
             WriteReal(w, b.Theta);
             WriteReal(w, b.Gamma);
+        }
+
+        /// <summary>Writes one per-channel family (four columns) in schema order — see <see cref="SchemaChannelOrder"/>.</summary>
+        private static void WriteChannels(NpgsqlBinaryImporter w, float[] arr)
+        {
+            foreach (int ch in SchemaChannelOrder)
+                WriteCh(w, arr, ch);
         }
 
         private static void WriteCh(NpgsqlBinaryImporter w, float[] arr, int ch)
@@ -730,6 +765,44 @@ namespace NeuuroBridge
         /// <see cref="_ioLock"/>. Best-effort: a DB hiccup is logged, not thrown, so it can never
         /// break disposal. Only narrows from a non-completed state (won't disturb an already-final row).
         /// </summary>
+        /// <summary>
+        /// Accounts for a dropout that ran into the end of the session. <see cref="CopyRaw"/>'s drift
+        /// guard can only notice a gap when a LATER frame arrives to reveal it, so a stream that dies
+        /// and never comes back — headset stops sending at 16:00:15, technician stops the session at
+        /// 16:00:27 — leaves those seconds uncounted. The WPF panel computes expected rows as
+        /// (elapsed − dropout) × rate, so the uncounted dropout inflates "expected" and the missing
+        /// seconds get reported as an upload shortfall: ~3000 phantom rows on session f0b59fc4
+        /// (12 Jul), which read as the bridge losing data when the headset had simply stopped
+        /// streaming. Nothing written to the DB was ever wrong — only the reconciliation.
+        ///
+        /// This does NOT overlap BridgeController's TailLossSeconds, which counts frames that DID
+        /// arrive but landed after the drain window closed. In a trailing dropout no frame arrives at
+        /// all, so neither counter sees it and there is nothing to double-count.
+        ///
+        /// Call once, after the final flush, with the instant recording stopped (local UTC). Only a
+        /// gap beyond <see cref="MaxDriftTicks"/> counts — the same tolerance CopyRaw uses to
+        /// distinguish genuine frame loss from ordinary BLE burst latency — so the sub-second jitter
+        /// left at the tail of a healthy session is not reported as dropout.
+        /// </summary>
+        public void SealTrailingGap(DateTime stopUtc)
+        {
+            lock (_ioLock)
+            {
+                if (!_rawAnchored || _rawSampleIndex <= 0) return;
+
+                long periodTicks = TimeSpan.TicksPerSecond / _sampleRate;
+                // _rawSampleIndex is the NEXT index to write, so the last sample written sits one back.
+                long lastSampleTicks = _rawBaseTicks + (_rawSampleIndex - 1) * periodTicks;
+                long trailingTicks = ToDbTime(stopUtc).Ticks - lastSampleTicks;
+                if (trailingTicks <= MaxDriftTicks) return;
+
+                Interlocked.Add(ref _rawGapSamples, trailingTicks / periodTicks);
+                Interlocked.Increment(ref _rawResyncs);   // it is a gap; the UI reports "Ns across N gap(s)"
+                _log($"Stream ended {trailingTicks / (double)TimeSpan.TicksPerSecond:F1}s before the session was stopped " +
+                     "— counted as Bluetooth dropout, not upload loss.");
+            }
+        }
+
         private void MarkCompletedInternal()
         {
             try

@@ -30,6 +30,22 @@
   --ch-fp2: #3f5bd9;
   --ch-t3: #c7791a;
   --ch-t4: #c24c6b;
+  /* Frequency-band identity, in ascending-frequency order (light).
+     Hue order chosen to maximise adjacent CVD separation — worst adjacent
+     pair ΔE 47.2 (protan). Alpha/theta sit under 3:1 on white, so every band
+     chart ships a legend + a value rail (the relief rule). */
+  --band-delta: #2a78d6;
+  --band-theta: #1baf7a;
+  --band-alpha: #eda100;
+  --band-beta: #4a3aa7;
+  --band-gamma: #e34948;
+  /* Mental-state identity (light) */
+  --ms-attention: #2a78d6;
+  --ms-relaxation: #1baf7a;
+  --ms-workload: #eb6834;
+  /* Vitals — each lives in its own panel, never a shared axis */
+  --vital-hr: #e34948;
+  --vital-spo2: #2a78d6;
 }
 
 @media (prefers-color-scheme: dark) {
@@ -56,6 +72,18 @@
     --ch-fp2: #6072ce;
     --ch-t3: #c07e1e;
     --ch-t4: #cf6383;
+    /* Dark steps are re-selected against the dark surface, not flipped:
+       all clear 3:1, worst adjacent CVD ΔE 41.3. */
+    --band-delta: #3987e5;
+    --band-theta: #199e70;
+    --band-alpha: #c98500;
+    --band-beta: #9085e9;
+    --band-gamma: #e66767;
+    --ms-attention: #3987e5;
+    --ms-relaxation: #199e70;
+    --ms-workload: #d95926;
+    --vital-hr: #e66767;
+    --vital-spo2: #3987e5;
   }
 }
 
@@ -65,6 +93,9 @@
   --accent: #2f8f9b; --accent-strong: #26808c; --accent-soft: #e6f3f5; --on-accent: #fff;
   --good: #1f9d73; --good-soft: #e6f3ee; --warn: #bd821f; --warn-soft: #f6ecd8; --crit: #d15b5b; --crit-soft: #f8e6e6;
   --ch-fp1: #0693a8; --ch-fp2: #3f5bd9; --ch-t3: #c7791a; --ch-t4: #c24c6b;
+  --band-delta: #2a78d6; --band-theta: #1baf7a; --band-alpha: #eda100; --band-beta: #4a3aa7; --band-gamma: #e34948;
+  --ms-attention: #2a78d6; --ms-relaxation: #1baf7a; --ms-workload: #eb6834;
+  --vital-hr: #e34948; --vital-spo2: #2a78d6;
 }
 :root[data-theme="dark"] {
   --ground: #0a0f14; --surface: #121b22; --inset: #0d151b; --border: #223038; --border-strong: #2e3f49;
@@ -72,6 +103,9 @@
   --accent: #2aa7b8; --accent-strong: #4fc2d1; --accent-soft: #103138; --on-accent: #04222a;
   --good: #35b98a; --good-soft: #10281f; --warn: #d69a38; --warn-soft: #2a2113; --crit: #e36b6b; --crit-soft: #2c1616;
   --ch-fp1: #12a0b4; --ch-fp2: #6072ce; --ch-t3: #c07e1e; --ch-t4: #cf6383;
+  --band-delta: #3987e5; --band-theta: #199e70; --band-alpha: #c98500; --band-beta: #9085e9; --band-gamma: #e66767;
+  --ms-attention: #3987e5; --ms-relaxation: #199e70; --ms-workload: #d95926;
+  --vital-hr: #e66767; --vital-spo2: #3987e5;
 }
 
 /* Map tokens into Tailwind's color/util space so bg-surface, text-ink,

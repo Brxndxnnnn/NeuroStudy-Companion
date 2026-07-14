@@ -143,6 +143,65 @@ def fetch_raw_samples_window(
     return [dict(r) for r in rows]
 
 
+# ── ML Phase 1 (labels + session selection) ───────────────────────────────────
+# The EEG itself comes from fetch_filtered_samples above — the same rows the
+# elliptic path reads. Deliberately one function, not two: a second copy of that
+# query would be a second place for the channel mapping to drift.
+
+def fetch_labelled_image_events(conn, session_id: str) -> list[dict]:
+    """
+    Fetch this session's IMAGE events joined to their OASIS labels.
+
+    Returns one dict per event:
+      { event_id, image_id, shown_at, hidden_at, filename, oasis_theme,
+        valence_score, valence_sd, arousal_score, arousal_sd }
+
+    Only events with a resolvable stimulus window (hidden_at IS NOT NULL) are
+    returned — an event still open at session end has no bounded EEG window.
+    Question events are excluded: the events table enforces image XOR question,
+    so an INNER JOIN to images already drops them.
+    """
+    rows = conn.execute(text("""
+        SELECT e.event_id,
+               e.image_id,
+               e.shown_at,
+               e.hidden_at,
+               i.filename,
+               i.oasis_theme,
+               i.valence_score,
+               i.valence_sd,
+               i.arousal_score,
+               i.arousal_sd
+        FROM   events e
+        JOIN   images i ON i.image_id = e.image_id
+        WHERE  e.session_id = :session_id
+          AND  e.hidden_at IS NOT NULL
+        ORDER  BY e.shown_at ASC
+    """), {"session_id": session_id}).mappings().all()
+
+    return [dict(r) for r in rows]
+
+
+def fetch_completed_session_ids(conn) -> list[str]:
+    """
+    Every session whose EEG is fully written and therefore safe to train on.
+
+    'completed' is set by the BRIDGE, after its stop-grace drain and final flush
+    (BridgeController.FinalizeStop -> DbUploader.Dispose -> MarkCompletedInternal).
+    It is the only signal that means "all my rows are in". Do not substitute an
+    earlier one — the frontend finishing its stimulus sequence does not imply the
+    bridge has finished writing.
+    """
+    rows = conn.execute(text("""
+        SELECT session_id
+        FROM   sessions
+        WHERE  sync_status = 'completed'
+        ORDER  BY start_time ASC
+    """)).mappings().all()
+
+    return [str(r["session_id"]) for r in rows]
+
+
 # ── eeg_readings (quality gating only) ────────────────────────────────────────
 
 def fetch_eeg_readings(conn, session_id: str) -> list[dict]:
