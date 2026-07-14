@@ -87,6 +87,8 @@ def write_elliptic_band_stats(
     as columns (15 columns total: delta/theta/alpha/beta/gamma × mean/std/peak).
 
     For a session with N windows and 4 channels this inserts N x 4 rows.
+    Each row includes window_number (1, 2, 3, ...) for easy ordering
+    without parsing timestamps.
 
     Args:
         conn:          Open SQLAlchemy connection.
@@ -138,7 +140,7 @@ def write_elliptic_band_stats(
     session_start = session["start_time"]
 
     rows = []
-    for w in windows:
+    for window_number, w in enumerate(windows, start=1):
         time_start = session_start + timedelta(seconds=w["time_start"])
         time_end   = session_start + timedelta(seconds=w["time_end"])
 
@@ -150,6 +152,7 @@ def write_elliptic_band_stats(
                 "window_size_s": window_size_s,
                 "step_s":        step_s,
                 "channel":       channel,
+                "window_number": window_number,
                 # delta
                 "delta_mean":    band_stats["delta"]["mean"],
                 "delta_std":     band_stats["delta"]["std"],
@@ -175,7 +178,7 @@ def write_elliptic_band_stats(
     conn.execute(text("""
         INSERT INTO elliptic_band_stats (
             session_id, time_start, time_end,
-            window_size_s, step_s, channel,
+            window_size_s, step_s, channel, window_number,
             delta_mean, delta_std, delta_peak,
             theta_mean, theta_std, theta_peak,
             alpha_mean, alpha_std, alpha_peak,
@@ -183,7 +186,7 @@ def write_elliptic_band_stats(
             gamma_mean, gamma_std, gamma_peak
         ) VALUES (
             :session_id, :time_start, :time_end,
-            :window_size_s, :step_s, :channel,
+            :window_size_s, :step_s, :channel, :window_number,
             :delta_mean, :delta_std, :delta_peak,
             :theta_mean, :theta_std, :theta_peak,
             :alpha_mean, :alpha_std, :alpha_peak,
