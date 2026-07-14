@@ -44,7 +44,69 @@ repo is stale and will mislead the next person who reads it. Reconcile it.
 
 ---
 
-## 1. Zhengda — when the window/feature job runs, and how it reports
+## 1. Zhengda — the worker is BUILT. You write one function.
+
+**The scheduling, claiming, status-tracking and backfill machinery already exists**
+in `ml_service/app/workers/feature_jobs.py`, and it starts automatically with the ML
+service (`app/main.py` lifespan → APScheduler). Nobody runs a script. When a session
+reaches `sync_status = 'completed'`, the worker picks it up within ~10 seconds.
+
+It is currently **not running**, on purpose. It logs:
+
+```
+Feature job DISABLED: cannot import app.features.elliptic:compute_session_features
+(No module named 'app.features.elliptic'). Create that module with
+compute_session_features(conn, session_id) -> int
+```
+
+That is the whole task. **Create `ml_service/app/features/elliptic.py`:**
+
+```python
+def compute_session_features(conn, session_id: str) -> int:
+    # 1. DELETE FROM elliptic_band_stats WHERE session_id = :sid   <-- REQUIRED
+    # 2. read EEG:  app.data_access.queries.fetch_filtered_samples(conn, session_id)
+    #    (already µV — do NOT apply the ADC scale)
+    # 3. window it: 2.0s window, 0.5s step
+    # 4. elliptic bandpass per band, then mean/std/peak per channel
+    # 5. INSERT the rows
+    return rows_written
+```
+
+The contract, in full, is in `ml_service/app/features/__init__.py`. Four points:
+
+- **`conn` is already inside a transaction the worker owns.** Do not commit it. That
+  is what guarantees a failed run leaves no half-written rows behind.
+- **It MUST be idempotent** — start by deleting that session's existing rows. The
+  session *will* be recomputed (backfill, changed window size, reclaimed stale job),
+  and without the delete every re-run silently doubles the rows.
+- **Return the row count.** Returning 0 is fine and records as `ready`: a session with
+  dead electrodes has no features, and that is a real outcome, not a failure.
+- **Raise on failure.** The message lands in `sessions.features_error` and is shown to
+  whoever opens the results page, so make it worth reading.
+
+Nothing else is needed. The worker does the claiming, the retries, the status writes.
+
+### Running it by hand
+
+```bash
+python -m scripts.feature_jobs_cli --status     # what state is everything in
+python -m scripts.feature_jobs_cli --once       # one poll cycle now
+python -m scripts.feature_jobs_cli --backfill   # requeue EVERY completed session
+```
+
+**`--backfill` is what you need first**: only one session has rows today, and it was
+computed at a 1 s window instead of 2 s (see finding *a* above). Requeueing recomputes
+the lot — safe precisely because the compute function is idempotent.
+
+### Prerequisite
+
+Migration `006_oasis_labels_image_sets_feature_jobs.sql` must be applied — it adds the
+`features_status` / `features_started_at` / `features_computed_at` / `features_error`
+columns the worker writes.
+
+---
+
+## 1b. Reference — why the worker is built the way it is
 
 ### The trigger: `sessions.sync_status = 'completed'`. Nothing earlier.
 
