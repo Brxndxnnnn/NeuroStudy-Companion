@@ -110,6 +110,67 @@ def load_compute_fn():
     return fn
 
 
+def preflight() -> list[str]:
+    """
+    Check the two things that would make this worker a silent no-op, and say so at
+    startup rather than leaving it to be discovered from an empty table weeks later.
+
+    Returns a list of problems (empty = good to go).
+
+    1. MIGRATION 006. The worker writes sessions.features_status. Without those columns
+       every claim raises, every session goes to 'failed', and the results page reports
+       failures for work that was never attempted.
+
+    2. ROW-LEVEL SECURITY. `sessions` has RLS enabled AND FORCED, with a tenant-isolation
+       policy keyed off a session variable the backend sets per request. This worker sets
+       no such variable. A role WITHOUT bypassrls therefore sees ZERO sessions — the poll
+       returns nothing, the claim matches nothing, no error is raised, and the worker
+       spins forever computing nothing. bridge_writer and neurostudy_user have bypassrls;
+       app_user does not. This is the single most likely way to deploy this and have it
+       quietly do nothing at all.
+    """
+    problems = []
+    try:
+        with engine.connect() as conn:
+            missing = conn.execute(text("""
+                SELECT string_agg(c, ', ')
+                FROM   unnest(ARRAY['features_status','features_started_at',
+                                    'features_computed_at','features_error']) AS c
+                WHERE  NOT EXISTS (
+                    SELECT 1 FROM information_schema.columns
+                    WHERE table_name='sessions' AND column_name=c
+                )
+            """)).scalar()
+            if missing:
+                problems.append(
+                    f"sessions is missing {missing} — apply "
+                    "db/migrations/006_oasis_labels_image_sets_feature_jobs.sql."
+                )
+
+            role, bypasses = conn.execute(text("""
+                SELECT current_user,
+                       COALESCE((SELECT rolbypassrls OR rolsuper FROM pg_roles
+                                 WHERE rolname = current_user), false)
+            """)).one()
+
+            rls_on = conn.execute(text("""
+                SELECT COALESCE(relrowsecurity, false) FROM pg_class
+                WHERE relname = 'sessions' AND relnamespace = 'public'::regnamespace
+            """)).scalar()
+
+            if rls_on and not bypasses:
+                problems.append(
+                    f"connected as '{role}', which does NOT bypass row-level security, and "
+                    "sessions has RLS forced. This worker sets no tenant context, so it "
+                    "would see zero sessions and silently compute nothing. Point the ML "
+                    "service at a BYPASSRLS role (bridge_writer or neurostudy_user)."
+                )
+    except Exception as exc:
+        problems.append(f"could not reach the database: {exc}")
+
+    return problems
+
+
 def _claim(conn, session_id: str) -> bool:
     """
     Take ownership of a session. Exactly one caller can win this, however many

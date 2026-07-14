@@ -41,6 +41,12 @@ async def lifespan(app: FastAPI):
             # claim every completed session only to mark it failed.
             log.warning("Feature worker not started.")
         else:
+            # Two ways this worker can run forever and achieve nothing: missing
+            # migration 006, or a DB role that row-level security hides every session
+            # from. Both are silent. Say so at startup.
+            for problem in feature_jobs.preflight():
+                log.error("Feature worker: %s", problem)
+
             scheduler = AsyncIOScheduler()
             scheduler.add_job(
                 feature_jobs.tick,
