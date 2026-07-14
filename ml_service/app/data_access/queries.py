@@ -4,11 +4,17 @@ data_access/queries.py
 All SELECT queries the ML service runs against the database.
 
 Tables read:
-  - eeg_raw_samples  : full-resolution 250 Hz ADC samples (primary ML input)
-  - eeg_readings     : frame summaries — used only for quality gating (filt_pkpk)
-  - sessions         : sample_rate, start_time, end_time, client_id
-  - events           : stimulus shown_at / hidden_at per image
-  - images           : category, valence_score, arousal_score per image
+  - eeg_filtered_samples  : full-resolution 250 Hz SDK-FILTERED samples, already
+                            in µV. Primary input for the elliptic filter path.
+  - eeg_raw_samples       : full-resolution 250 Hz ADC samples (raw, unfiltered).
+                            Legacy input for the Butterworth/notch + FFT path.
+  - eeg_readings          : frame summaries — used only for quality gating (filt_pkpk)
+  - sessions              : sample_rate, start_time, end_time, client_id
+  - events                : stimulus shown_at / hidden_at, linked to EITHER an
+                            image OR a question (mutually exclusive per
+                            005_functions_and_updates.sql's chk_events_stimulus)
+  - images                : category, valence_score, arousal_score per image
+  - questions             : prompt, correct_answer, difficulty per question
 
 All functions accept an open SQLAlchemy connection so the caller controls
 the transaction boundary. Returns plain list-of-dicts for easy downstream use.
@@ -17,7 +23,71 @@ the transaction boundary. Returns plain list-of-dicts for easy downstream use.
 from sqlalchemy import text
 
 
-# ── eeg_raw_samples ────────────────────────────────────────────────────────────
+# ── eeg_filtered_samples (SDK-filtered, primary input for elliptic path) ──────
+
+def fetch_filtered_samples(conn, session_id: str) -> list[dict]:
+    """
+    Fetch all SDK-filtered samples for a session, ordered by time.
+
+    Unlike eeg_raw_samples, these values are already in µV (SDK-filtered
+    onboard the SenzeBand) — NO ADC conversion needed, and no Butterworth/
+    notch filtering needed beforehand. This is the primary input for the
+    elliptic filter path (feature_extraction/elliptic.py).
+
+    Returns one dict per sample row:
+      { time, fp1, fp2, t3, t4 }
+    where fp1/fp2/t3/t4 are floats in µV.
+
+    Args:
+        conn:       SQLAlchemy connection.
+        session_id: UUID string of the target session.
+    """
+    rows = conn.execute(text("""
+        SELECT time, fp1, fp2, t3, t4
+        FROM   eeg_filtered_samples
+        WHERE  session_id = :session_id
+        ORDER  BY time ASC
+    """), {"session_id": session_id}).mappings().all()
+
+    return [dict(r) for r in rows]
+
+
+def fetch_filtered_samples_window(
+    conn,
+    session_id: str,
+    start_time,
+    end_time,
+) -> list[dict]:
+    """
+    Fetch SDK-filtered samples within a specific time window (inclusive).
+    Used by epoch alignment to slice filtered samples per stimulus event,
+    and by the elliptic filter's sliding-window analysis.
+
+    Args:
+        conn:       SQLAlchemy connection.
+        session_id: UUID string.
+        start_time: datetime — window start (inclusive).
+        end_time:   datetime — window end (inclusive).
+
+    Returns:
+        List of dicts { time, fp1, fp2, t3, t4 }, values already in µV.
+    """
+    rows = conn.execute(text("""
+        SELECT time, fp1, fp2, t3, t4
+        FROM   eeg_filtered_samples
+        WHERE  session_id = :session_id
+          AND  time BETWEEN :start_time AND :end_time
+        ORDER  BY time ASC
+    """), {
+        "session_id": session_id,
+        "start_time": start_time,
+        "end_time":   end_time,
+    }).mappings().all()
+
+    return [dict(r) for r in rows]
+
+
+# ── eeg_raw_samples (legacy — raw ADC counts, Butterworth/notch + FFT path) ───
 
 def fetch_raw_samples(conn, session_id: str) -> list[dict]:
     """
@@ -82,7 +152,7 @@ def fetch_eeg_readings(conn, session_id: str) -> list[dict]:
 
     Returns one dict per frame:
       { time, fp1_filt_pkpk, fp2_filt_pkpk, t3_filt_pkpk, t4_filt_pkpk,
-        current_image_id }
+        current_event_id }
     """
     rows = conn.execute(text("""
         SELECT time,
@@ -90,7 +160,7 @@ def fetch_eeg_readings(conn, session_id: str) -> list[dict]:
                fp2_filt_pkpk,
                t3_filt_pkpk,
                t4_filt_pkpk,
-               current_image_id
+               current_event_id
         FROM   eeg_readings
         WHERE  session_id = :session_id
         ORDER  BY time ASC
@@ -154,21 +224,35 @@ def fetch_events(conn, session_id: str) -> list[dict]:
     Fetch all stimulus events for a session, ordered by shown_at.
     Used by epoch alignment to slice EEG into stimulus windows.
 
+    Per 005_functions_and_updates.sql, events.image_id is now nullable and
+    mutually exclusive with the new events.question_id (chk_events_stimulus):
+    each event is EITHER an image OR a question, never both. This uses LEFT
+    JOINs (not INNER JOIN) on both images and questions, so question-based
+    events are no longer silently dropped — image-only fields are NULL on a
+    question event and vice versa.
+
     Returns one dict per event:
-      { event_id, image_id, shown_at, hidden_at,
-        filename, category, valence_score, arousal_score }
+      { event_id, image_id, question_id, shown_at, hidden_at,
+        filename, category, valence_score, arousal_score,
+        question_no, prompt, correct_answer, difficulty }
     """
     rows = conn.execute(text("""
         SELECT e.event_id,
                e.image_id,
+               e.question_id,
                e.shown_at,
                e.hidden_at,
                i.filename,
                i.category,
                i.valence_score,
-               i.arousal_score
+               i.arousal_score,
+               q.question_no,
+               q.prompt,
+               q.correct_answer,
+               q.difficulty
         FROM   events e
-        JOIN   images i ON i.image_id = e.image_id
+        LEFT JOIN images    i ON i.image_id    = e.image_id
+        LEFT JOIN questions q ON q.question_id = e.question_id
         WHERE  e.session_id = :session_id
         ORDER  BY e.shown_at ASC
     """), {"session_id": session_id}).mappings().all()
