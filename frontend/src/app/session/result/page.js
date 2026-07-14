@@ -187,6 +187,33 @@ function fmtUv(v) {
   return v.toFixed(a >= 10 ? 1 : a >= 1 ? 2 : 3);
 }
 
+// Stable identity: both chart components re-init their canvas when the `events`
+// array identity changes, so hiding markers must pass the SAME empty array every
+// render rather than a fresh [] literal.
+const NO_EVENTS = [];
+
+// Per-chart marker switch. Markers are genuinely useful and genuinely in the way —
+// a dense 24-image session tiles the whole axis with translucent bands, which is
+// exactly what you want when locating a stimulus response and exactly what you
+// don't when reading the trace underneath. Each chart carries its own switch, so
+// turning them off where they obscure something doesn't lose them where they help.
+function MarkerToggle({ on, onToggle }) {
+  return (
+    <button
+      onClick={onToggle}
+      aria-pressed={on}
+      title={on ? "Hide stimulus markers" : "Show stimulus markers"}
+      className={`px-3 py-1.5 rounded-lg text-[12px] font-semibold transition-colors border ${
+        on
+          ? "bg-inset text-ink border-border"
+          : "bg-transparent text-muted border-border hover:text-ink"
+      }`}
+    >
+      {on ? "Markers on" : "Markers off"}
+    </button>
+  );
+}
+
 function fmtDuration(sec) {
   if (!sec || sec < 0) return "—";
   const m = Math.floor(sec / 60);
@@ -236,6 +263,24 @@ export default function SessionResults() {
   const [ellipticView, setEllipticView] = useState("timeline"); // "timeline" | "window"
   const [events, setEvents] = useState([]);
   const [selectedEvent, setSelectedEvent] = useState(null);
+  // One per chart, so a chart can drop its markers without the others losing theirs.
+  const [markers, setMarkers] = useState({
+    eeg: true,
+    bands: true,
+    elliptic: true,
+    mental: true,
+    vitals: true,
+  });
+  const toggleMarkers = useCallback(
+    (key) => setMarkers((m) => ({ ...m, [key]: !m[key] })),
+    []
+  );
+  // Passing NO_EVENTS (a stable reference) rather than [] keeps the chart from
+  // re-initialising its canvas on every unrelated render.
+  const chartEvents = useCallback(
+    (key) => (markers[key] ? events : NO_EVENTS),
+    [markers, events]
+  );
   const [isLoading, setIsLoading] = useState(true);
   const [error, setError] = useState("");
   const [patientName, setPatientName] = useState("");
@@ -642,27 +687,32 @@ export default function SessionResults() {
                     : "µV. Drag to zoom, scroll to pan — the stats update to the visible window."
                 }
                 actions={
-                  <div
-                    role="group"
-                    aria-label="EEG view"
-                    className="inline-flex rounded-lg border border-border bg-inset/60 p-0.5"
-                  >
-                    {[
-                      { id: "stacked", label: "Stacked" },
-                      { id: "overlay", label: "Overlay" },
-                      ...CHANNELS.map((ch) => ({ id: ch.prefix, label: ch.label })),
-                    ].map((v) => (
-                      <button
-                        key={v.id}
-                        onClick={() => setEegView(v.id)}
-                        aria-pressed={eegView === v.id}
-                        className={`px-2.5 py-1.5 rounded-md text-[12px] font-semibold transition-colors ${
-                          eegView === v.id ? "bg-surface text-ink shadow-sm" : "text-muted hover:text-ink"
-                        }`}
-                      >
-                        {v.label}
-                      </button>
-                    ))}
+                  <div className="flex flex-wrap items-center gap-2">
+                    <div
+                      role="group"
+                      aria-label="EEG view"
+                      className="inline-flex rounded-lg border border-border bg-inset/60 p-0.5"
+                    >
+                      {[
+                        { id: "stacked", label: "Stacked" },
+                        { id: "overlay", label: "Overlay" },
+                        ...CHANNELS.map((ch) => ({ id: ch.prefix, label: ch.label })),
+                      ].map((v) => (
+                        <button
+                          key={v.id}
+                          onClick={() => setEegView(v.id)}
+                          aria-pressed={eegView === v.id}
+                          className={`px-2.5 py-1.5 rounded-md text-[12px] font-semibold transition-colors ${
+                            eegView === v.id ? "bg-surface text-ink shadow-sm" : "text-muted hover:text-ink"
+                          }`}
+                        >
+                          {v.label}
+                        </button>
+                      ))}
+                    </div>
+                    {events.length > 0 && (
+                      <MarkerToggle on={markers.eeg} onToggle={() => toggleMarkers("eeg")} />
+                    )}
                   </div>
                 }
               />
@@ -671,7 +721,7 @@ export default function SessionResults() {
                   samples={samples}
                   channels={eegChannels}
                   overlay={eegView === "overlay"}
-                  events={events}
+                  events={chartEvents("eeg")}
                   onEventClick={setSelectedEvent}
                   onVisibleRangeChange={onEegRange}
                 />
@@ -729,25 +779,30 @@ export default function SessionResults() {
                     title="Frequency bands"
                     subtitle="Band power per channel at 1 Hz. Pick a channel for the timeline; the profile below compares all four."
                     actions={
-                      <div
-                        role="group"
-                        aria-label="Channel"
-                        className="inline-flex rounded-lg border border-border bg-inset/60 p-0.5"
-                      >
-                        {CHANNELS.map((ch) => (
-                          <button
-                            key={ch.prefix}
-                            onClick={() => setChannel(ch.prefix)}
-                            aria-pressed={channel === ch.prefix}
-                            className={`px-3 py-1.5 rounded-md font-mono text-[12px] font-semibold transition-colors ${
-                              channel === ch.prefix
-                                ? "bg-surface text-ink shadow-sm"
-                                : "text-muted hover:text-ink"
-                            }`}
-                          >
-                            {ch.label}
-                          </button>
-                        ))}
+                      <div className="flex flex-wrap items-center gap-2">
+                        <div
+                          role="group"
+                          aria-label="Channel"
+                          className="inline-flex rounded-lg border border-border bg-inset/60 p-0.5"
+                        >
+                          {CHANNELS.map((ch) => (
+                            <button
+                              key={ch.prefix}
+                              onClick={() => setChannel(ch.prefix)}
+                              aria-pressed={channel === ch.prefix}
+                              className={`px-3 py-1.5 rounded-md font-mono text-[12px] font-semibold transition-colors ${
+                                channel === ch.prefix
+                                  ? "bg-surface text-ink shadow-sm"
+                                  : "text-muted hover:text-ink"
+                              }`}
+                            >
+                              {ch.label}
+                            </button>
+                          ))}
+                        </div>
+                        {events.length > 0 && (
+                          <MarkerToggle on={markers.bands} onToggle={() => toggleMarkers("bands")} />
+                        )}
                       </div>
                     }
                   />
@@ -755,7 +810,7 @@ export default function SessionResults() {
                     <TimeSeriesChart
                       samples={bandRows}
                       panels={bandPanels}
-                      events={events}
+                      events={chartEvents("bands")}
                       onEventClick={setSelectedEvent}
                       onVisibleRangeChange={onBandRange}
                       height={220}
@@ -844,7 +899,21 @@ export default function SessionResults() {
                               </button>
                             ))}
                           </div>
-                          <div className="flex items-center gap-1 rounded-lg bg-inset p-1">
+                          {/* Channel picker and marker switch are timeline-only: the
+                              window view already shows all four channels at once, and
+                              its profile chart and value table have no time axis to
+                              put a stimulus band on. */}
+                          {ellipticView === "timeline" && events.length > 0 && (
+                            <MarkerToggle
+                              on={markers.elliptic}
+                              onToggle={() => toggleMarkers("elliptic")}
+                            />
+                          )}
+                          <div
+                            className={`flex items-center gap-1 rounded-lg bg-inset p-1 ${
+                              ellipticView === "timeline" ? "" : "hidden"
+                            }`}
+                          >
                             {CHANNELS.map((ch) => (
                               <button
                                 key={ch.prefix}
@@ -1017,7 +1086,7 @@ export default function SessionResults() {
                           <TimeSeriesChart
                             samples={ellipticRows}
                             panels={ellipticPanels}
-                            events={events}
+                            events={chartEvents("elliptic")}
                             onEventClick={setSelectedEvent}
                             onVisibleRangeChange={onEllipticRange}
                             height={220}
@@ -1118,18 +1187,26 @@ export default function SessionResults() {
                     title="Mental state"
                     subtitle="Attention, relaxation and workload on the headset's 0–1 index."
                     actions={
-                      qualityStat?.mean != null ? (
-                        <Pill tone={qualityStat.mean >= 70 ? "good" : qualityStat.mean >= 40 ? "warn" : "crit"}>
-                          Signal quality {fmt(qualityStat.mean, 0)}/100
-                        </Pill>
-                      ) : null
+                      <div className="flex flex-wrap items-center gap-2">
+                        {qualityStat?.mean != null && (
+                          <Pill tone={qualityStat.mean >= 70 ? "good" : qualityStat.mean >= 40 ? "warn" : "crit"}>
+                            Signal quality {fmt(qualityStat.mean, 0)}/100
+                          </Pill>
+                        )}
+                        {events.length > 0 && (
+                          <MarkerToggle
+                            on={markers.mental}
+                            onToggle={() => toggleMarkers("mental")}
+                          />
+                        )}
+                      </div>
                     }
                   />
                   <div className="p-3 sm:p-4">
                     <TimeSeriesChart
                       samples={bandRows}
                       panels={mentalPanels}
-                      events={events}
+                      events={chartEvents("mental")}
                       onEventClick={setSelectedEvent}
                       onVisibleRangeChange={onMentalRange}
                       height={220}
@@ -1167,6 +1244,14 @@ export default function SessionResults() {
                   <CardHeader
                     title="Vitals"
                     subtitle="Heart rate and blood-oxygen saturation, each on its own scale."
+                    actions={
+                      vitalPanels.length > 0 && events.length > 0 ? (
+                        <MarkerToggle
+                          on={markers.vitals}
+                          onToggle={() => toggleMarkers("vitals")}
+                        />
+                      ) : null
+                    }
                   />
                   {vitalPanels.length === 0 ? (
                     <div className="px-5 py-8 flex items-center justify-center">
@@ -1180,7 +1265,7 @@ export default function SessionResults() {
                         <TimeSeriesChart
                           samples={bandRows}
                           panels={vitalPanels}
-                          events={events}
+                          events={chartEvents("vitals")}
                           onEventClick={setSelectedEvent}
                           onVisibleRangeChange={onVitalsRange}
                           height={170}
