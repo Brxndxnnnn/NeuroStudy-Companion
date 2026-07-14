@@ -1,6 +1,7 @@
 from fastapi import FastAPI
-from app.api.health import router as health_router
-from app.api.infer  import router as infer_router
+from app.api.health   import router as health_router
+from app.api.infer    import router as infer_router
+from app.api.process  import router as process_router
 
 app = FastAPI(
     title="NeuroStudy ML Service",
@@ -13,3 +14,4 @@ app = FastAPI(
 
 app.include_router(health_router)
 app.include_router(infer_router)
+app.include_router(process_router)

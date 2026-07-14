@@ -16,6 +16,8 @@ Functions:
       Runs elliptical_stats() for one band across every sliding window of a
       full signal, so a longer fetched array can be scanned in overlapping
       chunks without a separate DB fetch per window.
+      window_size_s=None -> full signal as one window (no slicing).
+      step_s=None        -> defaults to window_size_s (no overlap).
 
 Filter design notes:
   ELLIPTIC_ORDER=6, ELLIPTIC_RP=0.05 dB, ELLIPTIC_RS=60 dB.
@@ -235,9 +237,9 @@ def sliding_windows(
 def elliptical_stats_sliding(
     freq_band:     str,
     signal:        np.ndarray,
-    window_size_s: float,
-    step_s:        float,
-    fs:            int = None,
+    window_size_s: float = None,
+    step_s:        float = None,
+    fs:            int   = None,
 ) -> list[dict]:
     """
     Run elliptical_stats() for one band across every sliding window of a
@@ -248,17 +250,32 @@ def elliptical_stats_sliding(
         freq_band:     Band name — one of "delta", "theta", "alpha", "beta", "gamma".
         signal:        1D numpy array of EEG samples (uV) for ONE channel.
         window_size_s: Length of each window, in seconds.
+                       None (default) = use the full signal as one window.
         step_s:        Step between consecutive windows, in seconds.
+                       None (default) = same as window_size_s (no overlap).
         fs:            Sampling rate (Hz). Defaults to settings.SAMPLE_RATE.
 
     Returns:
         List of dicts, one per window, in chronological order:
           {"time_start": float, "time_end": float,
            "mean": float, "std": float, "peak": float}
+
+    Examples:
+        # Specific window size with overlap
+        elliptical_stats_sliding("alpha", signal, window_size_s=2.0, step_s=1.0)
+
+        # Full signal as one window (no arguments needed)
+        elliptical_stats_sliding("alpha", signal)
     """
     fs = fs or settings.SAMPLE_RATE
     total_duration_s = len(signal) / fs
-    windows = sliding_windows(total_duration_s, window_size_s, step_s)
+
+    # None -> full signal as a single window
+    resolved_window = window_size_s if window_size_s is not None else total_duration_s
+    # None -> no overlap (step equals window size)
+    resolved_step   = step_s        if step_s        is not None else resolved_window
+
+    windows = sliding_windows(total_duration_s, resolved_window, resolved_step)
 
     results = []
     for time_start, time_end in windows:
