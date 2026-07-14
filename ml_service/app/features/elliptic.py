@@ -44,16 +44,18 @@ from app.feature_extraction.pipeline import run_elliptic_pipeline
 
 log = logging.getLogger(__name__)
 
-# 2 s window, 0.5 s step.
+# 1 s window, 0.5 s step — the client's specification, matched deliberately.
 #
-# The two knobs do different jobs and are easy to conflate: the WINDOW decides whether
-# a single measurement is trustworthy, the STEP decides how many measurements you get.
-# Delta runs down to 0.5 Hz — half a cycle in a 1 s window — so a 1 s window cannot
-# measure it, and the rows currently in the DB (computed at 1.0 s) have delta statistics
-# that are not really measuring delta. Shrink the step, never the window.
+# ⚠ One caveat to carry, not to act on: delta runs down to 0.5 Hz, which is HALF A
+# CYCLE in a 1 s window. A window cannot measure a rhythm it does not contain a full
+# cycle of, so delta_mean/std/peak are not really measuring delta, and theta (4 Hz, 4
+# cycles) is the lowest band this window fully resolves. The other four bands are fine.
 #
-# At the real 10 s image duration this yields 17 windows fully inside each image.
-WINDOW_SIZE_S = float(os.getenv("ELLIPTIC_WINDOW_S", "2.0"))
+# Widening to 2 s would fix delta at no cost to timeline density — the STEP controls how
+# many windows you get, the WINDOW controls whether each one is trustworthy — but 1 s is
+# what was asked for, so 1 s is what is used. Override with ELLIPTIC_WINDOW_S if the
+# delta band ever needs to be believed.
+WINDOW_SIZE_S = float(os.getenv("ELLIPTIC_WINDOW_S", "1.0"))
 STEP_S = float(os.getenv("ELLIPTIC_STEP_S", "0.5"))
 
 

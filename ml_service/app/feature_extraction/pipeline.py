@@ -34,6 +34,8 @@ Usage:
         print(f"Inserted {result['n_rows']} rows into elliptic_band_stats")
 """
 
+from datetime import timedelta
+
 import numpy as np
 
 from app.core.config import settings
@@ -69,12 +71,10 @@ def elliptic_sliding_multichannel(
     signals:       dict,
     window_size_s: float = None,
     step_s:        float = None,
+    times:         list = None,
 ) -> list[dict]:
     """
     Compute elliptic band stats for all channels across sliding windows.
-
-    Extracted as a standalone public function so both run_elliptic_pipeline()
-    and test_features.py can use the same implementation without duplication.
 
     Args:
         signals:       Dict {channel_name -> 1D np.ndarray} in µV.
@@ -82,37 +82,93 @@ def elliptic_sliding_multichannel(
                        None = full signal as one window.
         step_s:        Step between consecutive windows in seconds.
                        None = no overlap (step equals window size).
+        times:         The `time` column of the same rows the signals came from —
+                       one timestamp per sample. Pass it whenever the samples came
+                       from the DB. See the warning below.
 
     Returns:
-        List of window dicts, one per window:
+        List of window dicts:
           {
-            "time_start": float,   -- seconds from signal start
-            "time_end":   float,   -- seconds from signal start
-            "features": {
-              "fp1": {"delta": {"mean":, "std":, "peak":}, ...},
-              "fp2": {...}, "t3": {...}, "t4": {...},
-            }
+            "time_start": datetime | float,   -- absolute if `times` was given
+            "time_end":   datetime | float,
+            "features":   { "fp1": {"delta": {"mean":, "std":, "peak":}, ...}, ... }
           }
+
+    ⚠ WHY `times` MATTERS — the reason this function used to place every window in
+    the wrong place.
+
+    Sample index is NOT a clock. The bridge reconstructs a uniform 250 Hz timeline
+    but leaves REAL GAPS in it where Bluetooth dropped out — the samples either side
+    of a gap are adjacent in the array and seconds apart in reality. Deriving a
+    window's timestamp from `index / 250` therefore drifts by the total dropout, and
+    keeps drifting for the rest of the session.
+
+    That is not a small correction. Measured against production on 15 Jul: dropout
+    totals ran from 13 s to 66 s per session, so the late windows of session
+    1087fe73 were landing FIFTY-ONE SECONDS from the EEG they described — attributed
+    to entirely the wrong stimulus, with nothing anywhere reporting a problem.
+
+    With `times`, a window's timestamps are read from the samples themselves, and a
+    window whose samples straddle a gap is DROPPED: it holds the right number of
+    samples but does not hold one contiguous window of EEG, so it is not one.
+
+    Without `times` (synthetic signals in tests) the old offset behaviour is kept —
+    there is no gap to worry about when the array is all there is.
     """
     any_sig          = next(iter(signals.values()))
-    total_duration_s = len(any_sig) / settings.SAMPLE_RATE
+    n                = len(any_sig)
+    fs               = settings.SAMPLE_RATE
+    total_duration_s = n / fs
 
     resolved_window, resolved_step = _resolve_window_step(window_size_s, step_s, total_duration_s)
 
-    window_ranges = sliding_windows(total_duration_s, resolved_window, resolved_step)
+    if times is None:
+        # No real timeline to honour: windows are plain offsets from the array start.
+        window_ranges = sliding_windows(total_duration_s, resolved_window, resolved_step)
+        return [
+            {
+                "time_start": t0,
+                "time_end":   t1,
+                "features": {
+                    ch: elliptical_stats_iterate(sig, (t0, t1), fs)
+                    for ch, sig in signals.items()
+                },
+            }
+            for t0, t1 in window_ranges
+        ]
+
+    if len(times) != n:
+        raise ValueError(
+            f"times has {len(times)} entries but the signals have {n} samples — "
+            "they must be the same rows."
+        )
+
+    win_n  = max(1, int(round(resolved_window * fs)))
+    step_n = max(1, int(round(resolved_step * fs)))
+
+    # A window is contiguous iff its wall-clock span matches its sample count. Half a
+    # sample of slack absorbs the µs rounding in the bridge's timestamps.
+    max_span_s = (win_n - 1) / fs + 0.5 / fs
 
     windows = []
-    for time_start, time_end in window_ranges:
-        features = {
-            ch: elliptical_stats_iterate(
-                sig, (time_start, time_end), settings.SAMPLE_RATE
-            )
-            for ch, sig in signals.items()
-        }
+    for start in range(0, n - win_n + 1, step_n):
+        end = start + win_n
+        t0, t_last = times[start], times[end - 1]
+
+        if (t_last - t0).total_seconds() > max_span_s:
+            continue   # spans a Bluetooth dropout — not one contiguous window
+
+        # Seconds-from-array-start, purely so elliptical_stats_iterate slices the
+        # right samples. These are array coordinates, never clock time.
+        slice_range = (start / fs, end / fs)
+
         windows.append({
-            "time_start": time_start,
-            "time_end":   time_end,
-            "features":   features,
+            "time_start": t0,
+            "time_end":   t_last + timedelta(seconds=1 / fs),
+            "features": {
+                ch: elliptical_stats_iterate(sig, slice_range, fs)
+                for ch, sig in signals.items()
+            },
         })
 
     return windows
@@ -164,6 +220,10 @@ def run_elliptic_pipeline(
         ch: np.array([row[ch] for row in samples], dtype=np.float64)
         for ch in settings.CHANNELS
     }
+    # The sample TIMES, carried alongside the values. Without these a window's
+    # timestamp gets derived from its sample index, which silently ignores every
+    # Bluetooth dropout in the session — see elliptic_sliding_multichannel.
+    times = [row["time"] for row in samples]
 
     # ── Step 3: Resolve window parameters ────────────────────────────────────
     total_duration_s = len(next(iter(signals.values()))) / settings.SAMPLE_RATE
@@ -174,6 +234,7 @@ def run_elliptic_pipeline(
         signals,
         window_size_s = resolved_window,
         step_s        = resolved_step,
+        times         = times,
     )
 
     # ── Step 5: Write to DB ───────────────────────────────────────────────────

@@ -102,10 +102,14 @@ class TestEllipticAdapter:
             f"produced it — got: {delete_sql}"
         )
 
-    def test_uses_a_2s_window(self, monkeypatch):
+    def test_uses_the_specified_1s_window(self, monkeypatch):
         """
-        Delta runs to 0.5 Hz: half a cycle in a 1s window. The rows currently in the DB
-        were computed at 1.0s, and their delta statistics are not measuring delta.
+        1s / 0.5s is the client's specification. Pinned so it cannot drift silently.
+
+        Carry the caveat, don't act on it: delta runs to 0.5 Hz, which is half a cycle
+        in a 1s window, so the delta statistics are not really measuring delta. Theta is
+        the lowest band this window fully resolves. Widen the WINDOW (not the step) if
+        delta ever needs to be believed.
         """
         captured = {}
 
@@ -116,7 +120,7 @@ class TestEllipticAdapter:
         monkeypatch.setattr(elliptic, "run_elliptic_pipeline", fake_pipeline)
         elliptic.compute_session_features(FakeConn(), "abc")
 
-        assert captured["window_size_s"] == 2.0
+        assert captured["window_size_s"] == 1.0
         assert captured["step_s"] == 0.5
 
     def test_does_not_commit(self, monkeypatch):

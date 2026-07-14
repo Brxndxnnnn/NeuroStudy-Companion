@@ -10,14 +10,20 @@ Tables written:
   - ml_insights          : generated insight payloads
 
 All functions accept an open SQLAlchemy connection so the caller controls
-the transaction boundary. Uses ON CONFLICT DO NOTHING for idempotency —
-safe to re-run if the pipeline is triggered twice for the same session.
+the transaction boundary.
+
+On re-running: elliptic_band_stats UPSERTS (ON CONFLICT DO UPDATE), so recomputing a
+session overwrites its rows with the new values. DO NOTHING was not enough — it makes
+a re-run safe from duplicates but incapable of CORRECTING anything, so a recompute
+after a bug fix would quietly keep the old numbers and report success.
+
+band_powers still uses DO NOTHING, on purpose: that table belongs to the bridge, and a
+collision there must never overwrite what the bridge recorded live.
 """
 
 import uuid
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 from sqlalchemy import text
-from app.data_access.queries import fetch_session
 
 
 # ── band_powers ────────────────────────────────────────────────────────────────
@@ -38,7 +44,17 @@ def write_band_powers(conn, session_id: str, band_power_rows: list[dict]) -> int
       attention, relaxation, mental_workload, signal_quality
 
     Returns:
-        Number of rows inserted.
+        Number of rows actually written.
+
+    ⚠ band_powers IS THE BRIDGE'S TABLE. The bridge writes it live during a
+    recording, at ~1 Hz, from its own FFT — and those are POWER values in µV².
+    Anything the ML service writes here is interleaved, on the same session and the
+    same time axis, with no column saying which producer it came from. The results
+    page reads this table and would plot the two as one series.
+
+    Nothing in the ML service calls this today, and it should stay that way. Derived
+    features belong in their own table (elliptic_band_stats is the precedent). If a
+    use for this ever appears, it needs a producer column and a conversation first.
     """
     if not band_power_rows:
         return 0
@@ -48,7 +64,7 @@ def write_band_powers(conn, session_id: str, band_power_rows: list[dict]) -> int
         for row in band_power_rows
     ]
 
-    conn.execute(text("""
+    result = conn.execute(text("""
         INSERT INTO band_powers (
             session_id, time, current_event_id,
             attention, relaxation, mental_workload, signal_quality,
@@ -67,7 +83,10 @@ def write_band_powers(conn, session_id: str, band_power_rows: list[dict]) -> int
         ON CONFLICT (session_id, time) DO NOTHING
     """), rows_with_session)
 
-    return len(rows_with_session)
+    # The DB's count, not the caller's hope. DO NOTHING is kept here deliberately —
+    # colliding with a row the BRIDGE wrote must never overwrite it — so a run that
+    # writes nothing must be able to say so.
+    return result.rowcount if result.rowcount is not None and result.rowcount >= 0 else 0
 
 
 # ── elliptic_band_stats ────────────────────────────────────────────────────────
@@ -117,32 +136,41 @@ def write_elliptic_band_stats(
         Total number of rows inserted (= N windows x 4 channels).
 
     Note:
-        time_start and time_end in the windows list are floats (seconds offset
-        from the start of the signal). This function converts them to proper
-        timestamptz values by calling fetch_session() to get session start_time,
-        then adding the offset. This keeps raw SQL confined to queries.py while
-        still allowing a convenient single-call interface for callers.
+        time_start / time_end must be ABSOLUTE datetimes, as produced by
+        elliptic_sliding_multichannel() when it is given the sample times.
 
-        Conscious trade-off: the writer triggers one SELECT (via fetch_session)
-        in addition to the INSERT. The alternative is for callers to resolve
-        session_start themselves and pass absolute datetimes in — stricter
-        separation but more wiring. Convenience is preferred here since the
-        caller would always need fetch_session anyway.
+        This used to take float offsets and rebase them onto sessions.start_time,
+        which was wrong twice over:
+
+          * start_time is not when the EEG starts. The bridge anchors its clock to
+            the first frame it receives, which lands anywhere from -0.3 s to +1.2 s
+            from start_time across the recorded sessions. Every window was shifted
+            by that much.
+
+          * offsets came from sample INDEX / 250 Hz, which assumes the recording has
+            no gaps. It has gaps — real ones, where Bluetooth dropped, from 13 s to
+            66 s per session. So the error compounded: the late windows of session
+            1087fe73 were landing FIFTY-ONE SECONDS from the EEG they described,
+            attributed to the wrong stimulus entirely, with nothing reporting a fault.
+
+        Timestamps now come from the samples themselves, so there is nothing left to
+        rebase and nothing to drift.
     """
     if not windows:
         return 0
 
-    # Reuse fetch_session() from queries.py — keeps raw SQL confined to queries.py
-    session = fetch_session(conn, session_id)
-    if session is None:
-        raise ValueError(f"Session {session_id} not found — cannot compute timestamps.")
-
-    session_start = session["start_time"]
-
     rows = []
     for window_number, w in enumerate(windows, start=1):
-        time_start = session_start + timedelta(seconds=w["time_start"])
-        time_end   = session_start + timedelta(seconds=w["time_end"])
+        time_start = w["time_start"]
+        time_end   = w["time_end"]
+
+        if not isinstance(time_start, datetime) or not isinstance(time_end, datetime):
+            raise TypeError(
+                "write_elliptic_band_stats needs ABSOLUTE datetimes. Got "
+                f"{type(time_start).__name__} — the caller is passing float offsets, "
+                "which is what used to shift every window off its own EEG. Pass "
+                "times= to elliptic_sliding_multichannel()."
+            )
 
         for channel, band_stats in w["features"].items():
             rows.append({
@@ -175,7 +203,12 @@ def write_elliptic_band_stats(
                 "gamma_peak":    band_stats["gamma"]["peak"],
             })
 
-    conn.execute(text("""
+    # DO UPDATE, not DO NOTHING. DO NOTHING is idempotent only in the sense that it
+    # cannot duplicate a row — it also cannot CORRECT one. Recomputing a session after
+    # fixing the filter, or retrying a job that was reclaimed mid-run, would have
+    # silently kept the old values and reported success. An upsert overwrites, so a
+    # recompute means what it says.
+    result = conn.execute(text("""
         INSERT INTO elliptic_band_stats (
             session_id, time_start, time_end,
             window_size_s, step_s, channel, window_number,
@@ -194,10 +227,31 @@ def write_elliptic_band_stats(
             :gamma_mean, :gamma_std, :gamma_peak
         )
         ON CONFLICT (session_id, time_start, channel, window_size_s)
-        DO NOTHING
+        DO UPDATE SET
+            time_end      = EXCLUDED.time_end,
+            step_s        = EXCLUDED.step_s,
+            window_number = EXCLUDED.window_number,
+            delta_mean    = EXCLUDED.delta_mean,
+            delta_std     = EXCLUDED.delta_std,
+            delta_peak    = EXCLUDED.delta_peak,
+            theta_mean    = EXCLUDED.theta_mean,
+            theta_std     = EXCLUDED.theta_std,
+            theta_peak    = EXCLUDED.theta_peak,
+            alpha_mean    = EXCLUDED.alpha_mean,
+            alpha_std     = EXCLUDED.alpha_std,
+            alpha_peak    = EXCLUDED.alpha_peak,
+            beta_mean     = EXCLUDED.beta_mean,
+            beta_std      = EXCLUDED.beta_std,
+            beta_peak     = EXCLUDED.beta_peak,
+            gamma_mean    = EXCLUDED.gamma_mean,
+            gamma_std     = EXCLUDED.gamma_std,
+            gamma_peak    = EXCLUDED.gamma_peak
     """), rows)
 
-    return len(rows)
+    # What the DB actually did, not what we asked it to do. len(rows) was the number
+    # of rows ATTEMPTED — under DO NOTHING it happily reported thousands of writes on a
+    # run that changed nothing at all.
+    return result.rowcount if result.rowcount is not None and result.rowcount >= 0 else len(rows)
 
 
 # ── ml_insights ────────────────────────────────────────────────────────────────
