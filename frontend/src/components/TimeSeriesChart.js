@@ -15,9 +15,7 @@ const NO_EVENTS = [];
  * Props:
  *   samples   [{ t_seconds, ... }]                    ascending in t_seconds
  *   panels    [{ label, unit, series, min, max }]     one grid each, top→bottom
- *               series: [{ key, label, color, dash }] color may be a CSS var name;
- *                                                     dash = ECharts lineStyle.type,
- *                                                     for encoding a second dimension
+ *               series: [{ key, label, color }]       color may be a CSS var name
  *   events    [{ from, to, label, type }]             stimulus windows (seconds); type "image"|"question"
  *   onVisibleRangeChange(startSec, endSec)            fired on zoom/pan
  *   onEventClick(index)                               fired when an event band is clicked
@@ -142,11 +140,7 @@ export default function TimeSeriesChart({
           symbolSize: 8, // only shown on hover/emphasis
           sampling: "lttb",
           connectNulls: false,
-          // ser.dash lets a caller encode a SECOND dimension without a second hue:
-          // an overlay of 4 channels x 5 bands has only five colours to spend, so
-          // the band takes the colour and the channel takes the dash pattern.
-          // Colour alone would give four indistinguishable lines per hue.
-          lineStyle: { width: 2, color, type: ser.dash || "solid" },
+          lineStyle: { width: 2, color },
           itemStyle: { color },
           emphasis: { focus: "series" },
           endLabel: directLabel

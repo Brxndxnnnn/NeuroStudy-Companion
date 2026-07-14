@@ -21,11 +21,6 @@ const CHANNELS = [
   { key: "t4_right_temporal", prefix: "t4", label: "T4", color: "--ch-t4" },
 ];
 
-// Overlay views put 4 channels x 5 bands on one axis, and there are only five band
-// hues to spend. The band takes the colour, the channel takes the dash pattern —
-// index-aligned with CHANNELS.
-const CHANNEL_DASH = ["solid", [7, 3], [2, 3], [9, 3, 2, 3]];
-
 // Ascending frequency — the hue order is CVD-validated in this sequence.
 const BANDS = [
   { key: "delta", label: "Delta", greek: "δ", color: "--band-delta" },
@@ -266,6 +261,11 @@ export default function SessionResults() {
   // window, so it is displayed but never used to index).
   const [ellipticIdx, setEllipticIdx] = useState(0);
   const [ellipticView, setEllipticView] = useState("window"); // "window" | "timeline"
+  // Which statistic the cross-channel profile draws under "All". Only one can be
+  // drawn: the three do not share a scale (peak runs an order of magnitude above
+  // SD, mean sits at zero), so putting them on a single axis to compare four
+  // channels would be meaningless. SD is the amplitude, hence the default.
+  const [ellipticAllStat, setEllipticAllStat] = useState("std");
   const [events, setEvents] = useState([]);
   const [selectedEvent, setSelectedEvent] = useState(null);
   // One per chart, so a chart can drop its markers without the others losing theirs.
@@ -442,8 +442,8 @@ export default function SessionResults() {
   }, [range, samples]);
 
   // ── Frequency bands ───────────────────────────────────────────────────────
-  // `channel` holds either a channel prefix or one of the multi-channel views.
-  const bandMulti = channel === "stacked" || channel === "overlay";
+  // `channel` holds either a channel prefix or "stacked".
+  const bandMulti = channel === "stacked";
 
   const bandPanels = useMemo(() => {
     if (channel === "stacked") {
@@ -459,25 +459,6 @@ export default function SessionResults() {
           color: b.color,
         })),
       }));
-    }
-    if (channel === "overlay") {
-      // 4 channels x 5 bands on one axis. Only five hues exist, so the band takes
-      // the colour and the channel takes the dash pattern — otherwise this would
-      // be four indistinguishable lines per hue.
-      return [
-        {
-          label: "Power",
-          unit: "",
-          series: CHANNELS.flatMap((ch, ci) =>
-            BANDS.map((b) => ({
-              key: `${ch.prefix}_${b.key}`,
-              label: `${ch.label} ${b.greek}`,
-              color: b.color,
-              dash: CHANNEL_DASH[ci],
-            }))
-          ),
-        },
-      ];
     }
     return [
       {
@@ -644,7 +625,7 @@ export default function SessionResults() {
       return CHANNELS.map((ch) => ({
         label: ch.label,
         values: Object.fromEntries(
-          BANDS.map((b) => [b.key, ellipticWindow[`${ch.prefix}_${b.key}_std`] ?? null])
+          BANDS.map((b) => [b.key, ellipticWindow[`${ch.prefix}_${b.key}_${ellipticAllStat}`] ?? null])
         ),
       }));
     }
@@ -654,7 +635,7 @@ export default function SessionResults() {
         BANDS.map((b) => [b.key, ellipticWindow[`${ellipticChannel}_${b.key}_${s.key}`] ?? null])
       ),
     }));
-  }, [ellipticWindow, ellipticAll, ellipticChannel]);
+  }, [ellipticWindow, ellipticAll, ellipticAllStat, ellipticChannel]);
 
   // Which stimulus was on screen during this window. A window straddling two
   // stimuli belongs cleanly to neither, so match on its midpoint and say when it
@@ -879,7 +860,7 @@ export default function SessionResults() {
                 <Card className="overflow-hidden">
                   <CardHeader
                     title="Frequency bands"
-                    subtitle="Band power at 1 Hz. Stacked gives a panel per channel; overlay puts all four on one axis, colour by band and dash by channel."
+                    subtitle="Band power at 1 Hz. Stacked gives a panel per channel; pick a channel for a single timeline."
                     actions={
                       <div className="flex flex-wrap items-center gap-2">
                         <div
@@ -887,11 +868,7 @@ export default function SessionResults() {
                           aria-label="Channel"
                           className="inline-flex rounded-lg border border-border bg-inset/60 p-0.5"
                         >
-                          {[
-                            { prefix: "stacked", label: "Stacked" },
-                            { prefix: "overlay", label: "Overlay" },
-                            ...CHANNELS,
-                          ].map((ch) => (
+                          {[{ prefix: "stacked", label: "Stacked" }, ...CHANNELS].map((ch) => (
                             <button
                               key={ch.prefix}
                               onClick={() => setChannel(ch.prefix)}
@@ -1186,19 +1163,53 @@ export default function SessionResults() {
                           </div>
 
                           <div>
-                            <div className="mb-1">
+                            <div className="mb-1 flex flex-wrap items-center justify-between gap-2 px-2">
                               <Label>
                                 {ellipticAll
-                                  ? "SD amplitude by channel · this window only (µV)"
-                                  : `${CHANNELS.find((c) => c.prefix === ellipticChannel)?.label} · SD, peak and mean · this window only (µV)`}
+                                  ? `${
+                                      ELLIPTIC_STATS.find((s) => s.key === ellipticAllStat)?.label
+                                    } amplitude by channel · this window only (µV)`
+                                  : `${
+                                      CHANNELS.find((c) => c.prefix === ellipticChannel)?.label
+                                    } · SD, peak and mean · this window only (µV)`}
                               </Label>
+
+                              {/* Comparing four channels needs ONE statistic on the
+                                  axis — the three do not share a scale. So under
+                                  "All" the statistic is a choice rather than being
+                                  pinned to SD. */}
+                              {ellipticAll && (
+                                <label className="flex items-center gap-2 text-[11px] text-muted">
+                                  <span className="sr-only">Statistic</span>
+                                  <select
+                                    value={ellipticAllStat}
+                                    onChange={(e) => setEllipticAllStat(e.target.value)}
+                                    className="rounded-md border border-border bg-surface px-2 py-1 text-[12px] font-semibold text-ink"
+                                  >
+                                    {ELLIPTIC_STATS.map((s) => (
+                                      <option key={s.key} value={s.key}>
+                                        {s.label}
+                                      </option>
+                                    ))}
+                                  </select>
+                                </label>
+                              )}
                             </div>
+
                             <BandProfileChart groups={ellipticWindowProfile} bands={BANDS} />
+
                             {!ellipticAll && (
                               <p className="px-2 pt-1 text-[11px] leading-snug text-muted">
                                 The three groups do not share a scale — peak runs well above SD, and
                                 mean sits at zero because the signal is bandpassed before the
                                 statistic is taken. Read each group against itself.
+                              </p>
+                            )}
+                            {ellipticAll && ellipticAllStat === "mean" && (
+                              <p className="px-2 pt-1 text-[11px] leading-snug text-muted">
+                                Mean sits near zero for every band and channel by construction — the
+                                signal is bandpassed before the statistic is taken, so it has no DC
+                                left to average. SD is the amplitude.
                               </p>
                             )}
                           </div>
@@ -1212,13 +1223,15 @@ export default function SessionResults() {
                               leaving as a puzzle. */}
                           <div className="overflow-x-auto">
                             {ellipticAll ? (
-                              // All channels: one statistic can be shown, and SD is the
-                              // amplitude. Peak and mean are a click away per channel.
+                              // All channels: one statistic at a time, following the
+                              // same selector as the chart above — a table showing SD
+                              // under a chart showing peak would just be a trap.
                               <table className="w-full text-[12px] tnum">
                                 <thead>
                                   <tr className="text-muted">
                                     <th className="text-left font-semibold py-2 pr-4">
-                                      SD µV · channel
+                                      {ELLIPTIC_STATS.find((s) => s.key === ellipticAllStat)?.label}{" "}
+                                      µV · channel
                                     </th>
                                     {BANDS.map((b) => (
                                       <th
@@ -1247,7 +1260,11 @@ export default function SessionResults() {
                                           key={b.key}
                                           className="py-2 px-3 text-right font-mono text-ink"
                                         >
-                                          {fmtUv(ellipticWindow?.[`${ch.prefix}_${b.key}_std`])}
+                                          {fmtUv(
+                                            ellipticWindow?.[
+                                              `${ch.prefix}_${b.key}_${ellipticAllStat}`
+                                            ]
+                                          )}
                                         </td>
                                       ))}
                                     </tr>
