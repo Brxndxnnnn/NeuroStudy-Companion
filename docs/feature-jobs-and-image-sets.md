@@ -5,6 +5,45 @@ migration `db/migrations/006_oasis_labels_image_sets_feature_jobs.sql`.
 
 ---
 
+## 0. Findings from the deployed `elliptic_band_stats` (15 Jul) — read first
+
+The table is live and the endpoint works, but querying production turned up five
+things that need action before anyone reads results off this data.
+
+**a. The window is 1.0 s. It needs to be 2.0 s.** Deployed rows carry
+`window_size_s = 1.0, step_s = 0.5`. The step is right; the window is not. Delta runs
+down to 0.5 Hz — **half a cycle in a 1-second window** — so the delta statistics are
+not measuring delta. The window decides whether one measurement is trustworthy; the
+step decides how many you get. Shrink the step, never the window. Re-run at
+**2 s / 0.5 s**.
+
+**b. Only ONE session is backfilled.** `1087fe73-3ddb-4105-b27b-5b7dab2f131c`
+(29 Jun) is the only session with any rows — 521 windows × 4 channels. Every other
+completed session returns an empty array. The job needs a backfill over existing
+sessions, not just new ones.
+
+**c. `mean` is not an amplitude and is near-useless.** The signal is bandpassed
+*before* the statistic is taken, and a bandpassed signal is zero-mean by
+construction. Measured on fp1: `|mean| / std` is 0.13 for delta, 0.06 theta, **0.03
+alpha, 0.01 beta, 0.01 gamma**. `std` is the RMS amplitude and is the meaningful
+column. Keep `mean` if it's free, but nothing should be plotted or trained on it
+without knowing this.
+
+**d. `peak` carries artefacts orders of magnitude above EEG.** On fp1 the median peak
+is in the tens of µV but the **maximum is 55,814 µV — 55 millivolts**, and t4 reaches
+79,138 µV. That is not brain activity. Anything consuming `peak` needs to reject or
+clamp these; the results page caps its axis at the 99th percentile, or a single pop
+would flatten every real trace onto the axis.
+
+**e. The repo migration does not match production.** `db/migrations/005` defines
+`elliptic_band_stats` with a `band` text column and `mean`/`std`/`peak`. **The
+deployed table has no `band` column** — it is one row per *(session, time_start,
+channel)* with the bands as columns (`delta_mean`, `delta_std`, `delta_peak`, …
+`gamma_peak`) plus `window_number`. The deployed shape is fine; the migration in the
+repo is stale and will mislead the next person who reads it. Reconcile it.
+
+---
+
 ## 1. Zhengda — when the window/feature job runs, and how it reports
 
 ### The trigger: `sessions.sync_status = 'completed'`. Nothing earlier.
