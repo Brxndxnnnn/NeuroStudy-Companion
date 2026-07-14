@@ -131,11 +131,12 @@ const getSessionResult = async (session_id, client = pool) => {
         ORDER BY ew.sequence_no ASC;`, [session_id, 300])
     return rows
 }
-const backfillSessionResults = async (session_id, client = pool) => {
-    // ✅ Use an explicit transaction to ensure both tables are updated atomically
-    await client.query('BEGIN');
+const backfillSessionResults = async (session_id) => {
+    const client = await pool.connect();
 
     try {
+        // ✅ Start a transaction to ensure atomicity
+        await client.query('BEGIN');
         // 1. Backfill eeg_readings
         await client.query(`
             UPDATE eeg_readings e
@@ -166,6 +167,8 @@ const backfillSessionResults = async (session_id, client = pool) => {
         // ✅ Rollback if EITHER fails, preventing partial/inconsistent data
         await client.query('ROLLBACK');
         throw err; // Re-throw so the controller's try/catch can handle it
+    } finally {
+        await client.release(); // Always release the client back to the pool
     }
 };
 
@@ -266,4 +269,11 @@ const getSessionBandPowerResults = async ({ session_id, start_time, end_time }, 
     };
 }
 
-export default { findAll, findById, pairSessions, startSession, endSession, getSessionResult, backfillSessionResults, getSessionEEGResults, getSessionBandPowerResults }
+const getEllipticBandStats = async (session_id, client = pool) => {
+    const { rows } = await query(client,
+        `SELECT * FROM elliptic_band_stats WHERE session_id = $1`, [session_id]
+    );
+    return rows;
+};
+
+export default { findAll, findById, pairSessions, startSession, endSession, getSessionResult, backfillSessionResults, getSessionEEGResults, getSessionBandPowerResults, getEllipticBandStats }
