@@ -20,7 +20,10 @@
 services:
 
   nginx:
-    ports:
+    # !override REPLACES the base list instead of appending to it. Compose merges
+    # `ports` by concatenation, so without this the droplet would publish 8090 as well
+    # as 80 — the dev port, quietly exposed to the internet, for no reason.
+    ports: !override
       # The droplet serves the public API on :80. Locally the default stays 8090, so it
       # cannot collide with whatever else is already on port 80 on a dev machine.
       - "80:80"
