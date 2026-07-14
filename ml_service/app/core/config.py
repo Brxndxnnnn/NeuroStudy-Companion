@@ -4,16 +4,40 @@ from dotenv import load_dotenv
 load_dotenv()
 
 
+# The rest of the stack names its DB variables POSTGRES_*; this service asks for DB_*.
+# Nothing reconciled the two, so ml_service crashed on import the moment it was deployed
+# with the shared env file — and kept crashing, unnoticed, because uvicorn's reloader
+# keeps the container "Up" while the app inside it dies. The /process endpoint has never
+# been reachable in production.
+#
+# Accept either spelling rather than requiring every env file in the project to agree
+# with this one module.
+_ALIASES = {
+    "DB_USER":     "POSTGRES_USER",
+    "DB_PASSWORD": "POSTGRES_PASSWORD",
+    "DB_HOST":     "POSTGRES_HOST",
+    "DB_PORT":     "POSTGRES_PORT",
+    "DB_NAME":     "POSTGRES_DB",
+}
+
+
 def _require(key: str) -> str:
     """
-    Read a required environment variable.
-    Raises RuntimeError immediately if the variable is missing or empty,
-    rather than silently building a broken connection string.
+    Read a required environment variable, falling back to its POSTGRES_* alias.
+
+    Raises RuntimeError immediately if neither is set, rather than silently building a
+    broken connection string.
     """
     val = os.getenv(key)
     if not val:
+        alias = _ALIASES.get(key)
+        if alias:
+            val = os.getenv(alias)
+    if not val:
+        alias = _ALIASES.get(key)
+        names = f"{key} (or {alias})" if alias else key
         raise RuntimeError(
-            f"Missing required environment variable: {key}. "
+            f"Missing required environment variable: {names}. "
             f"Check your .env or .env.docker file."
         )
     return val
