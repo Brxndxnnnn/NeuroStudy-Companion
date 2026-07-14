@@ -311,13 +311,13 @@ export default function ActiveSessionMockup() {
       alert("Please provide an answer before proceeding.");
       return;
     }
-    await logQuestionHidden();
     if (currentMathIndex < questions.length - 1) {
       const nextIdx = currentMathIndex + 1;
       setCurrentMathIndex(nextIdx);
       setMathInputEnabled(false);
       await logQuestionShown(questions[nextIdx].question_id);
     } else {
+      await logQuestionHidden();
       await endSessionAndGoToSurvey();
     }
   };

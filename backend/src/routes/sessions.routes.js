@@ -356,4 +356,32 @@ router.get(
     sessionController.getSessionBandPowerResults
 )
 
+/**
+ * @openapi
+ * /api/sessions/{session_id}/results/elliptic_band_stats:
+ *  get:
+ *    summary: Retrieve the elliptic band stats for a specific session
+ *    description: |
+ *      This endpoint allows you to retrieve the elliptic band stats for a specific session. You must provide the session_id in the URL.
+ *
+ *      **Note**: The `session_id` must be a valid UUID. If the provided ID does not exist in the database, an error will be returned.
+ *    tags: [Sessions]
+ *    security:
+ *      - bearerAuth: []
+ *    parameters:
+ *      - in: path
+ *        name: session_id
+ *        required: true
+ *    responses:
+ *      200:
+ *        description: Elliptic band stats retrieved successfully
+ *      404:
+ *        description: Could not find session with the provided session_id
+ */
+router.get(
+    '/:session_id/results/elliptic_band_stats',
+    requirePermission(PERMS.SESSIONS_READ_OWN_CLINIC),
+    sessionController.getSessionEllipticBandStats
+)
+
 export default router
