@@ -252,7 +252,16 @@ export default function SessionResults() {
   const [ellipticRows, setEllipticRows] = useState([]);
   const [ellipticMeta, setEllipticMeta] = useState(null);
   const [ellipticError, setEllipticError] = useState("");
-  const [ellipticPending, setEllipticPending] = useState(false);
+  // The feature job's own status, straight from sessions.features_status. An empty
+  // elliptic response cannot tell "still computing" from "finished with nothing" from
+  // "the worker crashed" — only the worker knows, and this is how it says so.
+  //   null / "running" → computing (poll)
+  //   "ready"          → rows exist
+  //   "failed"         → features_error explains why
+  const [featuresStatus, setFeaturesStatus] = useState(null);
+  const [featuresError, setFeaturesError] = useState("");
+  const [sessionId, setSessionId] = useState(null);
+  const [pollTimedOut, setPollTimedOut] = useState(false);
   const [ellipticChannel, setEllipticChannel] = useState("fp1");
   const [ellipticStat, setEllipticStat] = useState("std");
   const [ellipticRange, setEllipticRange] = useState({ from: 0, to: 0 });
@@ -321,6 +330,9 @@ export default function SessionResults() {
         const sData = await sRes.json();
         const session = sData.session || sData;
         if (session.client_name) setPatientName(session.client_name);
+        setSessionId(sessionId);
+        setFeaturesStatus(session.features_status ?? null);
+        setFeaturesError(session.features_error || "");
 
         let durSec = 0;
         if (session.start_time && session.end_time) {
@@ -383,12 +395,10 @@ export default function SessionResults() {
           }
         }
 
-        // Elliptic band stats are computed by ml_service AFTER the session ends,
-        // so on a freshly-finished session this can legitimately be empty for a
-        // while. The endpoint reports no job status, so an empty array is
-        // ambiguous — "still computing", "produced nothing" and "the worker
-        // crashed" all look identical from here. Say so rather than showing an
-        // empty chart or an unbounded spinner, and offer a retry.
+        // Elliptic band stats are computed by ml_service AFTER the bridge marks the
+        // session completed, so on a freshly-finished session they legitimately are
+        // not there yet. sessions.features_status (above) says which case this is;
+        // the rows are only expected once it reads 'ready'.
         if (!elRes || !elRes.ok) {
           setEllipticError("Failed to load elliptic band statistics.");
         } else {
@@ -397,9 +407,7 @@ export default function SessionResults() {
             Array.isArray(elData) ? elData : [],
             session.start_time
           );
-          if (elRows.length === 0) {
-            setEllipticPending(true);
-          } else {
+          if (elRows.length > 0) {
             setEllipticRows(elRows);
             setEllipticMeta(meta);
             setEllipticRange({
@@ -420,6 +428,72 @@ export default function SessionResults() {
     };
     load();
   }, []);
+
+  // The feature job runs after the recording ends, so a technician who goes straight
+  // from the last math question to the results screen will usually arrive BEFORE the
+  // rows exist. Poll until the worker says 'ready', then pull the rows in — the chart
+  // appears on its own rather than requiring a reload nobody would think to do.
+  //
+  // Bounded, because a worker that dies leaves the status on 'running' until its stale
+  // claim is reclaimed. An unbounded poll would spin forever showing "computing" for a
+  // job that is never coming back.
+  const ellipticComputing =
+    ellipticRows.length === 0 &&
+    !ellipticError &&
+    featuresStatus !== "failed" &&
+    !pollTimedOut;
+
+  useEffect(() => {
+    if (!sessionId || !ellipticComputing || isLoading) return;
+
+    let cancelled = false;
+    const startedAt = Date.now();
+    const TIMEOUT_MS = 3 * 60 * 1000;
+
+    const poll = async () => {
+      if (cancelled) return;
+
+      if (Date.now() - startedAt > TIMEOUT_MS) {
+        setPollTimedOut(true);
+        return;
+      }
+
+      try {
+        const sRes = await getSession(sessionId);
+        if (!sRes.ok || cancelled) return;
+        const sData = await sRes.json();
+        const session = sData.session || sData;
+
+        setFeaturesStatus(session.features_status ?? null);
+        setFeaturesError(session.features_error || "");
+
+        if (session.features_status === "failed") return;   // stop; the card explains
+        if (session.features_status !== "ready") return;    // still going; tick again
+
+        const elRes = await getSessionEllipticBandStats(sessionId).catch(() => null);
+        if (!elRes || !elRes.ok || cancelled) return;
+
+        const { rows, meta } = buildEllipticRows(await elRes.json(), session.start_time);
+        if (!rows.length || cancelled) return;
+
+        setEllipticRows(rows);
+        setEllipticMeta(meta);
+        setEllipticRange({
+          from: rows[0].t_seconds,
+          to: rows[rows.length - 1].t_seconds,
+        });
+      } catch {
+        // A transient failure is not a verdict — the next tick tries again.
+      }
+    };
+
+    poll();
+    const id = setInterval(poll, 5000);
+    return () => {
+      cancelled = true;
+      clearInterval(id);
+    };
+  }, [sessionId, ellipticComputing, isLoading]);
 
   const onEegRange = useCallback((from, to) => setRange({ from, to }), []);
   const onBandRange = useCallback((from, to) => setBandRange({ from, to }), []);
@@ -1073,24 +1147,46 @@ export default function SessionResults() {
                     <div className="p-5">
                       <Alert tone="crit">{ellipticError}</Alert>
                     </div>
-                  ) : ellipticPending ? (
-                    // An empty response is genuinely ambiguous: the endpoint carries
-                    // no job status, so "still computing", "finished with nothing"
-                    // and "the worker crashed" are indistinguishable from here. Do
-                    // not spin forever pretending it is the first one.
+                  ) : featuresStatus === "failed" ? (
+                    // The worker ran and could not do it. It said why — show that,
+                    // rather than a generic failure the technician cannot act on.
                     <div className="p-8 flex flex-col items-center gap-3 text-center">
-                      <Alert tone="warn">
-                        No elliptic band statistics for this session yet.
-                      </Alert>
+                      <Alert tone="crit">Could not compute the band statistics.</Alert>
+                      {featuresError && (
+                        <p className="max-w-lg font-mono text-[11px] leading-relaxed text-muted">
+                          {featuresError}
+                        </p>
+                      )}
                       <p className="max-w-md text-[12px] leading-relaxed text-muted">
-                        These are computed after the recording ends, so they may still be
-                        running. The endpoint reports no job status, so a session that is
-                        still processing looks the same as one that failed — reload to
-                        check again.
+                        Every other chart on this page comes from the bridge and is
+                        unaffected — only this card depends on the post-session job.
+                      </p>
+                    </div>
+                  ) : pollTimedOut ? (
+                    <div className="p-8 flex flex-col items-center gap-3 text-center">
+                      <Alert tone="warn">Still not ready after three minutes.</Alert>
+                      <p className="max-w-md text-[12px] leading-relaxed text-muted">
+                        The job is taking longer than expected, or the worker is not
+                        running. It is safe to keep waiting — this only stops the page
+                        from polling forever.
                       </p>
                       <Button variant="secondary" onClick={() => window.location.reload()}>
                         Check again
                       </Button>
+                    </div>
+                  ) : ellipticComputing ? (
+                    // Computing, for real — sessions.features_status says so, and the
+                    // page is polling. The chart appears by itself when it lands.
+                    <div className="p-10 flex flex-col items-center gap-3 text-center">
+                      <Spinner size={26} className="text-accent" />
+                      <span className="font-medium text-ink">
+                        Computing band statistics…
+                      </span>
+                      <p className="max-w-md text-[12px] leading-relaxed text-muted">
+                        These are computed after the recording ends. This chart will
+                        appear on its own — no need to reload. Everything else on this
+                        page is already loaded.
+                      </p>
                     </div>
                   ) : (
                     <>
