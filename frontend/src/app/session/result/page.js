@@ -36,22 +36,49 @@ const MENTAL = [
   { key: "mental_workload", label: "Workload", color: "--ms-workload" },
 ];
 
-// Which statistic the elliptic card plots. All three are µV amplitude.
+// Which statistic the elliptic card plots.
+//
+// SD is the default and the only honest "amplitude" of the three. ml_service
+// bandpasses the signal before taking the statistic, and a bandpassed signal is
+// zero-mean by construction, so *_mean collapses towards zero: on the one session
+// that has data, |mean|/std is 0.03 for alpha and 0.01 for beta and gamma. SD is
+// the RMS amplitude about that zero. Mean is kept because it is in the data and
+// hiding a column invites someone to "fix" its absence, but it is labelled for
+// what it is.
 const ELLIPTIC_STATS = [
-  { key: "mean", label: "Mean" },
-  { key: "peak", label: "Peak" },
-  { key: "std", label: "SD" },
+  { key: "std", label: "SD", hint: "RMS amplitude — the meaningful one" },
+  { key: "peak", label: "Peak", hint: "Largest excursion in the window" },
+  { key: "mean", label: "Mean", hint: "≈0 by construction: the signal is bandpassed first" },
 ];
 
-// elliptic_band_stats arrives LONG — one row per (window x channel x band), so a
-// 4-channel 5-band session yields 20 rows per window. Pivot to one row per window
-// keyed <channel>_<band>_<stat>, which is the shape TimeSeriesChart consumes.
+// Peak carries electrode-pop artefacts orders of magnitude above the signal (this
+// session: median peak in the tens of µV, maximum 55,814 µV — 55 millivolts, which
+// is not EEG). Autoscaling to that flattens every real trace onto the axis, so the
+// axis is capped at a robust upper bound and the excursions are reported instead of
+// being allowed to erase the data.
+const ROBUST_PCT = 0.99;
+const OUTLIER_RATIO = 3;
+
+function percentile(sorted, p) {
+  if (!sorted.length) return null;
+  const i = Math.min(sorted.length - 1, Math.max(0, Math.round(p * (sorted.length - 1))));
+  return sorted[i];
+}
+
+// elliptic_band_stats arrives as one row per (window x CHANNEL) — 4 rows per
+// window — with the five bands as COLUMNS (delta_mean, delta_std, delta_peak, …).
+// Pivot to one row per window, keyed <channel>_<band>_<stat>, which is the shape
+// TimeSeriesChart consumes.
+//
+// ⚠ This is NOT the shape db/migrations/005 describes (that has a `band` text
+// column). The deployed table is the source of truth here; the migration in the
+// repo is stale.
 //
 // The endpoint has no ORDER BY and no t_seconds (unlike every sibling results
 // endpoint), so both are produced here: the seconds axis is derived from
-// sessions.start_time, the same origin the EEG, band-power and event-marker
-// series already use — otherwise this card's x-axis would silently disagree with
-// the charts above it and with the stimulus markers.
+// sessions.start_time, the same origin the EEG, band-power and event-marker series
+// already use — otherwise this card's x-axis would silently disagree with the
+// charts above it and with the stimulus markers.
 function buildEllipticRows(rows, sessionStart) {
   if (!Array.isArray(rows) || rows.length === 0) return { rows: [], meta: null };
 
@@ -59,15 +86,18 @@ function buildEllipticRows(rows, sessionStart) {
   const byWindow = new Map();
 
   for (const r of rows) {
+    if (!r.channel) continue;
     const ms = new Date(r.time_start).getTime();
     let w = byWindow.get(ms);
     if (!w) {
       w = { t_seconds: (ms - t0) / 1000 };
       byWindow.set(ms, w);
     }
-    w[`${r.channel}_${r.band}_mean`] = r.mean;
-    w[`${r.channel}_${r.band}_peak`] = r.peak;
-    w[`${r.channel}_${r.band}_std`] = r.std;
+    for (const b of BANDS) {
+      for (const s of ELLIPTIC_STATS) {
+        w[`${r.channel}_${b.key}_${s.key}`] = r[`${b.key}_${s.key}`];
+      }
+    }
   }
 
   const out = [...byWindow.values()].sort((a, b) => a.t_seconds - b.t_seconds);
@@ -193,7 +223,7 @@ export default function SessionResults() {
   const [ellipticError, setEllipticError] = useState("");
   const [ellipticPending, setEllipticPending] = useState(false);
   const [ellipticChannel, setEllipticChannel] = useState("fp1");
-  const [ellipticStat, setEllipticStat] = useState("mean");
+  const [ellipticStat, setEllipticStat] = useState("std");
   const [ellipticRange, setEllipticRange] = useState({ from: 0, to: 0 });
   const [events, setEvents] = useState([]);
   const [selectedEvent, setSelectedEvent] = useState(null);
@@ -377,11 +407,39 @@ export default function SessionResults() {
   // µV amplitude statistics from an elliptic bandpass, not µV² FFT power. The two
   // are never combined on one axis, which is why this is its own card rather than
   // another panel on the one above.
+  // Robust y-axis. An electrode pop puts a single 55 mV value in `peak`, and left
+  // to autoscale it compresses every genuine trace onto the zero line — the chart
+  // would technically be correct and completely unreadable. Cap the axis at the
+  // 99th percentile and count what lands above it, so the outliers are declared
+  // rather than allowed to erase the signal.
+  const ellipticAxis = useMemo(() => {
+    if (!ellipticRows.length) return { max: undefined, clipped: 0, maxValue: null };
+    const vals = [];
+    for (const row of ellipticRows) {
+      for (const b of BANDS) {
+        const v = row[`${ellipticChannel}_${b.key}_${ellipticStat}`];
+        if (typeof v === "number" && Number.isFinite(v)) vals.push(v);
+      }
+    }
+    if (!vals.length) return { max: undefined, clipped: 0, maxValue: null };
+    const sorted = [...vals].sort((a, b) => a - b);
+    const p99 = percentile(sorted, ROBUST_PCT);
+    const maxValue = sorted[sorted.length - 1];
+    // Only clamp when there is a genuine outlier tail; a well-behaved series keeps
+    // its natural autoscale.
+    if (p99 == null || maxValue <= p99 * OUTLIER_RATIO) {
+      return { max: undefined, clipped: 0, maxValue };
+    }
+    const cap = p99;
+    return { max: cap, clipped: vals.filter((v) => v > cap).length, maxValue };
+  }, [ellipticRows, ellipticChannel, ellipticStat]);
+
   const ellipticPanels = useMemo(
     () => [
       {
-        label: ELLIPTIC_STATS.find((s) => s.key === ellipticStat)?.label ?? "Mean",
+        label: ELLIPTIC_STATS.find((s) => s.key === ellipticStat)?.label ?? "SD",
         unit: "µV",
+        max: ellipticAxis.max,
         series: BANDS.map((b) => ({
           key: `${ellipticChannel}_${b.key}_${ellipticStat}`,
           label: b.label,
@@ -389,7 +447,7 @@ export default function SessionResults() {
         })),
       },
     ],
-    [ellipticChannel, ellipticStat]
+    [ellipticChannel, ellipticStat, ellipticAxis.max]
   );
 
   const ellipticStats = useMemo(() => {
@@ -719,6 +777,7 @@ export default function SessionResults() {
                                 key={s.key}
                                 onClick={() => setEllipticStat(s.key)}
                                 aria-pressed={ellipticStat === s.key}
+                                title={s.hint}
                                 className={`px-3 py-1.5 rounded-md text-[12px] font-semibold transition-colors ${
                                   ellipticStat === s.key
                                     ? "bg-surface text-ink shadow-sm"
@@ -785,6 +844,28 @@ export default function SessionResults() {
                           height={220}
                         />
                       </div>
+
+                      {ellipticStat === "mean" && (
+                        <div className="px-5 pb-2">
+                          <Alert tone="warn">
+                            Mean sits near zero for every band by construction — the signal is
+                            bandpassed before the statistic is taken, so it has no DC left to
+                            average. SD is the amplitude.
+                          </Alert>
+                        </div>
+                      )}
+
+                      {ellipticAxis.clipped > 0 && (
+                        <div className="px-5 pb-2">
+                          <Alert tone="warn">
+                            Axis capped at {fmtUv(ellipticAxis.max)} µV — {ellipticAxis.clipped}{" "}
+                            {ellipticAxis.clipped === 1 ? "value" : "values"} run above it, peaking
+                            at {fmtUv(ellipticAxis.maxValue)} µV. Excursions that large are
+                            electrode artefacts, not EEG; without the cap they would flatten every
+                            real trace onto the axis.
+                          </Alert>
+                        </div>
+                      )}
 
                       {ellipticDead.length > 0 && (
                         <div className="px-5 pb-2">
