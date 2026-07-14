@@ -6,6 +6,7 @@ import {
   getSessionResultsFiltered,
   getSessionResultsBandPower,
   getSessionResultEvents,
+  getSessionEllipticBandStats,
 } from "@/utils/api";
 import { SessionTopBar } from "@/components/TopNav";
 import { Card, CardHeader, Button, Label, Pill, Alert, Spinner } from "@/components/ui";
@@ -34,6 +35,49 @@ const MENTAL = [
   { key: "relaxation", label: "Relaxation", color: "--ms-relaxation" },
   { key: "mental_workload", label: "Workload", color: "--ms-workload" },
 ];
+
+// Which statistic the elliptic card plots. All three are µV amplitude.
+const ELLIPTIC_STATS = [
+  { key: "mean", label: "Mean" },
+  { key: "peak", label: "Peak" },
+  { key: "std", label: "SD" },
+];
+
+// elliptic_band_stats arrives LONG — one row per (window x channel x band), so a
+// 4-channel 5-band session yields 20 rows per window. Pivot to one row per window
+// keyed <channel>_<band>_<stat>, which is the shape TimeSeriesChart consumes.
+//
+// The endpoint has no ORDER BY and no t_seconds (unlike every sibling results
+// endpoint), so both are produced here: the seconds axis is derived from
+// sessions.start_time, the same origin the EEG, band-power and event-marker
+// series already use — otherwise this card's x-axis would silently disagree with
+// the charts above it and with the stimulus markers.
+function buildEllipticRows(rows, sessionStart) {
+  if (!Array.isArray(rows) || rows.length === 0) return { rows: [], meta: null };
+
+  const t0 = new Date(sessionStart).getTime();
+  const byWindow = new Map();
+
+  for (const r of rows) {
+    const ms = new Date(r.time_start).getTime();
+    let w = byWindow.get(ms);
+    if (!w) {
+      w = { t_seconds: (ms - t0) / 1000 };
+      byWindow.set(ms, w);
+    }
+    w[`${r.channel}_${r.band}_mean`] = r.mean;
+    w[`${r.channel}_${r.band}_peak`] = r.peak;
+    w[`${r.channel}_${r.band}_std`] = r.std;
+  }
+
+  const out = [...byWindow.values()].sort((a, b) => a.t_seconds - b.t_seconds);
+  const meta = {
+    window_size_s: rows[0].window_size_s,
+    step_s: rows[0].step_s,
+    windows: out.length,
+  };
+  return { rows: out, meta };
+}
 
 // First index with t_seconds >= target (binary search; rows are ascending).
 function lowerBound(rows, target) {
@@ -144,6 +188,13 @@ export default function SessionResults() {
   const [samples, setSamples] = useState([]);
   const [bandRows, setBandRows] = useState([]);
   const [bandError, setBandError] = useState("");
+  const [ellipticRows, setEllipticRows] = useState([]);
+  const [ellipticMeta, setEllipticMeta] = useState(null);
+  const [ellipticError, setEllipticError] = useState("");
+  const [ellipticPending, setEllipticPending] = useState(false);
+  const [ellipticChannel, setEllipticChannel] = useState("fp1");
+  const [ellipticStat, setEllipticStat] = useState("mean");
+  const [ellipticRange, setEllipticRange] = useState({ from: 0, to: 0 });
   const [events, setEvents] = useState([]);
   const [selectedEvent, setSelectedEvent] = useState(null);
   const [isLoading, setIsLoading] = useState(true);
@@ -196,10 +247,11 @@ export default function SessionResults() {
         // 2. Filtered EEG (full-resolution; the chart decimates), the 1 Hz
         //    band-power stream, and the per-event summary, in parallel. Band or
         //    event failures degrade their own features — the EEG still renders.
-        const [fRes, bRes, eRes] = await Promise.all([
+        const [fRes, bRes, eRes, elRes] = await Promise.all([
           getSessionResultsFiltered(sessionId, 0, Math.ceil(durSec) + 1),
           getSessionResultsBandPower(sessionId).catch(() => null),
           getSessionResultEvents(sessionId).catch(() => null),
+          getSessionEllipticBandStats(sessionId).catch(() => null),
         ]);
 
         if (!fRes.ok) throw new Error("filtered");
@@ -241,6 +293,32 @@ export default function SessionResults() {
             setVitalsRange(span);
           }
         }
+
+        // Elliptic band stats are computed by ml_service AFTER the session ends,
+        // so on a freshly-finished session this can legitimately be empty for a
+        // while. The endpoint reports no job status, so an empty array is
+        // ambiguous — "still computing", "produced nothing" and "the worker
+        // crashed" all look identical from here. Say so rather than showing an
+        // empty chart or an unbounded spinner, and offer a retry.
+        if (!elRes || !elRes.ok) {
+          setEllipticError("Failed to load elliptic band statistics.");
+        } else {
+          const elData = await elRes.json();
+          const { rows: elRows, meta } = buildEllipticRows(
+            Array.isArray(elData) ? elData : [],
+            session.start_time
+          );
+          if (elRows.length === 0) {
+            setEllipticPending(true);
+          } else {
+            setEllipticRows(elRows);
+            setEllipticMeta(meta);
+            setEllipticRange({
+              from: elRows[0].t_seconds,
+              to: elRows[elRows.length - 1].t_seconds,
+            });
+          }
+        }
       } catch (err) {
         setError(
           err.message === "filtered"
@@ -258,6 +336,7 @@ export default function SessionResults() {
   const onBandRange = useCallback((from, to) => setBandRange({ from, to }), []);
   const onMentalRange = useCallback((from, to) => setMentalRange({ from, to }), []);
   const onVitalsRange = useCallback((from, to) => setVitalsRange({ from, to }), []);
+  const onEllipticRange = useCallback((from, to) => setEllipticRange({ from, to }), []);
 
   // Which traces the EEG chart draws. Memoised because EegStripChart re-inits the
   // canvas whenever this array identity changes.
@@ -293,19 +372,78 @@ export default function SessionResults() {
     }));
   }, [bandRows, channel, bandRange]);
 
-  // Cross-channel spectral profile for the visible window.
-  const bandProfile = useMemo(() => {
-    if (!bandRows.length) return [];
+  // ── Elliptic band statistics (ml_service) ─────────────────────────────────
+  // Same shape as the band-power card above, but a different QUANTITY: these are
+  // µV amplitude statistics from an elliptic bandpass, not µV² FFT power. The two
+  // are never combined on one axis, which is why this is its own card rather than
+  // another panel on the one above.
+  const ellipticPanels = useMemo(
+    () => [
+      {
+        label: ELLIPTIC_STATS.find((s) => s.key === ellipticStat)?.label ?? "Mean",
+        unit: "µV",
+        series: BANDS.map((b) => ({
+          key: `${ellipticChannel}_${b.key}_${ellipticStat}`,
+          label: b.label,
+          color: b.color,
+        })),
+      },
+    ],
+    [ellipticChannel, ellipticStat]
+  );
+
+  const ellipticStats = useMemo(() => {
+    if (!ellipticRows.length) return [];
+    return BANDS.map((b) => ({
+      ...b,
+      ...seriesStats(
+        ellipticRows,
+        `${ellipticChannel}_${b.key}_${ellipticStat}`,
+        ellipticRange.from,
+        ellipticRange.to
+      ),
+    }));
+  }, [ellipticRows, ellipticChannel, ellipticStat, ellipticRange]);
+
+  const ellipticProfile = useMemo(() => {
+    if (!ellipticRows.length) return [];
     return CHANNELS.map((ch) => ({
       label: ch.label,
       values: Object.fromEntries(
         BANDS.map((b) => [
           b.key,
-          seriesStats(bandRows, `${ch.prefix}_${b.key}`, bandRange.from, bandRange.to).mean,
+          seriesStats(
+            ellipticRows,
+            `${ch.prefix}_${b.key}_${ellipticStat}`,
+            ellipticRange.from,
+            ellipticRange.to
+          ).mean,
         ])
       ),
     }));
-  }, [bandRows, bandRange]);
+  }, [ellipticRows, ellipticStat, ellipticRange]);
+
+  // A railed electrode still produces rows here — an elliptic filter over a
+  // constant returns a near-zero amplitude, which plots as a perfectly flat trace
+  // rather than as an absence. Name the channels that recorded nothing, so this
+  // card cannot imply the temporal lobes were measured when they were not.
+  const ellipticDead = useMemo(() => {
+    if (!ellipticRows.length) return [];
+    return CHANNELS.filter((ch) => {
+      const peak = Math.max(
+        ...BANDS.map(
+          (b) =>
+            seriesStats(
+              ellipticRows,
+              `${ch.prefix}_${b.key}_peak`,
+              ellipticRange.from,
+              ellipticRange.to
+            ).mean ?? 0
+        )
+      );
+      return peak < FLAT_PKPK_UV;
+    }).map((ch) => ch.label);
+  }, [ellipticRows, ellipticRange]);
 
   // ── Mental state ──────────────────────────────────────────────────────────
   // The bridge writes these as a 0–1 fraction, so the axis is pinned to 0–1
@@ -555,12 +693,154 @@ export default function SessionResults() {
                     </div>
                   </div>
 
-                  <div className="border-t border-border px-3 sm:px-4 py-4">
-                    <div className="px-2 mb-1">
-                      <Label>Spectral profile by channel · visible window</Label>
+                </Card>
+
+                {/* ── Elliptic band statistics (ml_service) ─────────────────
+                    Replaces the old spectral profile, which was derived from the
+                    bridge's FFT power. These are µV AMPLITUDE statistics from an
+                    elliptic bandpass — a different quantity from the µV² power in
+                    the card above, so they get their own card and their own axis
+                    and are never mixed with it. */}
+                <Card className="overflow-hidden">
+                  <CardHeader
+                    title="Spectral amplitude · elliptic filter"
+                    subtitle={
+                      ellipticMeta
+                        ? `Per-band amplitude in µV over a ${ellipticMeta.window_size_s}s window ` +
+                          `stepped every ${ellipticMeta.step_s}s · ${ellipticMeta.windows} windows.`
+                        : "Per-band amplitude in µV, computed after the session ends."
+                    }
+                    actions={
+                      ellipticRows.length ? (
+                        <div className="flex gap-2">
+                          <div className="flex items-center gap-1 rounded-lg bg-inset p-1">
+                            {ELLIPTIC_STATS.map((s) => (
+                              <button
+                                key={s.key}
+                                onClick={() => setEllipticStat(s.key)}
+                                aria-pressed={ellipticStat === s.key}
+                                className={`px-3 py-1.5 rounded-md text-[12px] font-semibold transition-colors ${
+                                  ellipticStat === s.key
+                                    ? "bg-surface text-ink shadow-sm"
+                                    : "text-muted hover:text-ink"
+                                }`}
+                              >
+                                {s.label}
+                              </button>
+                            ))}
+                          </div>
+                          <div className="flex items-center gap-1 rounded-lg bg-inset p-1">
+                            {CHANNELS.map((ch) => (
+                              <button
+                                key={ch.prefix}
+                                onClick={() => setEllipticChannel(ch.prefix)}
+                                aria-pressed={ellipticChannel === ch.prefix}
+                                className={`px-3 py-1.5 rounded-md font-mono text-[12px] font-semibold transition-colors ${
+                                  ellipticChannel === ch.prefix
+                                    ? "bg-surface text-ink shadow-sm"
+                                    : "text-muted hover:text-ink"
+                                }`}
+                              >
+                                {ch.label}
+                              </button>
+                            ))}
+                          </div>
+                        </div>
+                      ) : null
+                    }
+                  />
+
+                  {ellipticError ? (
+                    <div className="p-5">
+                      <Alert tone="crit">{ellipticError}</Alert>
                     </div>
-                    <BandProfileChart groups={bandProfile} bands={BANDS} />
-                  </div>
+                  ) : ellipticPending ? (
+                    // An empty response is genuinely ambiguous: the endpoint carries
+                    // no job status, so "still computing", "finished with nothing"
+                    // and "the worker crashed" are indistinguishable from here. Do
+                    // not spin forever pretending it is the first one.
+                    <div className="p-8 flex flex-col items-center gap-3 text-center">
+                      <Alert tone="warn">
+                        No elliptic band statistics for this session yet.
+                      </Alert>
+                      <p className="max-w-md text-[12px] leading-relaxed text-muted">
+                        These are computed after the recording ends, so they may still be
+                        running. The endpoint reports no job status, so a session that is
+                        still processing looks the same as one that failed — reload to
+                        check again.
+                      </p>
+                      <Button variant="secondary" onClick={() => window.location.reload()}>
+                        Check again
+                      </Button>
+                    </div>
+                  ) : (
+                    <>
+                      <div className="p-3 sm:p-4">
+                        <TimeSeriesChart
+                          samples={ellipticRows}
+                          panels={ellipticPanels}
+                          events={events}
+                          onEventClick={setSelectedEvent}
+                          onVisibleRangeChange={onEllipticRange}
+                          height={220}
+                        />
+                      </div>
+
+                      {ellipticDead.length > 0 && (
+                        <div className="px-5 pb-2">
+                          <Alert tone="warn">
+                            {ellipticDead.join(" and ")} recorded no signal — an elliptic
+                            filter over a railed electrode still returns a value, so these
+                            traces are a flat line, not a measurement.
+                          </Alert>
+                        </div>
+                      )}
+
+                      <div className="border-t border-border px-5 py-4">
+                        <div className="flex items-center justify-between mb-3">
+                          <Label>
+                            {ELLIPTIC_STATS.find((s) => s.key === ellipticStat)?.label} amplitude ·{" "}
+                            {CHANNELS.find((c) => c.prefix === ellipticChannel)?.label}
+                          </Label>
+                          <span className="font-mono text-[11px] text-muted tnum">
+                            {ellipticRange.from.toFixed(1)}s – {ellipticRange.to.toFixed(1)}s
+                          </span>
+                        </div>
+                        <div className="grid grid-cols-2 sm:grid-cols-5 gap-3">
+                          {ellipticStats.map((b) => (
+                            <div
+                              key={b.key}
+                              className="rounded-xl border border-border bg-inset/40 px-4 py-3"
+                            >
+                              <div className="flex items-center gap-2 mb-1.5">
+                                <span
+                                  className="h-2.5 w-2.5 rounded-sm"
+                                  style={{ background: `var(${b.color})` }}
+                                />
+                                <span className="text-[12px] font-semibold text-ink">
+                                  {b.greek} {b.label}
+                                </span>
+                              </div>
+                              <div className="font-mono text-[15px] font-semibold text-ink tnum">
+                                {fmtUv(b.mean)}
+                                <span className="ml-1 text-[11px] font-normal text-muted">µV</span>
+                              </div>
+                            </div>
+                          ))}
+                        </div>
+                      </div>
+
+                      <div className="border-t border-border px-3 sm:px-4 py-4">
+                        <div className="px-2 mb-1">
+                          <Label>
+                            Amplitude by channel · visible window ·{" "}
+                            {ELLIPTIC_STATS.find((s) => s.key === ellipticStat)?.label} µV
+                          </Label>
+                        </div>
+                        <BandProfileChart groups={ellipticProfile} bands={BANDS} />
+                      </div>
+                    </>
+                  )}
                 </Card>
 
                 {/* ── Mental state ─────────────────────────────────────────── */}

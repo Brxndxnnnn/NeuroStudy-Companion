@@ -212,6 +212,27 @@ export async function getSessionResultEvents(sessionId) {
 }
 // Band powers, mental-state indices and vitals — one row/second, so the whole
 // session is cheap to pull. Omit the bounds to get the full session.
+// Elliptic-filter band statistics (ml_service). LONG format — one row per
+// (window x channel x band), not one per window:
+//   { session_id, time_start, time_end, window_size_s, step_s,
+//     channel: "fp1"|"fp2"|"t3"|"t4", band: "delta".."gamma",
+//     mean, std, peak }                                    <- µV AMPLITUDE
+//
+// Three things this endpoint does NOT do, which the caller must handle:
+//   - no ORDER BY, so row order is whatever the hypertable scan returned: SORT.
+//   - no t_seconds (every sibling results endpoint provides one), so the caller
+//     derives it from sessions.start_time — the same origin the others use.
+//   - no start/end bounds: it returns the whole session.
+//
+// ⚠ These are µV amplitude statistics from an elliptic bandpass. band_powers
+// holds FFT POWER in µV². Different quantities — never plot them on one axis.
+export async function getSessionEllipticBandStats(sessionId) {
+  const res = await fetchWithAuth(
+    `${BASE_URL}/sessions/${sessionId}/results/elliptic_band_stats`
+  );
+  return res;
+}
+
 export async function getSessionResultsBandPower(sessionId, startSeconds, endSeconds) {
   const qs = new URLSearchParams();
   if (startSeconds != null) qs.set("start_seconds", startSeconds);
