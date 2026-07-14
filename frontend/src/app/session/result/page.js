@@ -21,6 +21,11 @@ const CHANNELS = [
   { key: "t4_right_temporal", prefix: "t4", label: "T4", color: "--ch-t4" },
 ];
 
+// Overlay views put 4 channels x 5 bands on one axis, and there are only five band
+// hues to spend. The band takes the colour, the channel takes the dash pattern —
+// index-aligned with CHANNELS.
+const CHANNEL_DASH = ["solid", [7, 3], [2, 3], [9, 3, 2, 3]];
+
 // Ascending frequency — the hue order is CVD-validated in this sequence.
 const BANDS = [
   { key: "delta", label: "Delta", greek: "δ", color: "--band-delta" },
@@ -437,26 +442,81 @@ export default function SessionResults() {
   }, [range, samples]);
 
   // ── Frequency bands ───────────────────────────────────────────────────────
-  const bandPanels = useMemo(
-    () => [
+  // `channel` holds either a channel prefix or one of the multi-channel views.
+  const bandMulti = channel === "stacked" || channel === "overlay";
+
+  const bandPanels = useMemo(() => {
+    if (channel === "stacked") {
+      // A grid per channel, each carrying the same five bands. The band names
+      // repeat across panels on purpose: ECharts keys the legend by series name,
+      // so toggling "Alpha" hides alpha in all four at once.
+      return CHANNELS.map((ch) => ({
+        label: ch.label,
+        unit: "",
+        series: BANDS.map((b) => ({
+          key: `${ch.prefix}_${b.key}`,
+          label: b.label,
+          color: b.color,
+        })),
+      }));
+    }
+    if (channel === "overlay") {
+      // 4 channels x 5 bands on one axis. Only five hues exist, so the band takes
+      // the colour and the channel takes the dash pattern — otherwise this would
+      // be four indistinguishable lines per hue.
+      return [
+        {
+          label: "Power",
+          unit: "",
+          series: CHANNELS.flatMap((ch, ci) =>
+            BANDS.map((b) => ({
+              key: `${ch.prefix}_${b.key}`,
+              label: `${ch.label} ${b.greek}`,
+              color: b.color,
+              dash: CHANNEL_DASH[ci],
+            }))
+          ),
+        },
+      ];
+    }
+    return [
       {
         label: "Power",
         unit: "",
         series: BANDS.map((b) => ({ key: `${channel}_${b.key}`, label: b.label, color: b.color })),
       },
-    ],
-    [channel]
-  );
+    ];
+  }, [channel]);
 
   const bandStats = useMemo(() => {
-    if (!bandRows.length) return [];
+    if (!bandRows.length || bandMulti) return [];
     return BANDS.map((b) => ({
       ...b,
       ...seriesStats(bandRows, `${channel}_${b.key}`, bandRange.from, bandRange.to),
     }));
-  }, [bandRows, channel, bandRange]);
+  }, [bandRows, channel, bandRange, bandMulti]);
+
+  // In a multi-channel view the per-band rail would have to be repeated four
+  // times; a channel x band grid says the same thing once, and answers the
+  // question the multi-channel views are asked for — which channel carries this.
+  const bandGrid = useMemo(() => {
+    if (!bandRows.length || !bandMulti) return [];
+    return CHANNELS.map((ch) => ({
+      ...ch,
+      values: BANDS.map(
+        (b) => seriesStats(bandRows, `${ch.prefix}_${b.key}`, bandRange.from, bandRange.to).mean
+      ),
+    }));
+  }, [bandRows, bandRange, bandMulti]);
 
   // ── Elliptic band statistics (ml_service) ─────────────────────────────────
+  // `ellipticChannel` is either a channel prefix or "all".
+  const ellipticAll = ellipticChannel === "all";
+  const ellipticShownChannels = useMemo(
+    () => (ellipticAll ? CHANNELS : CHANNELS.filter((c) => c.prefix === ellipticChannel)),
+    [ellipticAll, ellipticChannel]
+  );
+
   // Same shape as the band-power card above, but a different QUANTITY: these are
   // µV amplitude statistics from an elliptic bandpass, not µV² FFT power. The two
   // are never combined on one axis, which is why this is its own card rather than
@@ -470,9 +530,11 @@ export default function SessionResults() {
     if (!ellipticRows.length) return { max: undefined, clipped: 0, maxValue: null };
     const vals = [];
     for (const row of ellipticRows) {
-      for (const b of BANDS) {
-        const v = row[`${ellipticChannel}_${b.key}_${ellipticStat}`];
-        if (typeof v === "number" && Number.isFinite(v)) vals.push(v);
+      for (const ch of ellipticShownChannels) {
+        for (const b of BANDS) {
+          const v = row[`${ch.prefix}_${b.key}_${ellipticStat}`];
+          if (typeof v === "number" && Number.isFinite(v)) vals.push(v);
+        }
       }
     }
     if (!vals.length) return { max: undefined, clipped: 0, maxValue: null };
@@ -486,12 +548,28 @@ export default function SessionResults() {
     }
     const cap = p99;
     return { max: cap, clipped: vals.filter((v) => v > cap).length, maxValue };
-  }, [ellipticRows, ellipticChannel, ellipticStat]);
+  }, [ellipticRows, ellipticShownChannels, ellipticStat]);
 
-  const ellipticPanels = useMemo(
-    () => [
+  const ellipticPanels = useMemo(() => {
+    const statLabel = ELLIPTIC_STATS.find((s) => s.key === ellipticStat)?.label ?? "SD";
+    // "All" gets a grid per channel rather than 20 lines on one axis: these are
+    // absolute amplitudes, and a dead or noisy electrode sits on a completely
+    // different scale from a healthy one, so a shared axis would flatten the rest.
+    if (ellipticAll) {
+      return CHANNELS.map((ch) => ({
+        label: ch.label,
+        unit: "µV",
+        max: ellipticAxis.max,
+        series: BANDS.map((b) => ({
+          key: `${ch.prefix}_${b.key}_${ellipticStat}`,
+          label: b.label,
+          color: b.color,
+        })),
+      }));
+    }
+    return [
       {
-        label: ELLIPTIC_STATS.find((s) => s.key === ellipticStat)?.label ?? "SD",
+        label: statLabel,
         unit: "µV",
         max: ellipticAxis.max,
         series: BANDS.map((b) => ({
@@ -500,12 +578,13 @@ export default function SessionResults() {
           color: b.color,
         })),
       },
-    ],
-    [ellipticChannel, ellipticStat, ellipticAxis.max]
-  );
+    ];
+  }, [ellipticChannel, ellipticAll, ellipticStat, ellipticAxis.max]);
 
+  // Per-band rail for the selected channel. Meaningless under "All", which has no
+  // single channel to report — the profile chart below covers that case instead.
   const ellipticStats = useMemo(() => {
-    if (!ellipticRows.length) return [];
+    if (!ellipticRows.length || ellipticAll) return [];
     return BANDS.map((b) => ({
       ...b,
       ...seriesStats(
@@ -515,25 +594,28 @@ export default function SessionResults() {
         ellipticRange.to
       ),
     }));
-  }, [ellipticRows, ellipticChannel, ellipticStat, ellipticRange]);
+  }, [ellipticRows, ellipticAll, ellipticChannel, ellipticStat, ellipticRange]);
 
+  // Same rule as the window view: never draw channels the card is not showing.
   const ellipticProfile = useMemo(() => {
     if (!ellipticRows.length) return [];
-    return CHANNELS.map((ch) => ({
-      label: ch.label,
+    const avg = (key) =>
+      seriesStats(ellipticRows, key, ellipticRange.from, ellipticRange.to).mean;
+    if (ellipticAll) {
+      return CHANNELS.map((ch) => ({
+        label: ch.label,
+        values: Object.fromEntries(
+          BANDS.map((b) => [b.key, avg(`${ch.prefix}_${b.key}_${ellipticStat}`)])
+        ),
+      }));
+    }
+    return ELLIPTIC_STATS.map((s) => ({
+      label: s.label,
       values: Object.fromEntries(
-        BANDS.map((b) => [
-          b.key,
-          seriesStats(
-            ellipticRows,
-            `${ch.prefix}_${b.key}_${ellipticStat}`,
-            ellipticRange.from,
-            ellipticRange.to
-          ).mean,
-        ])
+        BANDS.map((b) => [b.key, avg(`${ellipticChannel}_${b.key}_${s.key}`)])
       ),
     }));
-  }, [ellipticRows, ellipticStat, ellipticRange]);
+  }, [ellipticRows, ellipticAll, ellipticChannel, ellipticStat, ellipticRange]);
 
   // ── Single-window inspector ───────────────────────────────────────────────
   // One window is a single instant on the timeline but a full 4-channel x 5-band
@@ -545,19 +627,34 @@ export default function SessionResults() {
   // Values for THIS window only — not averaged over the visible range, which is
   // what the profile chart below the timeline shows.
   //
-  // Pinned to SD. This chart puts all four channels on one axis to be compared, and
-  // the three statistics are not comparable on one: peak runs an order of magnitude
-  // above SD, and mean sits at zero. SD is the amplitude, so SD is what gets drawn;
-  // the table underneath carries all three for the selected channel.
+  // The profile chart follows the channel selection — showing all four channels
+  // while only Fp1 is selected would claim the card is about data it isn't.
+  //
+  //   "All"           -> a column group per channel, drawn as SD. The three
+  //                      statistics do not share an axis (peak runs an order of
+  //                      magnitude above SD, mean sits at zero), so a cross-channel
+  //                      comparison has to pick one, and SD is the amplitude.
+  //   single channel  -> a column group per STATISTIC, so SD, peak and mean are all
+  //                      visible at once for that channel. They still do not share a
+  //                      scale, but grouped side by side that is legible rather than
+  //                      misleading: each group is read against itself.
   const ellipticWindowProfile = useMemo(() => {
     if (!ellipticWindow) return [];
-    return CHANNELS.map((ch) => ({
-      label: ch.label,
+    if (ellipticAll) {
+      return CHANNELS.map((ch) => ({
+        label: ch.label,
+        values: Object.fromEntries(
+          BANDS.map((b) => [b.key, ellipticWindow[`${ch.prefix}_${b.key}_std`] ?? null])
+        ),
+      }));
+    }
+    return ELLIPTIC_STATS.map((s) => ({
+      label: s.label,
       values: Object.fromEntries(
-        BANDS.map((b) => [b.key, ellipticWindow[`${ch.prefix}_${b.key}_std`] ?? null])
+        BANDS.map((b) => [b.key, ellipticWindow[`${ellipticChannel}_${b.key}_${s.key}`] ?? null])
       ),
     }));
-  }, [ellipticWindow]);
+  }, [ellipticWindow, ellipticAll, ellipticChannel]);
 
   // Which stimulus was on screen during this window. A window straddling two
   // stimuli belongs cleanly to neither, so match on its midpoint and say when it
@@ -782,7 +879,7 @@ export default function SessionResults() {
                 <Card className="overflow-hidden">
                   <CardHeader
                     title="Frequency bands"
-                    subtitle="Band power per channel at 1 Hz. Pick a channel for the timeline; the profile below compares all four."
+                    subtitle="Band power at 1 Hz. Stacked gives a panel per channel; overlay puts all four on one axis, colour by band and dash by channel."
                     actions={
                       <div className="flex flex-wrap items-center gap-2">
                         <div
@@ -790,12 +887,16 @@ export default function SessionResults() {
                           aria-label="Channel"
                           className="inline-flex rounded-lg border border-border bg-inset/60 p-0.5"
                         >
-                          {CHANNELS.map((ch) => (
+                          {[
+                            { prefix: "stacked", label: "Stacked" },
+                            { prefix: "overlay", label: "Overlay" },
+                            ...CHANNELS,
+                          ].map((ch) => (
                             <button
                               key={ch.prefix}
                               onClick={() => setChannel(ch.prefix)}
                               aria-pressed={channel === ch.prefix}
-                              className={`px-3 py-1.5 rounded-md font-mono text-[12px] font-semibold transition-colors ${
+                              className={`px-2.5 py-1.5 rounded-md font-mono text-[12px] font-semibold transition-colors ${
                                 channel === ch.prefix
                                   ? "bg-surface text-ink shadow-sm"
                                   : "text-muted hover:text-ink"
@@ -818,7 +919,7 @@ export default function SessionResults() {
                       events={chartEvents("bands")}
                       onEventClick={setSelectedEvent}
                       onVisibleRangeChange={onBandRange}
-                      height={220}
+                      height={channel === "stacked" ? 130 : 220}
                     />
                   </div>
 
@@ -826,26 +927,74 @@ export default function SessionResults() {
                       that sit under 3:1 on white. */}
                   <div className="border-t border-border px-5 py-4">
                     <div className="flex items-center justify-between mb-3">
-                      <Label>Mean power · {CHANNELS.find((c) => c.prefix === channel)?.label}</Label>
+                      <Label>
+                        {bandMulti
+                          ? "Mean power · all channels"
+                          : `Mean power · ${CHANNELS.find((c) => c.prefix === channel)?.label}`}
+                      </Label>
                       <span className="font-mono text-[11px] text-muted tnum">
                         {bandRange.from.toFixed(1)}s – {bandRange.to.toFixed(1)}s
                       </span>
                     </div>
-                    <div className="grid grid-cols-2 sm:grid-cols-5 gap-3">
-                      {bandStats.map((b) => (
-                        <div key={b.key} className="rounded-xl border border-border bg-inset/40 px-4 py-3">
-                          <div className="flex items-center gap-2 mb-1.5">
-                            <span className="h-2.5 w-2.5 rounded-sm" style={{ background: `var(${b.color})` }} />
-                            <span className="text-[12px] font-semibold text-ink">
-                              {b.greek} {b.label}
-                            </span>
+
+                    {bandMulti ? (
+                      // Four channels' worth of rail would be twenty tiles; the grid
+                      // says the same thing once, and answers the question the
+                      // multi-channel views exist for — which channel carries this.
+                      <div className="overflow-x-auto">
+                        <table className="w-full text-[12px] tnum">
+                          <thead>
+                            <tr className="text-muted">
+                              <th className="text-left font-semibold py-2 pr-4">Channel</th>
+                              {BANDS.map((b) => (
+                                <th key={b.key} className="text-right font-semibold py-2 px-3">
+                                  <span className="inline-flex items-center gap-1.5">
+                                    <span
+                                      className="h-2 w-2 rounded-sm"
+                                      style={{ background: `var(${b.color})` }}
+                                    />
+                                    {b.greek} {b.label}
+                                  </span>
+                                </th>
+                              ))}
+                            </tr>
+                          </thead>
+                          <tbody>
+                            {bandGrid.map((ch) => (
+                              <tr key={ch.prefix} className="border-t border-border">
+                                <td className="py-2 pr-4 font-mono font-semibold text-ink">
+                                  {ch.label}
+                                </td>
+                                {ch.values.map((v, i) => (
+                                  <td
+                                    key={BANDS[i].key}
+                                    className="py-2 px-3 text-right font-mono text-ink"
+                                  >
+                                    {fmt(v, 2)}
+                                  </td>
+                                ))}
+                              </tr>
+                            ))}
+                          </tbody>
+                        </table>
+                      </div>
+                    ) : (
+                      <div className="grid grid-cols-2 sm:grid-cols-5 gap-3">
+                        {bandStats.map((b) => (
+                          <div key={b.key} className="rounded-xl border border-border bg-inset/40 px-4 py-3">
+                            <div className="flex items-center gap-2 mb-1.5">
+                              <span className="h-2.5 w-2.5 rounded-sm" style={{ background: `var(${b.color})` }} />
+                              <span className="text-[12px] font-semibold text-ink">
+                                {b.greek} {b.label}
+                              </span>
+                            </div>
+                            <div className="font-mono text-[15px] font-semibold text-ink tnum">
+                              {fmt(b.mean, 2)}
+                            </div>
                           </div>
-                          <div className="font-mono text-[15px] font-semibold text-ink tnum">
-                            {fmt(b.mean, 2)}
-                          </div>
-                        </div>
-                      ))}
-                    </div>
+                        ))}
+                      </div>
+                    )}
                   </div>
 
                 </Card>
@@ -923,7 +1072,7 @@ export default function SessionResults() {
                           )}
 
                           <div className="flex items-center gap-1 rounded-lg bg-inset p-1">
-                            {CHANNELS.map((ch) => (
+                            {[{ prefix: "all", label: "All" }, ...CHANNELS].map((ch) => (
                               <button
                                 key={ch.prefix}
                                 onClick={() => setEllipticChannel(ch.prefix)}
@@ -1039,10 +1188,19 @@ export default function SessionResults() {
                           <div>
                             <div className="mb-1">
                               <Label>
-                                SD amplitude by channel · this window only (µV)
+                                {ellipticAll
+                                  ? "SD amplitude by channel · this window only (µV)"
+                                  : `${CHANNELS.find((c) => c.prefix === ellipticChannel)?.label} · SD, peak and mean · this window only (µV)`}
                               </Label>
                             </div>
                             <BandProfileChart groups={ellipticWindowProfile} bands={BANDS} />
+                            {!ellipticAll && (
+                              <p className="px-2 pt-1 text-[11px] leading-snug text-muted">
+                                The three groups do not share a scale — peak runs well above SD, and
+                                mean sits at zero because the signal is bandpassed before the
+                                statistic is taken. Read each group against itself.
+                              </p>
+                            )}
                           </div>
 
                           {/* Every statistic for the selected channel, in one table —
@@ -1053,61 +1211,108 @@ export default function SessionResults() {
                               statistic is taken, which the header states rather than
                               leaving as a puzzle. */}
                           <div className="overflow-x-auto">
-                            <table className="w-full text-[12px] tnum">
-                              <caption className="sr-only">
-                                Band statistics for {ellipticChannel} in this window
-                              </caption>
-                              <thead>
-                                <tr className="text-muted">
-                                  <th className="text-left font-semibold py-2 pr-4">
-                                    {CHANNELS.find((c) => c.prefix === ellipticChannel)?.label} ·
-                                    band
-                                  </th>
-                                  <th className="text-right font-semibold py-2 px-3">
-                                    SD µV
-                                    <span className="block text-[10px] font-normal">amplitude</span>
-                                  </th>
-                                  <th className="text-right font-semibold py-2 px-3">
-                                    Peak µV
-                                    <span className="block text-[10px] font-normal">
-                                      largest excursion
-                                    </span>
-                                  </th>
-                                  <th className="text-right font-semibold py-2 px-3">
-                                    Mean µV
-                                    <span className="block text-[10px] font-normal">
-                                      ≈0 by construction
-                                    </span>
-                                  </th>
-                                </tr>
-                              </thead>
-                              <tbody>
-                                {BANDS.map((b) => (
-                                  <tr key={b.key} className="border-t border-border">
-                                    <td className="py-2 pr-4">
-                                      <span className="inline-flex items-center gap-2">
-                                        <span
-                                          className="h-2.5 w-2.5 rounded-sm"
-                                          style={{ background: `var(${b.color})` }}
-                                        />
-                                        <span className="font-semibold text-ink">
+                            {ellipticAll ? (
+                              // All channels: one statistic can be shown, and SD is the
+                              // amplitude. Peak and mean are a click away per channel.
+                              <table className="w-full text-[12px] tnum">
+                                <thead>
+                                  <tr className="text-muted">
+                                    <th className="text-left font-semibold py-2 pr-4">
+                                      SD µV · channel
+                                    </th>
+                                    {BANDS.map((b) => (
+                                      <th
+                                        key={b.key}
+                                        className="text-right font-semibold py-2 px-3"
+                                      >
+                                        <span className="inline-flex items-center gap-1.5">
+                                          <span
+                                            className="h-2 w-2 rounded-sm"
+                                            style={{ background: `var(${b.color})` }}
+                                          />
                                           {b.greek} {b.label}
                                         </span>
-                                      </span>
-                                    </td>
-                                    <td className="py-2 px-3 text-right font-mono font-semibold text-ink">
-                                      {fmtUv(ellipticWindow?.[`${ellipticChannel}_${b.key}_std`])}
-                                    </td>
-                                    <td className="py-2 px-3 text-right font-mono text-ink">
-                                      {fmtUv(ellipticWindow?.[`${ellipticChannel}_${b.key}_peak`])}
-                                    </td>
-                                    <td className="py-2 px-3 text-right font-mono text-muted">
-                                      {fmtUv(ellipticWindow?.[`${ellipticChannel}_${b.key}_mean`])}
-                                    </td>
+                                      </th>
+                                    ))}
                                   </tr>
-                                ))}
-                              </tbody>
-                            </table>
+                                </thead>
+                                <tbody>
+                                  {CHANNELS.map((ch) => (
+                                    <tr key={ch.prefix} className="border-t border-border">
+                                      <td className="py-2 pr-4 font-mono font-semibold text-ink">
+                                        {ch.label}
+                                      </td>
+                                      {BANDS.map((b) => (
+                                        <td
+                                          key={b.key}
+                                          className="py-2 px-3 text-right font-mono text-ink"
+                                        >
+                                          {fmtUv(ellipticWindow?.[`${ch.prefix}_${b.key}_std`])}
+                                        </td>
+                                      ))}
+                                    </tr>
+                                  ))}
+                                </tbody>
+                              </table>
+                            ) : (
+                              // One channel: every statistic fits, so none is hidden behind
+                              // a toggle. Mean is labelled for what it is in its own header,
+                              // so its zeros read as expected rather than as broken data.
+                              <table className="w-full text-[12px] tnum">
+                                <thead>
+                                  <tr className="text-muted">
+                                    <th className="text-left font-semibold py-2 pr-4">
+                                      {CHANNELS.find((c) => c.prefix === ellipticChannel)?.label} ·
+                                      band
+                                    </th>
+                                    <th className="text-right font-semibold py-2 px-3">
+                                      SD µV
+                                      <span className="block text-[10px] font-normal">
+                                        amplitude
+                                      </span>
+                                    </th>
+                                    <th className="text-right font-semibold py-2 px-3">
+                                      Peak µV
+                                      <span className="block text-[10px] font-normal">
+                                        largest excursion
+                                      </span>
+                                    </th>
+                                    <th className="text-right font-semibold py-2 px-3">
+                                      Mean µV
+                                      <span className="block text-[10px] font-normal">
+                                        ≈0 by construction
+                                      </span>
+                                    </th>
+                                  </tr>
+                                </thead>
+                                <tbody>
+                                  {BANDS.map((b) => (
+                                    <tr key={b.key} className="border-t border-border">
+                                      <td className="py-2 pr-4">
+                                        <span className="inline-flex items-center gap-2">
+                                          <span
+                                            className="h-2.5 w-2.5 rounded-sm"
+                                            style={{ background: `var(${b.color})` }}
+                                          />
+                                          <span className="font-semibold text-ink">
+                                            {b.greek} {b.label}
+                                          </span>
+                                        </span>
+                                      </td>
+                                      <td className="py-2 px-3 text-right font-mono font-semibold text-ink">
+                                        {fmtUv(ellipticWindow?.[`${ellipticChannel}_${b.key}_std`])}
+                                      </td>
+                                      <td className="py-2 px-3 text-right font-mono text-ink">
+                                        {fmtUv(ellipticWindow?.[`${ellipticChannel}_${b.key}_peak`])}
+                                      </td>
+                                      <td className="py-2 px-3 text-right font-mono text-muted">
+                                        {fmtUv(ellipticWindow?.[`${ellipticChannel}_${b.key}_mean`])}
+                                      </td>
+                                    </tr>
+                                  ))}
+                                </tbody>
+                              </table>
+                            )}
                           </div>
                         </div>
                       ) : (
@@ -1118,7 +1323,7 @@ export default function SessionResults() {
                             events={chartEvents("elliptic")}
                             onEventClick={setSelectedEvent}
                             onVisibleRangeChange={onEllipticRange}
-                            height={220}
+                            height={ellipticAll ? 130 : 220}
                           />
                         </div>
                       )}
@@ -1162,47 +1367,55 @@ export default function SessionResults() {
                           the single-window view, which has no range. */}
                       {ellipticView === "timeline" && (
                         <>
-                          <div className="border-t border-border px-5 py-4">
-                            <div className="flex items-center justify-between mb-3">
-                              <Label>
-                                {ELLIPTIC_STATS.find((s) => s.key === ellipticStat)?.label} amplitude ·{" "}
-                                {CHANNELS.find((c) => c.prefix === ellipticChannel)?.label}
-                              </Label>
-                              <span className="font-mono text-[11px] text-muted tnum">
-                                {ellipticRange.from.toFixed(1)}s – {ellipticRange.to.toFixed(1)}s
-                              </span>
-                            </div>
-                            <div className="grid grid-cols-2 sm:grid-cols-5 gap-3">
-                              {ellipticStats.map((b) => (
-                                <div
-                                  key={b.key}
-                                  className="rounded-xl border border-border bg-inset/40 px-4 py-3"
-                                >
-                                  <div className="flex items-center gap-2 mb-1.5">
-                                    <span
-                                      className="h-2.5 w-2.5 rounded-sm"
-                                      style={{ background: `var(${b.color})` }}
-                                    />
-                                    <span className="text-[12px] font-semibold text-ink">
-                                      {b.greek} {b.label}
-                                    </span>
+                          {ellipticStats.length > 0 && (
+                            <div className="border-t border-border px-5 py-4">
+                              <div className="flex items-center justify-between mb-3">
+                                <Label>
+                                  {ELLIPTIC_STATS.find((s) => s.key === ellipticStat)?.label}{" "}
+                                  amplitude ·{" "}
+                                  {CHANNELS.find((c) => c.prefix === ellipticChannel)?.label}
+                                </Label>
+                                <span className="font-mono text-[11px] text-muted tnum">
+                                  {ellipticRange.from.toFixed(1)}s – {ellipticRange.to.toFixed(1)}s
+                                </span>
+                              </div>
+                              <div className="grid grid-cols-2 sm:grid-cols-5 gap-3">
+                                {ellipticStats.map((b) => (
+                                  <div
+                                    key={b.key}
+                                    className="rounded-xl border border-border bg-inset/40 px-4 py-3"
+                                  >
+                                    <div className="flex items-center gap-2 mb-1.5">
+                                      <span
+                                        className="h-2.5 w-2.5 rounded-sm"
+                                        style={{ background: `var(${b.color})` }}
+                                      />
+                                      <span className="text-[12px] font-semibold text-ink">
+                                        {b.greek} {b.label}
+                                      </span>
+                                    </div>
+                                    <div className="font-mono text-[15px] font-semibold text-ink tnum">
+                                      {fmtUv(b.mean)}
+                                      <span className="ml-1 text-[11px] font-normal text-muted">
+                                        µV
+                                      </span>
+                                    </div>
                                   </div>
-                                  <div className="font-mono text-[15px] font-semibold text-ink tnum">
-                                    {fmtUv(b.mean)}
-                                    <span className="ml-1 text-[11px] font-normal text-muted">
-                                      µV
-                                    </span>
-                                  </div>
-                                </div>
-                              ))}
+                                ))}
+                              </div>
                             </div>
-                          </div>
+                          )}
 
                           <div className="border-t border-border px-3 sm:px-4 py-4">
                             <div className="px-2 mb-1">
                               <Label>
-                                Amplitude by channel · visible window ·{" "}
-                                {ELLIPTIC_STATS.find((s) => s.key === ellipticStat)?.label} µV
+                                {ellipticAll
+                                  ? `Amplitude by channel · visible window · ${
+                                      ELLIPTIC_STATS.find((s) => s.key === ellipticStat)?.label
+                                    } µV`
+                                  : `${
+                                      CHANNELS.find((c) => c.prefix === ellipticChannel)?.label
+                                    } · SD, peak and mean · visible window (µV)`}
                               </Label>
                             </div>
                             <BandProfileChart groups={ellipticProfile} bands={BANDS} />
