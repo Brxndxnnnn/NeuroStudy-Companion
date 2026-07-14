@@ -2,10 +2,12 @@
 tests/test_features.py
 
 Tests for feature extraction — covers:
-  - psd.py        : Welch PSD estimation
-  - bandpower.py  : band power integration for all 5 bands
-  - ratios.py     : theta/beta and alpha/beta ratios
-  - asymmetry.py  : frontal alpha asymmetry
+  - psd.py                 : Welch PSD estimation
+  - bandpower.py           : band power integration for all 5 bands
+  - ratios.py              : theta/beta and alpha/beta ratios
+  - asymmetry.py           : frontal alpha asymmetry
+  - elliptic_band_stats.py : elliptic bandpass filter mean/std/peak per band
+  - pipeline.py            : elliptic sliding-window orchestration
 
 Each test class validates against a SYNTHETIC signal with known ground truth
 first, then immediately runs the same computation on REAL session data.
@@ -21,9 +23,13 @@ from app.core.config import settings
 from app.feature_extraction.psd import compute_psd, compute_psd_multichannel
 from app.feature_extraction.bandpower import band_power, all_band_powers, all_band_powers_multichannel
 from app.feature_extraction.elliptic_band_stats import (
+    elliptical_stats,
     elliptical_stats_iterate,
+    elliptical_stats_sliding,
+    design_elliptic_bandpass,
     sliding_windows,
 )
+from app.feature_extraction.pipeline import elliptic_sliding_multichannel
 from app.feature_extraction.ratios import theta_beta_ratio, alpha_beta_ratio, all_ratios, all_ratios_multichannel
 from app.feature_extraction.asymmetry import frontal_alpha_asymmetry, frontal_alpha_asymmetry_from_bandpowers
 from app.preprocessing.pipeline import run_pipeline
@@ -46,24 +52,16 @@ def _first_real_window(db_conn, session_id):
     return result["windows"][0]["signals"]
 
 
-def _first_filtered_window(db_conn, session_id, window_size_s: float = 4.0):
+def _first_filtered_window(db_conn, session_id, fetch_duration_s: float = None):
     """
-    Helper: fetch SDK-filtered samples directly from eeg_filtered_samples and
-    return the first window_size_s seconds as a per-channel signal dict.
-
-    This is the CORRECT source for the elliptic filter path — samples here
-    are already in µV (SDK-filtered onboard the SenzeBand), so unlike
-    _first_real_window() above, there is NO ADC conversion and NO
-    Butterworth/notch filtering applied. Using _first_real_window() for
-    elliptic tests was the bug behind the alpha/theta/beta/gamma/delta
-    mismatch — it was feeding the elliptic filter a raw-then-Butterworth-
-    filtered signal instead of the SDK-filtered one.
+    Helper: fetch SDK-filtered samples directly from eeg_filtered_samples.
 
     Args:
-        db_conn:       Open SQLAlchemy connection.
-        session_id:    UUID string.
-        window_size_s: How many seconds of filtered samples to return,
-                        starting from the first available sample.
+        db_conn:          Open SQLAlchemy connection.
+        session_id:       UUID string.
+        fetch_duration_s: How many seconds of signal to fetch from the DB,
+                          starting from the first sample of the session.
+                          None (default) = fetch the ENTIRE session signal.
 
     Returns:
         Dict {"fp1": np.ndarray, "fp2": ..., "t3": ..., "t4": ...} in µV.
@@ -80,56 +78,14 @@ def _first_filtered_window(db_conn, session_id, window_size_s: float = 4.0):
         )
 
     fs = settings.SAMPLE_RATE
-    n_needed = int(window_size_s * fs)
-    samples = samples[:n_needed]
+    if fetch_duration_s is not None:
+        n_needed = int(fetch_duration_s * fs)
+        samples  = samples[:n_needed]
 
     return {
         ch: np.array([row[ch] for row in samples], dtype=np.float64)
         for ch in settings.CHANNELS
     }
-
-
-def _elliptic_sliding_multichannel(
-    signals: dict,
-    window_size_s: float,
-    step_s: float,
-) -> list[dict]:
-    """
-    Helper: run elliptical_stats_iterate() once per channel across
-    ALL sliding windows, then combine into a list of window dicts each
-    containing the full 60-feature vector (5 bands × 3 stats × 4 channels).
-
-    Returns list of dicts, one per window:
-      {
-        "time_start": float,
-        "time_end":   float,
-        "features": {
-            "fp1": {"delta": {mean,std,peak}, "theta": {...}, ...},
-            "fp2": {...},
-            "t3":  {...},
-            "t4":  {...},
-        }
-      }
-    """
-    any_sig = next(iter(signals.values()))
-    total_duration_s = len(any_sig) / settings.SAMPLE_RATE
-    windows = sliding_windows(total_duration_s, window_size_s, step_s)
-
-    results = []
-    for time_start, time_end in windows:
-        features = {
-            ch: elliptical_stats_iterate(
-                sig, (time_start, time_end), settings.SAMPLE_RATE
-            )
-            for ch, sig in signals.items()
-        }
-        results.append({
-            "time_start": time_start,
-            "time_end":   time_end,
-            "features":   features,
-        })
-
-    return results
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -267,9 +223,9 @@ class TestRatios:
         """Real data: compute TBR and ABR across sliding windows using SDK-filtered
         samples from eeg_filtered_samples. Shows ratios per window per channel."""
         signals = _first_filtered_window(db_conn, session_id)
-        window_size_s = 2.0   # configurable
-        step_s        = 1.0   # configurable — 50% overlap
-        windows = _elliptic_sliding_multichannel(signals, window_size_s, step_s)
+        window_size_s = 1.0   # configurable
+        step_s        = 0.5   # configurable
+        windows = elliptic_sliding_multichannel(signals, window_size_s, step_s)
         print(f"\n  [REAL] Ratios across {len(windows)} sliding windows "
               f"(window={window_size_s}s, step={step_s}s):")
         for i, w in enumerate(windows[:3]):   # show first 3 windows
@@ -387,9 +343,9 @@ class TestAsymmetry:
         """Real data: compute frontal alpha asymmetry across sliding windows
         using SDK-filtered samples from eeg_filtered_samples."""
         signals = _first_filtered_window(db_conn, session_id)
-        window_size_s = 2.0   # configurable
-        step_s        = 1.0   # configurable
-        windows = _elliptic_sliding_multichannel(signals, window_size_s, step_s)
+        window_size_s = 1.0   # configurable
+        step_s        = 0.5   # configurable
+        windows = elliptic_sliding_multichannel(signals, window_size_s, step_s)
         print(f"\n  [REAL] FAA across {len(windows)} sliding windows "
               f"(window={window_size_s}s, step={step_s}s):")
         for i, w in enumerate(windows[:3]):
@@ -471,7 +427,152 @@ class TestAsymmetry:
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# 5. End-to-end summary on real session — full chain in one place (elliptic)
+# 5. Elliptic band stats — elliptic_band_stats.py
+# ══════════════════════════════════════════════════════════════════════════════
+
+class TestEllipticBandStats:
+    def test_theta_band_isolates_theta_synthetic(self):
+        """Synthetic ground truth: theta-frequency signal -> theta-band filtered
+        std should dominate the beta-band filtered std."""
+        signal = _make_band_signal(freq_hz=6.0, amplitude=20.0)
+        theta_stats = elliptical_stats("theta", signal, (0.0, 4.0), settings.SAMPLE_RATE)
+        beta_stats  = elliptical_stats("beta",  signal, (0.0, 4.0), settings.SAMPLE_RATE)
+        print(f"\n  [SYNTHETIC] 6 Hz signal -> theta std={theta_stats['std']:.2f}, "
+              f"beta std={beta_stats['std']:.2f}")
+        assert theta_stats["std"] > beta_stats["std"]
+
+    def test_beta_band_isolates_beta_synthetic(self):
+        """Synthetic ground truth: beta-frequency signal -> beta-band filtered
+        std should dominate the theta-band filtered std."""
+        signal = _make_band_signal(freq_hz=20.0, amplitude=20.0)
+        theta_stats = elliptical_stats("theta", signal, (0.0, 4.0), settings.SAMPLE_RATE)
+        beta_stats  = elliptical_stats("beta",  signal, (0.0, 4.0), settings.SAMPLE_RATE)
+        print(f"\n  [SYNTHETIC] 20 Hz signal -> theta std={theta_stats['std']:.2f}, "
+              f"beta std={beta_stats['std']:.2f}")
+        assert beta_stats["std"] > theta_stats["std"]
+
+    def test_unknown_band_raises_keyerror(self):
+        with pytest.raises(KeyError, match="Unknown freq_band"):
+            design_elliptic_bandpass("not_a_band", settings.SAMPLE_RATE)
+
+    def test_band_edges_above_nyquist_raises(self):
+        """Gamma band (30-45 Hz) is invalid at a sample rate whose Nyquist is below it."""
+        with pytest.raises(ValueError, match="Invalid band range"):
+            design_elliptic_bandpass("gamma", fs=60)
+
+    def test_window_too_short_raises(self):
+        signal = _make_band_signal(freq_hz=10.0, amplitude=15.0, duration_s=4.0)
+        with pytest.raises(ValueError, match="too short"):
+            elliptical_stats("alpha", signal, (0.0, 0.05), settings.SAMPLE_RATE)
+
+    def test_time_window_out_of_range_raises(self):
+        signal = _make_band_signal(freq_hz=10.0, amplitude=15.0, duration_s=4.0)
+        with pytest.raises(ValueError, match="Invalid time window"):
+            elliptical_stats("alpha", signal, (0.0, 10.0), settings.SAMPLE_RATE)
+
+    def test_iterate_returns_all_five_bands_synthetic(self):
+        signal = _make_band_signal(freq_hz=10.0, amplitude=15.0)
+        stats = elliptical_stats_iterate(signal, (0.0, 4.0), settings.SAMPLE_RATE)
+        assert set(stats.keys()) == {"delta", "theta", "alpha", "beta", "gamma"}
+        for band_stats in stats.values():
+            assert set(band_stats.keys()) == {"mean", "std", "peak"}
+
+    def test_iterate_on_real_session(self, db_conn, session_id):
+        """Real data (read-only): run elliptical_stats_iterate on one channel's
+        SDK-filtered signal for the first second of the session."""
+        signals = _first_filtered_window(db_conn, session_id, fetch_duration_s=2.0)
+        fp1 = signals["fp1"]
+        stats = elliptical_stats_iterate(fp1, (0.0, 1.0), settings.SAMPLE_RATE)
+        print(f"\n  [REAL] fp1 band stats (0-1s): " +
+              ", ".join(f"{band}.std={s['std']:.2f}" for band, s in stats.items()))
+        assert set(stats.keys()) == {"delta", "theta", "alpha", "beta", "gamma"}
+
+    def test_sliding_windows_no_overlap(self):
+        windows = sliding_windows(total_duration_s=5.0, window_size_s=1.0, step_s=1.0)
+        assert windows == [(0.0, 1.0), (1.0, 2.0), (2.0, 3.0), (3.0, 4.0), (4.0, 5.0)]
+
+    def test_sliding_windows_with_overlap(self):
+        windows = sliding_windows(total_duration_s=2.0, window_size_s=1.0, step_s=0.5)
+        expected = [(0.0, 1.0), (0.5, 1.5), (1.0, 2.0)]
+        assert len(windows) == len(expected)
+        for (actual_start, actual_end), (exp_start, exp_end) in zip(windows, expected):
+            assert actual_start == pytest.approx(exp_start)
+            assert actual_end == pytest.approx(exp_end)
+
+    def test_sliding_windows_drops_trailing_partial_window(self):
+        """2.5s of signal with 1.0s windows -> only 2 full windows fit (0-1, 1-2);
+        the partial 2.0-3.0 window is dropped rather than zero-padded."""
+        windows = sliding_windows(total_duration_s=2.5, window_size_s=1.0, step_s=1.0)
+        assert windows == [(0.0, 1.0), (1.0, 2.0)]
+
+    def test_sliding_windows_invalid_size_raises(self):
+        with pytest.raises(ValueError, match="must both be positive"):
+            sliding_windows(total_duration_s=5.0, window_size_s=0, step_s=1.0)
+
+    def test_sliding_windows_invalid_step_raises(self):
+        with pytest.raises(ValueError, match="must both be positive"):
+            sliding_windows(total_duration_s=5.0, window_size_s=1.0, step_s=-1.0)
+
+    def test_elliptical_stats_sliding_synthetic(self):
+        signal = _make_band_signal(freq_hz=10.0, amplitude=15.0, duration_s=5.0)
+        results = elliptical_stats_sliding("alpha", signal, window_size_s=1.0, step_s=1.0,
+                                            fs=settings.SAMPLE_RATE)
+        assert len(results) == 5
+        for r in results:
+            assert set(r.keys()) == {"time_start", "time_end", "mean", "std", "peak"}
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# 6. Elliptic pipeline orchestration — pipeline.py
+# ══════════════════════════════════════════════════════════════════════════════
+
+class TestPipeline:
+    def test_explicit_window_and_step_used_synthetic(self):
+        """window_size_s/step_s passed explicitly should override any config default."""
+        signals = {ch: _make_band_signal(10.0, 15.0, duration_s=4.0) for ch in settings.CHANNELS}
+        windows = elliptic_sliding_multichannel(signals, window_size_s=1.0, step_s=1.0)
+        assert len(windows) == 4
+        assert windows[0]["time_start"] == pytest.approx(0.0)
+        assert windows[0]["time_end"] == pytest.approx(1.0)
+        assert set(windows[0]["features"].keys()) == set(settings.CHANNELS)
+        for band_stats in windows[0]["features"]["fp1"].values():
+            assert set(band_stats.keys()) == {"mean", "std", "peak"}
+
+    def test_none_params_falls_back_to_full_signal_synthetic(self, monkeypatch):
+        """With no explicit window/step and no config default (settings.ELLIPTIC_*
+        = None), the full signal should be treated as a single window."""
+        monkeypatch.setattr(settings, "ELLIPTIC_WINDOW_SIZE_S", None)
+        monkeypatch.setattr(settings, "ELLIPTIC_STEP_S", None)
+        signals = {ch: _make_band_signal(10.0, 15.0, duration_s=4.0) for ch in settings.CHANNELS}
+        windows = elliptic_sliding_multichannel(signals)
+        assert len(windows) == 1
+        assert windows[0]["time_start"] == pytest.approx(0.0)
+        assert windows[0]["time_end"] == pytest.approx(4.0)
+
+    def test_none_params_uses_config_default_synthetic(self, monkeypatch):
+        """With no explicit window/step, settings.ELLIPTIC_WINDOW_SIZE_S/STEP_S
+        (config.py) should be used as the default."""
+        monkeypatch.setattr(settings, "ELLIPTIC_WINDOW_SIZE_S", 1.0)
+        monkeypatch.setattr(settings, "ELLIPTIC_STEP_S", 0.5)
+        signals = {ch: _make_band_signal(10.0, 15.0, duration_s=2.0) for ch in settings.CHANNELS}
+        windows = elliptic_sliding_multichannel(signals)
+        assert len(windows) == 3   # (0,1), (0.5,1.5), (1,2)
+
+    def test_on_real_session(self, db_conn, session_id):
+        """Real data (read-only): run the elliptic sliding pipeline on a short
+        slice of SDK-filtered samples and check the shape of the output."""
+        signals = _first_filtered_window(db_conn, session_id, fetch_duration_s=3.0)
+        windows = elliptic_sliding_multichannel(signals, window_size_s=1.0, step_s=1.0)
+        print(f"\n  [REAL] {len(windows)} windows from a 3s slice (1.0s windows, no overlap)")
+        assert len(windows) == 3
+        for w in windows:
+            assert set(w["features"].keys()) == {"fp1", "fp2", "t3", "t4"}
+            for band_stats in w["features"]["fp1"].values():
+                assert set(band_stats.keys()) == {"mean", "std", "peak"}
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# 7. End-to-end summary on real session — full chain in one place (elliptic)
 # ══════════════════════════════════════════════════════════════════════════════
 
 class TestFeaturesOnRealSession:
@@ -483,37 +584,72 @@ class TestFeaturesOnRealSession:
           eeg_filtered_samples (SDK-filtered, already µV)
               -> 5 elliptic bandpass filters (delta/theta/alpha/beta/gamma)
               -> mean, std, peak per band per channel
-              -> 5 bands × 3 features × 4 channels = 60 features per window
+              -> 5 bands x 3 features x 4 channels = 60 features per window
 
-        window_size_s and step_s are configurable — smaller step_s = more
-        overlap = finer time resolution (zoom in). Larger = coarser (zoom out).
+        Three configurable parameters control the analysis:
+          fetch_duration_s — how many seconds to pull from the DB
+                             (in _first_filtered_window below; None = full session)
+          window_size_s    — size of each analysis window in seconds
+                             (None = full fetched signal as one window)
+          step_s           — step between windows in seconds
+                             (smaller = more overlap (zoom in),
+                             larger = less overlap (zoom out), None = no overlap)
         """
-        signals = _first_filtered_window(db_conn, session_id)
+        # ── HOW MUCH SIGNAL TO FETCH FROM DB ──────────────────────────────────
+        # Change fetch_duration_s to test on a shorter slice, e.g. 10.0 for 10s.
+        # Set to None to use the entire session.
+        fetch_duration_s = None   # None = full session
 
-        # ── Configurable sliding window parameters ─────────────────────────────
-        window_size_s = 2.0    # seconds per analysis window
-        step_s        = 1.0    # step between windows (1.0s = 50% overlap at 2s window)
+        signals = _first_filtered_window(db_conn, session_id, fetch_duration_s)
 
-        windows = _elliptic_sliding_multichannel(signals, window_size_s, step_s)
+        # ── HOW TO SLICE THE FETCHED SIGNAL INTO WINDOWS ───────────────────────
+        # Option A: sliding windows of a specific size
+        window_size_s = 1.0    # size of each analysis window in seconds
+        step_s        = 0.5    # step between windows (0.5s step = 50% overlap at 1.0s window)
 
-        print(f"\n  [SUMMARY] SDK-filtered samples -> elliptic sliding windows")
-        print(f"  [SUMMARY] window_size={window_size_s}s, step={step_s}s, "
+        # Option B: full fetched signal as one window (uncomment to use)
+        # window_size_s = None
+        # step_s        = None
+
+        # ── HOW MANY WINDOWS TO PRINT IN OUTPUT ───────────────────────────────
+        MAX_PRINT = 5   # change to see more/fewer windows printed
+
+        windows = elliptic_sliding_multichannel(signals, window_size_s, step_s)
+
+        # Feature count from first window — same structure across all windows
+        n_bands    = len(windows[0]["features"][settings.CHANNELS[0]])
+        n_stats    = len(list(windows[0]["features"][settings.CHANNELS[0]].values())[0])
+        n_channels = len(settings.CHANNELS)
+        feature_count = n_bands * n_stats * n_channels
+
+        any_sig = next(iter(signals.values()))
+        total_s = len(any_sig) / settings.SAMPLE_RATE
+        mode    = "FULL SIGNAL" if window_size_s is None else f"{window_size_s}s windows"
+
+        print(f"\n  [SUMMARY] SDK-filtered samples -> elliptic ({mode})")
+        print(f"  [SUMMARY] fetched={total_s:.1f}s, "
+              f"window={window_size_s or total_s:.1f}s, "
+              f"step={step_s or (window_size_s or total_s):.1f}s, "
               f"total windows={len(windows)}")
         print(f"  [SUMMARY] Features per window: "
-              f"5 bands × 3 stats × 4 channels = 60")
+              f"{n_bands} bands x {n_stats} stats x {n_channels} channels = {feature_count}")
 
         for i, w in enumerate(windows):
+            if i >= MAX_PRINT:
+                print(f"\n  [SUMMARY] ... ({len(windows) - MAX_PRINT} more windows — "
+                      f"change MAX_PRINT to see more)")
+                break
             print(f"\n  [SUMMARY] Window {i} "
                   f"[{w['time_start']:.1f}s - {w['time_end']:.1f}s]:")
-            feature_count = 0
+            print(f"    {'':<12}| {'mean':>8} | {'std':>8} | {'peak':>8}")
+            print(f"    {'-' * 12}|{'-' * 10}|{'-' * 10}|{'-' * 10}")
             for ch in settings.CHANNELS:
                 for band, stats in w["features"][ch].items():
-                    print(f"    {ch}.{band:<6}: "
-                          f"mean={stats['mean']:>8.3f}  "
-                          f"std={stats['std']:>8.3f}  "
-                          f"peak={stats['peak']:>8.3f}")
-                    feature_count += 3
-                print(f"    {'-' * 45}")
+                    print(f"    {ch + '.' + band:<12}"
+                          f"| {stats['mean']:>8.3f} "
+                          f"| {stats['std']:>8.3f} "
+                          f"| {stats['peak']:>8.3f}")
+                print(f"    {'-' * 12}|{'-' * 10}|{'-' * 10}|{'-' * 10}")
 
         print(f"\n  [SUMMARY] Total features per window: {feature_count} "
               f"({'✓' if feature_count == 60 else '✗ expected 60'})")
