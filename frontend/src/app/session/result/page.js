@@ -260,7 +260,7 @@ export default function SessionResults() {
   // worker's own 1-based counter and need not be contiguous if it ever skips a
   // window, so it is displayed but never used to index).
   const [ellipticIdx, setEllipticIdx] = useState(0);
-  const [ellipticView, setEllipticView] = useState("timeline"); // "timeline" | "window"
+  const [ellipticView, setEllipticView] = useState("window"); // "window" | "timeline"
   const [events, setEvents] = useState([]);
   const [selectedEvent, setSelectedEvent] = useState(null);
   // One per chart, so a chart can drop its markers without the others losing theirs.
@@ -544,15 +544,20 @@ export default function SessionResults() {
 
   // Values for THIS window only — not averaged over the visible range, which is
   // what the profile chart below the timeline shows.
+  //
+  // Pinned to SD. This chart puts all four channels on one axis to be compared, and
+  // the three statistics are not comparable on one: peak runs an order of magnitude
+  // above SD, and mean sits at zero. SD is the amplitude, so SD is what gets drawn;
+  // the table underneath carries all three for the selected channel.
   const ellipticWindowProfile = useMemo(() => {
     if (!ellipticWindow) return [];
     return CHANNELS.map((ch) => ({
       label: ch.label,
       values: Object.fromEntries(
-        BANDS.map((b) => [b.key, ellipticWindow[`${ch.prefix}_${b.key}_${ellipticStat}`] ?? null])
+        BANDS.map((b) => [b.key, ellipticWindow[`${ch.prefix}_${b.key}_std`] ?? null])
       ),
     }));
-  }, [ellipticWindow, ellipticStat]);
+  }, [ellipticWindow]);
 
   // Which stimulus was on screen during this window. A window straddling two
   // stimuli belongs cleanly to neither, so match on its midpoint and say when it
@@ -865,8 +870,8 @@ export default function SessionResults() {
                         <div className="flex flex-wrap gap-2">
                           <div className="flex items-center gap-1 rounded-lg bg-inset p-1">
                             {[
-                              { key: "timeline", label: "Timeline" },
                               { key: "window", label: "By window" },
+                              { key: "timeline", label: "Timeline" },
                             ].map((v) => (
                               <button
                                 key={v.key}
@@ -882,38 +887,42 @@ export default function SessionResults() {
                               </button>
                             ))}
                           </div>
-                          <div className="flex items-center gap-1 rounded-lg bg-inset p-1">
-                            {ELLIPTIC_STATS.map((s) => (
-                              <button
-                                key={s.key}
-                                onClick={() => setEllipticStat(s.key)}
-                                aria-pressed={ellipticStat === s.key}
-                                title={s.hint}
-                                className={`px-3 py-1.5 rounded-md text-[12px] font-semibold transition-colors ${
-                                  ellipticStat === s.key
-                                    ? "bg-surface text-ink shadow-sm"
-                                    : "text-muted hover:text-ink"
-                                }`}
-                              >
-                                {s.label}
-                              </button>
-                            ))}
-                          </div>
-                          {/* Channel picker and marker switch are timeline-only: the
-                              window view already shows all four channels at once, and
-                              its profile chart and value table have no time axis to
-                              put a stimulus band on. */}
+                          {/* The statistic picker is TIMELINE-only. A line chart can
+                              draw one statistic at a time, so there it is a real
+                              choice. The window view has room to show SD, peak and
+                              mean side by side for the selected channel, so making
+                              you toggle between them there would only hide two thirds
+                              of a snapshot that fits on screen. */}
+                          {ellipticView === "timeline" && (
+                            <div className="flex items-center gap-1 rounded-lg bg-inset p-1">
+                              {ELLIPTIC_STATS.map((s) => (
+                                <button
+                                  key={s.key}
+                                  onClick={() => setEllipticStat(s.key)}
+                                  aria-pressed={ellipticStat === s.key}
+                                  title={s.hint}
+                                  className={`px-3 py-1.5 rounded-md text-[12px] font-semibold transition-colors ${
+                                    ellipticStat === s.key
+                                      ? "bg-surface text-ink shadow-sm"
+                                      : "text-muted hover:text-ink"
+                                  }`}
+                                >
+                                  {s.label}
+                                </button>
+                              ))}
+                            </div>
+                          )}
+
+                          {/* Markers need a time axis, so they are timeline-only too.
+                              The window view names the stimulus in prose instead. */}
                           {ellipticView === "timeline" && events.length > 0 && (
                             <MarkerToggle
                               on={markers.elliptic}
                               onToggle={() => toggleMarkers("elliptic")}
                             />
                           )}
-                          <div
-                            className={`flex items-center gap-1 rounded-lg bg-inset p-1 ${
-                              ellipticView === "timeline" ? "" : "hidden"
-                            }`}
-                          >
+
+                          <div className="flex items-center gap-1 rounded-lg bg-inset p-1">
                             {CHANNELS.map((ch) => (
                               <button
                                 key={ch.prefix}
@@ -1030,51 +1039,71 @@ export default function SessionResults() {
                           <div>
                             <div className="mb-1">
                               <Label>
-                                {ELLIPTIC_STATS.find((s) => s.key === ellipticStat)?.label} amplitude
-                                by channel · this window only (µV)
+                                SD amplitude by channel · this window only (µV)
                               </Label>
                             </div>
                             <BandProfileChart groups={ellipticWindowProfile} bands={BANDS} />
                           </div>
 
-                          {/* The full 4x5 grid for this window — the timeline can
-                              only ever show one channel at a time. */}
+                          {/* Every statistic for the selected channel, in one table —
+                              no toggling, because all fifteen numbers fit. SD is the
+                              amplitude; peak is the largest excursion in the window
+                              (and carries the electrode artefacts); mean sits at ~0 for
+                              every band because the signal is bandpassed before the
+                              statistic is taken, which the header states rather than
+                              leaving as a puzzle. */}
                           <div className="overflow-x-auto">
                             <table className="w-full text-[12px] tnum">
+                              <caption className="sr-only">
+                                Band statistics for {ellipticChannel} in this window
+                              </caption>
                               <thead>
                                 <tr className="text-muted">
-                                  <th className="text-left font-semibold py-2 pr-4">Channel</th>
-                                  {BANDS.map((b) => (
-                                    <th key={b.key} className="text-right font-semibold py-2 px-3">
-                                      <span className="inline-flex items-center gap-1.5">
-                                        <span
-                                          className="h-2 w-2 rounded-sm"
-                                          style={{ background: `var(${b.color})` }}
-                                        />
-                                        {b.greek} {b.label}
-                                      </span>
-                                    </th>
-                                  ))}
+                                  <th className="text-left font-semibold py-2 pr-4">
+                                    {CHANNELS.find((c) => c.prefix === ellipticChannel)?.label} ·
+                                    band
+                                  </th>
+                                  <th className="text-right font-semibold py-2 px-3">
+                                    SD µV
+                                    <span className="block text-[10px] font-normal">amplitude</span>
+                                  </th>
+                                  <th className="text-right font-semibold py-2 px-3">
+                                    Peak µV
+                                    <span className="block text-[10px] font-normal">
+                                      largest excursion
+                                    </span>
+                                  </th>
+                                  <th className="text-right font-semibold py-2 px-3">
+                                    Mean µV
+                                    <span className="block text-[10px] font-normal">
+                                      ≈0 by construction
+                                    </span>
+                                  </th>
                                 </tr>
                               </thead>
                               <tbody>
-                                {CHANNELS.map((ch) => (
-                                  <tr key={ch.prefix} className="border-t border-border">
-                                    <td className="py-2 pr-4 font-mono font-semibold text-ink">
-                                      {ch.label}
+                                {BANDS.map((b) => (
+                                  <tr key={b.key} className="border-t border-border">
+                                    <td className="py-2 pr-4">
+                                      <span className="inline-flex items-center gap-2">
+                                        <span
+                                          className="h-2.5 w-2.5 rounded-sm"
+                                          style={{ background: `var(${b.color})` }}
+                                        />
+                                        <span className="font-semibold text-ink">
+                                          {b.greek} {b.label}
+                                        </span>
+                                      </span>
                                     </td>
-                                    {BANDS.map((b) => (
-                                      <td
-                                        key={b.key}
-                                        className="py-2 px-3 text-right font-mono text-ink"
-                                      >
-                                        {fmtUv(
-                                          ellipticWindow?.[
-                                            `${ch.prefix}_${b.key}_${ellipticStat}`
-                                          ]
-                                        )}
-                                      </td>
-                                    ))}
+                                    <td className="py-2 px-3 text-right font-mono font-semibold text-ink">
+                                      {fmtUv(ellipticWindow?.[`${ellipticChannel}_${b.key}_std`])}
+                                    </td>
+                                    <td className="py-2 px-3 text-right font-mono text-ink">
+                                      {fmtUv(ellipticWindow?.[`${ellipticChannel}_${b.key}_peak`])}
+                                    </td>
+                                    <td className="py-2 px-3 text-right font-mono text-muted">
+                                      {fmtUv(ellipticWindow?.[`${ellipticChannel}_${b.key}_mean`])}
+                                    </td>
                                   </tr>
                                 ))}
                               </tbody>
@@ -1094,7 +1123,10 @@ export default function SessionResults() {
                         </div>
                       )}
 
-                      {ellipticStat === "mean" && (
+                      {/* Only on the timeline: there, choosing Mean gives five traces
+                          flat along zero and no explanation. The window view's table
+                          says the same thing in its own column header. */}
+                      {ellipticView === "timeline" && ellipticStat === "mean" && (
                         <div className="px-5 pb-2">
                           <Alert tone="warn">
                             Mean sits near zero for every band by construction — the signal is
