@@ -62,6 +62,14 @@ class Settings:
     WINDOW_SIZE_S:  int   = 4      # seconds per analysis window (4 * 250 = 1000 samples)
     WINDOW_OVERLAP: float = 0.5    # 50% overlap between consecutive windows
 
+    # ── Windowing for elliptic pipeline ────────────────────────────────────────
+    # CHANGE HERE to set default window/step size for elliptic feature extraction.
+    # None = full session treated as one window (current default).
+    # pipeline.py will fall back to these values if the caller passes None.
+    # Only used when the caller (e.g. /process) doesn't pass its own value.
+    ELLIPTIC_WINDOW_SIZE_S: float = None   # seconds per analysis window
+    ELLIPTIC_STEP_S:        float = None   # step between consecutive windows
+
     # ── ML service ─────────────────────────────────────────────────────────────
     MODEL_DIR: str = os.getenv("MODEL_DIR", "/app/saved_models")
 

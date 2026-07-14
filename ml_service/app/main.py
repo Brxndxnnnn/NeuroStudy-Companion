@@ -7,6 +7,7 @@ from fastapi import FastAPI
 
 from app.api.health import router as health_router
 from app.api.infer import router as infer_router
+from app.api.process import router as process_router
 from app.workers import feature_jobs
 
 logging.basicConfig(level=logging.INFO)
@@ -23,10 +24,14 @@ async def lifespan(app: FastAPI):
     Start the feature worker alongside the API, so a completed session gets its
     features computed without anyone running anything.
 
+    This complements the /process endpoint rather than replacing it: /process
+    computes a session on demand, the worker notices sessions nobody asked about.
+    Both end up in the same table, and both are safe to have running at once —
+    the worker's claim is atomic (see feature_jobs).
+
     Several workers may be alive at once (uvicorn --workers, or the dev reloader),
-    so more than one scheduler will tick. That is safe: feature_jobs claims each
-    session with an atomic UPDATE ... RETURNING, so exactly one of them wins and the
-    rest move on. See feature_jobs' module docstring.
+    so more than one scheduler will tick. That is safe for the same reason: exactly
+    one of them wins each session and the rest move on.
     """
     scheduler = None
     if FEATURE_JOB_ENABLED:
@@ -72,3 +77,4 @@ app = FastAPI(
 
 app.include_router(health_router)
 app.include_router(infer_router)
+app.include_router(process_router)

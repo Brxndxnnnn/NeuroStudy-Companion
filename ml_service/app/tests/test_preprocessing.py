@@ -32,6 +32,7 @@ from app.core.config import settings
 from app.database import engine
 from app.data_access.queries import (
     fetch_raw_samples,
+    fetch_filtered_samples,
     fetch_eeg_readings,
     fetch_session,
     fetch_events,
@@ -118,6 +119,20 @@ class TestQueries:
         print(f"\n  Raw samples  : {len(samples)} rows")
         print(f"  First sample : fp1={samples[0]['fp1']}, fp2={samples[0]['fp2']}, t3={samples[0]['t3']}, t4={samples[0]['t4']}")
         assert len(samples) > 0, "No raw samples found — is eeg_raw_samples populated?"
+
+        first = samples[0]
+        assert "time" in first
+        assert "fp1"  in first
+        assert "fp2"  in first
+        assert "t3"   in first
+        assert "t4"   in first
+
+    def test_fetch_filtered_samples(self, db_conn, session_id):
+        """SDK-filtered samples exist and have correct column structure."""
+        samples = fetch_filtered_samples(db_conn, session_id)
+        print(f"\n  Filtered samples : {len(samples)} rows")
+        print(f"  First sample     : fp1={samples[0]['fp1']}, fp2={samples[0]['fp2']}, t3={samples[0]['t3']}, t4={samples[0]['t4']}")
+        assert len(samples) > 0, "No filtered samples found — is eeg_filtered_samples populated?"
 
         first = samples[0]
         assert "time" in first

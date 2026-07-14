@@ -77,9 +77,11 @@ const endSession = catchAsync(async (req, res) => {
     if (!session)
         throw new NotFoundError('Session not found');
 
+    await req.dbClient.query('COMMIT'); // Commit the transaction after ending the session
+    
     let backfillWarning = null;
     try {
-        await sessionModel.backfillSessionResults(session_id, req.dbClient);
+        await sessionModel.backfillSessionResults(session_id);
     } catch (err) {
         // Log the error for the backend team to investigate
         console.error(`[Backfill Error] Session ${session_id}:`, err.message);
@@ -174,4 +176,14 @@ const getSessionBandPowerResults = catchAsync(async (req, res) => {
         fromTs, toTs, req.dbClient)
     return res.json(results)
 })
-export default { listSessions, getSessionById, pairSessions, startSession, endSession, getSessionResult, getSessionEEGResults, getSessionBandPowerResults }
+
+// ── GET /api/sessions/:session_id/results/elliptic_band_stats ────────────────────────────────────────────
+const getSessionEllipticBandStats = catchAsync(async (req, res) => {
+    const { session_id } = req.params
+    if (!session_id)
+        throw new BadRequestError('Missing required field: session_id is required')
+    const results = await sessionModel.getEllipticBandStats(session_id, req.dbClient)
+    return res.json(results)
+})
+
+export default { listSessions, getSessionById, pairSessions, startSession, endSession, getSessionResult, getSessionEEGResults, getSessionBandPowerResults, getSessionEllipticBandStats }
