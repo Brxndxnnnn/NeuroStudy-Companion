@@ -212,11 +212,20 @@ export async function getSessionResultEvents(sessionId) {
 }
 // Band powers, mental-state indices and vitals — one row/second, so the whole
 // session is cheap to pull. Omit the bounds to get the full session.
-// Elliptic-filter band statistics (ml_service). LONG format — one row per
-// (window x channel x band), not one per window:
-//   { session_id, time_start, time_end, window_size_s, step_s,
-//     channel: "fp1"|"fp2"|"t3"|"t4", band: "delta".."gamma",
-//     mean, std, peak }                                    <- µV AMPLITUDE
+// Elliptic-filter band statistics (ml_service).
+//
+// SHAPE — verified against the deployed table, which does NOT match the
+// elliptic_band_stats definition currently in db/migrations/005 (that one has a
+// `band` text column; production does not). One row per (window x CHANNEL), i.e.
+// 4 rows per window, with the bands as columns:
+//
+//   { session_id, time_start, time_end, window_size_s, step_s, window_number,
+//     channel: "fp1"|"fp2"|"t3"|"t4",
+//     delta_mean, delta_std, delta_peak,
+//     theta_mean, theta_std, theta_peak,
+//     alpha_mean, alpha_std, alpha_peak,
+//     beta_mean,  beta_std,  beta_peak,
+//     gamma_mean, gamma_std, gamma_peak }                  <- µV
 //
 // Three things this endpoint does NOT do, which the caller must handle:
 //   - no ORDER BY, so row order is whatever the hypertable scan returned: SORT.
@@ -224,8 +233,14 @@ export async function getSessionResultEvents(sessionId) {
 //     derives it from sessions.start_time — the same origin the others use.
 //   - no start/end bounds: it returns the whole session.
 //
-// ⚠ These are µV amplitude statistics from an elliptic bandpass. band_powers
-// holds FFT POWER in µV². Different quantities — never plot them on one axis.
+// ⚠ `*_mean` is NOT an amplitude. The signal is bandpassed before the statistic
+// is taken, and a bandpassed signal is zero-mean by construction — measured on
+// the one session that has data, |mean|/std is 0.03 for alpha, 0.01 for beta and
+// gamma. The amplitude is `*_std` (RMS about zero). Plot SD or peak; a chart of
+// `mean` is a flat line at zero.
+//
+// ⚠ These are µV AMPLITUDE statistics. band_powers holds FFT POWER in µV².
+// Different quantities — never plot them on one axis.
 export async function getSessionEllipticBandStats(sessionId) {
   const res = await fetchWithAuth(
     `${BASE_URL}/sessions/${sessionId}/results/elliptic_band_stats`
