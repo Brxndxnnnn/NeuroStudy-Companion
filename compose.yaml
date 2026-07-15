@@ -5,10 +5,10 @@ services:
     image: timescale/timescaledb:latest-pg17
     container_name: neurostudy_db
     env_file: ./db/.env.docker
-    restart: always
+    restart: unless-stopped
     volumes:
       - postgres-data:/var/lib/postgresql/data
-      - ./db/migrations:/docker-entrypoint-initdb.d
+      - ./db/migrations:/docker-entrypoint-initdb.d:ro
     ports:
       # Bound to LOOPBACK ONLY, in every environment. "5433:5432" binds 0.0.0.0 and
       # publishes Postgres to the whole internet — on the droplet that is the database
@@ -22,55 +22,68 @@ services:
       interval: 5s
       timeout: 5s
       retries: 5
+    networks:
+      - neurostudy
 
   backend:
-      build: ./backend
+      build:
+        context: ./backend
+        dockerfile: Dockerfile
       container_name: neurostudy_backend
       env_file: ./backend/.env.docker
       depends_on:
         db:
           condition: service_healthy
-      volumes:
-        - ./backend/src:/app/src
-      command: npx nodemon src/index.js   # ← overrides the Dockerfile CMD for dev
-
-  # ── NeuroBridge ─────────────────────────────────────────────────
-  # Uncomment when neuuro_bridge/NeuroBridge/Dockerfile is ready
-  # Or just put in your own one
-  #
-  # neuuro_bridge:
-  #   build: ./neuuro_bridge/NeuroBridge
-  #   container_name: neurostudy_bridge
-  #   env_file: ./neuuro_bridge/NeuroBridge/.env
-  #   depends_on:
-  #     db:
-  #       condition: service_healthy
-  #   # ports:
-  #   #   - "XXXX:XXXX"   ← TBC on which port the service exposes
+      expose:
+        - "3000"   # ← only nginx faces the outside
+      networks:
+        - neurostudy
 
   ml:
-      build: ./ml_service
+      build:
+        context: ./ml_service
+        dockerfile: Dockerfile
       container_name: neurostudy_ml
       env_file: ./ml_service/.env.docker
-      # ports:
-      #   - "8000:8000"
-      volumes:
-        - ./ml_service:/app
-      command: uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
+      restart: unless-stopped
       depends_on:
         db:
           condition: service_healthy
+      expose:
+        - "8000"   # ← only nginx faces the outside
+      networks:
+        - neurostudy
+  
+  frontend:
+      build:
+        context: ./frontend
+        dockerfile: Dockerfile
+      container_name: neurostudy_frontend
+      restart: unless-stopped
+      env_file: ./frontend/.env.docker
+      depends_on:
+        - backend
+        - ml
+      expose:
+        - "3000"   # ← only nginx faces the outside
+      networks:
+        - neurostudy
 
   nginx:
     image: nginx:alpine
     container_name: neurostudy_nginx
+    restart: unless-stopped
     ports:
       - "8090:80"       # ← only nginx faces the outside
     volumes:
       - ./nginx/nginx.conf:/etc/nginx/nginx.conf:ro
     depends_on:
+      - frontend
       - backend
       - ml
     restart: always
 volumes:
   postgres-data:
+networks:
+  neurostudy:
+   driver: bridge

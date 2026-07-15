@@ -1,10 +1,11 @@
+# Frontend Dockerfile
 # --- Stage 1: Install Dependencies ---
 FROM node:20-alpine AS deps
 WORKDIR /app
 # Copy package manifests
 COPY package.json package-lock.json ./
 # Tell npm to retry up to 5 times if the network drops, then install
-RUN npm config set fetch-retries 5 && npm install
+RUN npm config set fetch-retries 5 && npm ci
 
 # --- Stage 2: Build the App ---
 FROM node:20-alpine AS builder
@@ -22,11 +23,17 @@ WORKDIR /app
 # Using the modern ENV syntax to clear Docker warnings
 ENV NODE_ENV=production
 ENV PORT=3000
+ENV HOSTNAME=0.0.0.0
+
+RUN addgroup --system --gid 1001 nodejs && \
+    adduser --system --uid 1001 nextjs
 
 # Copy the standalone build from the builder stage
-COPY --from=builder /app/public ./public
-COPY --from=builder /app/.next/standalone ./
-COPY --from=builder /app/.next/static ./.next/static
+COPY --from=builder --chown=nextjs:nodejs /app/public ./public
+COPY --from=builder --chown=nextjs:nodejs /app/.next/standalone ./
+COPY --from=builder --chown=nextjs:nodejs /app/.next/static ./.next/static
+
+USER nextjs
 
 EXPOSE 3000
 
