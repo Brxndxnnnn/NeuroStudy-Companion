@@ -4,6 +4,7 @@ import { useRouter } from "next/navigation";
 import {
   fetchWithAuth,
   getImages,
+  getClinicStimulusSet,
   getQuestions,
   getQuestionnaires,
   getQuestionnaireQuestions,
@@ -103,13 +104,25 @@ export default function ActiveSessionMockup() {
   useEffect(() => {
     const fetchImages = async () => {
       try {
-        const res = await getImages();
+        const stimulusSetId = localStorage.getItem("currentStimulusSetId");
+        const res = stimulusSetId
+          ? await getClinicStimulusSet(stimulusSetId)
+          : await getImages({ page: 1, limit: 50 });
         if (res.ok) {
           const data = await res.json();
-          setImages(data);
+          // A claimed session is pinned to the clinic's active set. The catalog
+          // fallback keeps older sessions (which predate stimulus sets) usable.
+          const sessionImages = Array.isArray(data.data?.images)
+            ? data.data.images
+            : Array.isArray(data.data)
+            ? data.data
+            : Array.isArray(data)
+            ? data
+            : [];
+          setImages(sessionImages);
           // Warm the browser cache so every swap during the timed sequence is
           // instant instead of waiting on a fetch from object storage.
-          data.forEach((img) => {
+          sessionImages.forEach((img) => {
             if (img.url) {
               const pre = new window.Image();
               pre.src = img.url;

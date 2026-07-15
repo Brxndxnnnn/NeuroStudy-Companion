@@ -108,8 +108,10 @@ export async function getCurrentUser() {
 }
 
 // IMAGES
-export async function getImages() {
-  const res = await fetchWithAuth(`${BASE_URL}/images`);
+export async function getImages(params = {}) {
+  const query = new URLSearchParams(params);
+  const suffix = query.toString() ? `?${query}` : "";
+  const res = await fetchWithAuth(`${BASE_URL}/images${suffix}`);
   return res;
 }
 export async function getImage(imageId) {
@@ -341,4 +343,21 @@ export async function createClinic(clinicData) {
 export async function getClinic(clinicId) {
   const res = await fetchWithAuth(`${BASE_URL}/clinics/${clinicId}`);
   return res;
+}
+
+// CLINIC STIMULUS SETS
+// Technicians are automatically scoped to their own clinic by the API.
+export async function getClinicStimulusSets() {
+  return fetchWithAuth(`${BASE_URL}/clinics/stimulus-sets`);
+}
+
+export async function getClinicStimulusSet(stimulusSetId) {
+  return fetchWithAuth(`${BASE_URL}/clinics/stimulus-sets/${stimulusSetId}`);
+}
+
+export async function updateClinicStimulusSet(stimulusSetId, stimulusSet) {
+  return fetchWithAuth(`${BASE_URL}/clinics/stimulus-sets/${stimulusSetId}`, {
+    method: "PUT",
+    body: JSON.stringify(stimulusSet),
+  });
 }
