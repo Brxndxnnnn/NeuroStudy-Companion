@@ -1,9 +1,16 @@
-import { BadRequestError, ConflictError } from '../utils/AppError.js';
+import { BadRequestError, ConflictError, NotFoundError } from '../utils/AppError.js';
 
 // Helper to translate Postgres error codes into user-friendly AppErrors
 const handlePostgresErrors = (err) => {
     // Postgres error codes: https://www.postgresql.org/docs/current/errcodes-appendix.html
+    const safeMessage = typeof err.message === 'string' && err.message.trim() ? err.message : 'Database operation failed';
     switch (err.code) {
+        case 'P2001':
+        case 'P2002':
+            return new NotFoundError(safeMessage);
+        case 'P2003':
+        case 'P2004':
+            return new BadRequestError(safeMessage);
         case '22P02': // invalid input syntax for type uuid
             return new BadRequestError('Invalid ID format provided.');
         
@@ -15,30 +22,31 @@ const handlePostgresErrors = (err) => {
             return new ConflictError(`Duplicate entry: ${err.detail || 'Resource already exists'}`);
             
         case '23503': // foreign_key_violation (e.g., invalid clinic_id)
+        const constraint = err.constraint ?? '';
             let msg = ''
-            if (err.constraint.includes('_clinic_id_fkey'))
+            if (constraint.includes('_clinic_id_fkey'))
                 msg = 'Invalid clinic_id: The specified clinic does not exist.'
-            else if (err.constraint.includes('_session_id_fkey'))
+            else if (constraint.includes('_session_id_fkey'))
                 msg = 'Invalid session_id: related session does not exist.'
-            else if (err.constraint.includes('_image_id_fkey'))
+            else if (constraint.includes('_image_id_fkey'))
                 msg = 'Invalid image_id: related image does not exist.'
-            else if (err.constraint.includes('_question_id_fkey'))
+            else if (constraint.includes('_question_id_fkey'))
                 msg = 'Invalid question_id: related question does not exist.'
-            else if (err.constraint.includes('_user_id_fkey') || err.constraint.includes('_conducted_by_fkey'))
+            else if (constraint.includes('_user_id_fkey') || constraint.includes('_conducted_by_fkey'))
                 msg = 'Invalid user_id: The specified user does not exist.'
-            else if (err.constraint.includes('_questionnaire_id_fkey'))
+            else if (constraint.includes('_questionnaire_id_fkey'))
                 msg = 'Invalid questionnaire_id: The specified questionnaire does not exist.'
-            else if (err.constraint.includes('_current_event_id_fkey'))
+            else if (constraint.includes('_current_event_id_fkey'))
                 msg = 'Invalid event_id: The specified event does not exist.'
             else
-                msg = `Foreign key violation: ${err.detail || 'Related resource does not exist'}`;
-            return new BadRequestError(`Foreign key violation: ${err.detail || 'Related resource does not exist'}`);
+                msg = `Foreign key violation: A related resource does not exist`;
+            return new BadRequestError(msg);
             
         case '23502': // not_null_violation
             return new BadRequestError(`Missing required field: ${err.column || 'unknown'}`);
             
         case 'P0001': // raise_exception (Triggered by our PL/pgSQL functions like claim_session)
-            return new BadRequestError(err.message);
+            return new BadRequestError(safeMessage);
 
         default:
             return null; // Let it fall through to the 500 handler

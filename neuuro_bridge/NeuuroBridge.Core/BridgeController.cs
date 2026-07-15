@@ -56,6 +56,12 @@ namespace NeuuroBridge
         // slightly after, and without this window it was silently dropped (observed ~4s tail on a
         // real session). Sized with margin over that observed worst case.
         private const int StopGraceMs = 4000;
+        // Flat-line thresholds. A raw frame carries ~249 samples (~1 s), and live EEG shows a
+        // within-frame peak-to-peak of ~180 ADC counts, so anything at or under a couple of
+        // counts is not signal. Requiring several consecutive flat frames keeps a momentary
+        // quiet patch from tripping the alarm while still catching a dead electrode in seconds.
+        private const int FlatPkpkCounts = 2;
+        private const int FlatFramesToDeclareDead = 3;
         // How much further past the drain window to keep attributing a rejected frame to "the
         // session that just stopped" (vs. unrelated later live-preview traffic) for TailLossSeconds.
         private const int TailTrackMarginMs = 2000;
@@ -69,6 +75,12 @@ namespace NeuuroBridge
         private bool? _signalReady;
         private bool[] _channels;
         private float[] _impedance;
+        // Per-channel flat-line detection. The SDK's contact flags cannot be trusted on their
+        // own: a railed electrode (constant ADC value, zero peak-to-peak) keeps reporting as
+        // "connected", so a dead channel silently scored GOOD. Count consecutive flat frames
+        // per channel and treat a channel as dead once it has not moved for a couple of them.
+        private readonly int[] _flatFrames = new int[ChannelCount];
+        private bool[] _channelLive;
         private string _battery;
         private int? _heartRate;
         private int? _spo2;
@@ -187,6 +199,7 @@ namespace NeuuroBridge
                     FftPowers = _fftPowers,
                     SignalReady = _signalReady,
                     Channels = _channels,
+                    ChannelLive = _channelLive,
                     Impedance = _impedance,
                     Battery = _battery,
                     HeartRate = _heartRate,
@@ -433,6 +446,10 @@ namespace NeuuroBridge
             // completed; the frontend owns the middle 'claimed' transition).
             try { _db?.RequestComplete(); } catch { /* ignore */ }
             try { _db?.Dispose(); } catch { /* ignore */ }
+            // After Dispose — its final drain is what advances the sample counter to the last frame
+            // that actually arrived, which is the reference point a trailing gap is measured from.
+            // Before SessionStopped, so the end-of-session summary reads the corrected dropout figure.
+            try { _db?.SealTrailingGap(RecordingStopUtc); } catch { /* ignore */ }
             _prepared = false;               // next Start prepares a new session row + pairing code
             _recordingConfirmed = false;
             SetSyncStatus("completed");
@@ -608,7 +625,11 @@ namespace NeuuroBridge
             if (frame.IntSamples != null)
             {
                 Interlocked.Increment(ref _rawFrameCount);
-                lock (_stateLock) _lastRawInt = frame.IntSamples;
+                lock (_stateLock)
+                {
+                    _lastRawInt = frame.IntSamples;
+                    UpdateChannelLiveness(frame.IntSamples);
+                }
 
                 // Capture a local ref: StopSession may dispose _db on another thread mid-frame.
                 var db = _db;
@@ -662,11 +683,11 @@ namespace NeuuroBridge
         private void UploadBandPowers(BandPowers[] powers)
         {
             if (!(SessionActive || _draining) || _db == null || !_db.Streaming) return;
-            float att, rel, mwl; bool? ready; bool[] channels; int? hr, spo2;
+            float att, rel, mwl; bool? ready; bool[] channels; bool[] live; int? hr, spo2;
             lock (_stateLock)
             {
                 att = _sdkAttention; rel = _sdkRelaxation; mwl = _sdkMentalWorkload;
-                ready = _signalReady; channels = _channels;
+                ready = _signalReady; channels = _channels; live = _channelLive;
                 hr = _heartRate; spo2 = _spo2;
             }
             _db.EnqueueBand(new BandPowerRow
@@ -675,7 +696,7 @@ namespace NeuuroBridge
                 Attention = att,
                 Relaxation = rel,
                 MentalWorkload = mwl,
-                SignalQuality = SignalQuality.Compute(ready, channels),
+                SignalQuality = SignalQuality.Compute(ready, channels, live),
                 HeartRate = hr,
                 Spo2 = spo2,
                 Bands = powers,
@@ -807,6 +828,30 @@ namespace NeuuroBridge
 
         private static string FmtF(float v) => float.IsNaN(v) ? "" : v.ToString("0.###", CultureInfo.InvariantCulture);
 
+        /// <summary>
+        /// Updates the per-channel flat-line state from one raw frame. Caller holds _stateLock.
+        /// A channel is declared dead after <see cref="FlatFramesToDeclareDead"/> consecutive
+        /// frames with essentially no peak-to-peak movement, and revives the instant it moves.
+        /// </summary>
+        private void UpdateChannelLiveness(int[] rawFrame)
+        {
+            var live = _channelLive ?? new bool[ChannelCount];
+            for (int ch = 0; ch < ChannelCount; ch++)
+            {
+                var s = IntLastPkpk(rawFrame, ch);
+                if (s.pkpk <= FlatPkpkCounts)
+                {
+                    if (_flatFrames[ch] < int.MaxValue) _flatFrames[ch]++;
+                }
+                else
+                {
+                    _flatFrames[ch] = 0;
+                }
+                live[ch] = _flatFrames[ch] < FlatFramesToDeclareDead;
+            }
+            _channelLive = live;
+        }
+
         // ── Per-channel helpers (frame = ChannelCount equal blocks) ──────────
         public static (float last, float pkpk) IntLastPkpk(int[] d, int ch)
         {
@@ -848,6 +893,8 @@ namespace NeuuroBridge
         public float Attention, Relaxation, MentalWorkload;
         public BandPowers[] FftPowers;
         public bool? SignalReady;
+        /// <summary>Per-electrode liveness: false where the channel has flat-lined (railed ADC).</summary>
+        public bool[] ChannelLive;
         public bool[] Channels;
         public float[] Impedance;
         public string Battery;

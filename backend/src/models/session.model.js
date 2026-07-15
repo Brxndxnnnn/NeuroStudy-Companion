@@ -45,7 +45,15 @@ const findById = async (session_id, client = pool) => {
             s.client_id,
             c.name AS client_name,
             s.conducted_by,
-            u.display_name AS technician_name
+            u.display_name AS technician_name,
+            -- Status of the elliptic feature job (ml_service computes it after the
+            -- bridge marks the session completed). Without these, an empty
+            -- elliptic_band_stats response is ambiguous: "still computing", "finished
+            -- with nothing" and "the worker crashed" all look identical, and the
+            -- results page can only offer a shrug and a retry button.
+            s.features_status,
+            s.features_error,
+            s.features_computed_at
          FROM sessions s
          LEFT JOIN clients c ON s.client_id = c.client_id
          LEFT JOIN users u ON s.conducted_by = u.user_id
