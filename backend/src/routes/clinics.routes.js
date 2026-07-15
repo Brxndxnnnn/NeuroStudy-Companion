@@ -6,6 +6,261 @@ import PERMS from '../constants/permissions.js'
 const router = Router()
 
 /**
+ * @swagger
+ * /api/clinics/stimulus-sets:
+ *   get:
+ *     summary: Retrieve stimulus sets for a clinic
+ *     description: |
+ *       Returns stimulus sets visible to the authenticated user.
+ *
+ *       Clinic technicians are restricted to their own clinic through
+ *       PostgreSQL row-level security and should not provide clinic_id.
+ *
+ *       Administrators must provide clinic_id as a query parameter.
+ *     tags:
+ *       - Clinics
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - in: query
+ *         name: clinic_id
+ *         required: false
+ *         schema:
+ *           type: string
+ *           format: uuid
+ *         description: Required for administrators. Not required for clinic technicians.
+ *     responses:
+ *       200:
+ *         description: Stimulus sets retrieved successfully.
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 status:
+ *                   type: string
+ *                   example: success
+ *                 results:
+ *                   type: integer
+ *                   example: 2
+ *                 data:
+ *                   type: array
+ *                   items:
+ *                     $ref: '#/components/schemas/StimulusSetSummary'
+ *       400:
+ *         description: Missing or invalid clinic_id for an administrator.
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/ErrorResponse'
+ *       401:
+ *         description: Authentication required.
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/ErrorResponse'
+ *       403:
+ *         description: User is not authorized to access the requested clinic.
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/ErrorResponse'
+ */
+router.get(
+    '/stimulus-sets',
+    clinicController.getClinicStimulusSets
+)
+
+/**
+ * @swagger
+ * /api/clinics/stimulus-sets/{stimulus_set_id}:
+ *   get:
+ *     summary: Retrieve one stimulus set with its images
+ *     description: |
+ *       Returns the selected stimulus set together with its ordered images.
+ *
+ *       The images array is ordered by sequence_no.
+ *
+ *       Clinic technicians are restricted through PostgreSQL row-level
+ *       security. Administrators must provide clinic_id.
+ *     tags:
+ *       - Clinics
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - in: path
+ *         name: stimulus_set_id
+ *         required: true
+ *         schema:
+ *           type: string
+ *           format: uuid
+ *         description: Stimulus set UUID.
+ *       - in: query
+ *         name: clinic_id
+ *         required: false
+ *         schema:
+ *           type: string
+ *           format: uuid
+ *         description: Required for administrators. Not required for clinic technicians.
+ *     responses:
+ *       200:
+ *         description: Stimulus set retrieved successfully.
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 status:
+ *                   type: string
+ *                   example: success
+ *                 data:
+ *                   $ref: '#/components/schemas/StimulusSetDetail'
+ *       400:
+ *         description: Invalid UUID or missing clinic_id for an administrator.
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/ErrorResponse'
+ *       401:
+ *         description: Authentication required.
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/ErrorResponse'
+ *       403:
+ *         description: User is not authorized to access the requested stimulus set.
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/ErrorResponse'
+ *       404:
+ *         description: Stimulus set not found.
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/ErrorResponse'
+ */
+router.get(
+    '/stimulus-sets/:stimulus_set_id',
+    clinicController.getClinicStimulusSetById
+)
+
+/**
+ * @swagger
+ * /api/clinics/stimulus-sets/{stimulus_set_id}:
+ *   put:
+ *     summary: Replace a clinic stimulus set and its images
+ *     description: |
+ *       Replaces the stimulus set name, status and complete ordered image list.
+ *
+ *       Exactly 24 unique image IDs must be supplied. Their order in the
+ *       request array becomes sequence_no 1 through 24.
+ *
+ *       Updating a draft modifies that draft directly. Updating an active or
+ *       archived set creates a new version so sessions referencing an older
+ *       version remain historically accurate.
+ *
+ *       Activating the resulting set archives the clinic's previously active
+ *       set. Saving it as draft leaves the current active set unchanged.
+ *
+ *       Administrators must include clinic_id in the request body. Clinic
+ *       technicians are scoped to their clinic through PostgreSQL row-level
+ *       security.
+ *     tags:
+ *       - Clinics
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - in: path
+ *         name: stimulus_set_id
+ *         required: true
+ *         schema:
+ *           type: string
+ *           format: uuid
+ *         description: UUID of the stimulus set being edited.
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             $ref: '#/components/schemas/UpdateStimulusSetRequest'
+ *     responses:
+ *       200:
+ *         description: Stimulus set updated successfully.
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 status:
+ *                   type: string
+ *                   example: success
+ *                 data:
+ *                   $ref: '#/components/schemas/StimulusSetDetail'
+ *                 meta:
+ *                   type: object
+ *                   properties:
+ *                     created_new_version:
+ *                       type: boolean
+ *                       example: true
+ *                     source_stimulus_set_id:
+ *                       type: string
+ *                       format: uuid
+ *             example:
+ *               status: success
+ *               data:
+ *                 stimulus_set_id: 2a71c348-cfe8-4472-b18f-f62299021ad1
+ *                 clinic_id: b5d80c02-46eb-4442-a555-f7cd93f1a4d4
+ *                 name: Updated clinic stimulus set
+ *                 version: 3
+ *                 status: active
+ *                 image_count: 24
+ *                 images: []
+ *               meta:
+ *                 created_new_version: true
+ *                 source_stimulus_set_id: 8af54db6-7020-48af-b9a3-26f416485d58
+ *       400:
+ *         description: |
+ *           Invalid request, including an invalid UUID, duplicate images,
+ *           an image count other than 24, invalid status or missing clinic_id
+ *           for an administrator.
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/ErrorResponse'
+ *       401:
+ *         description: Authentication required.
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/ErrorResponse'
+ *       403:
+ *         description: User is not authorized to update the stimulus set.
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/ErrorResponse'
+ *       404:
+ *         description: Stimulus set not found.
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/ErrorResponse'
+ *       409:
+ *         description: Update conflicts with an existing stimulus-set version or active set.
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/ErrorResponse'
+ */
+router.put(
+    '/stimulus-sets/:stimulus_set_id',
+    clinicController.updateClinicStimulusSet
+)
+
+
+
+/**
  * @openapi
  * /api/clinics:
  *   post:
