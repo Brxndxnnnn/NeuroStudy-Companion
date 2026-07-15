@@ -5,6 +5,38 @@ const router = Router()
 
 /**
  * @openapi
+ * /api/images/categories:
+ *   get:
+ *     summary: Retrieve a list of all image categories
+ *     description: |
+ *       This endpoint allows you to retrieve a list of all image categories stored in the database.
+ *     tags: [Images]
+ *     security:
+ *       - bearerAuth: []
+ *     responses:
+ *       200:
+ *         description: A list of image categories
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                status:
+ *                 type: string
+ *                length:
+ *                 type: integer
+ *                results:
+ *                 type: array
+ *                 items:
+ *                   type: string
+ */
+router.get(
+    '/categories',
+    imageController.getImageCategories
+)
+
+/**
+ * @openapi
  * /api/images:
  *   get:
  *     summary: Retrieve a list of all images

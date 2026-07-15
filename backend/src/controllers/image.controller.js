@@ -9,6 +9,16 @@ import { checkAllowedImageLimit, parsePositiveInteger, normalizeOptionalQueryStr
 //     return res.json(images)
 // })
 
+// ── GET /api/images/categories ───────────────────────────────────────────────
+const getImageCategories = catchAsync(async (req, res) => {
+    const categories = await imageModel.getImageCategories(req.dbClient)
+    return res.json({
+        status: 'success',
+        length: categories.length,
+        results: categories,
+    })
+})
+
 // ── GET /api/images/:image_id ───────────────────────────────────────────────────
 const getImageById = catchAsync(async (req, res) => {
     const { image_id } = req.params
@@ -83,4 +93,4 @@ const getAllImages = catchAsync(async (req, res) => {
     })
 })
 
-export default { getAllImages, getImageById }
+export default { getImageCategories, getAllImages, getImageById }
