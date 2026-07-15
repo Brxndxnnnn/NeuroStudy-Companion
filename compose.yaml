@@ -81,7 +81,6 @@ services:
       - frontend
       - backend
       - ml
-    restart: always
 volumes:
   postgres-data:
 networks:
