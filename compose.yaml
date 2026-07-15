@@ -10,7 +10,13 @@ services:
       - postgres-data:/var/lib/postgresql/data
       - ./db/migrations:/docker-entrypoint-initdb.d
     ports:
-      - "5433:5432"   # 5432 kept free for your local psql install
+      # Bound to LOOPBACK ONLY, in every environment. "5433:5432" binds 0.0.0.0 and
+      # publishes Postgres to the whole internet — on the droplet that is the database
+      # itself, reachable by anyone who scans the port. Reach it from outside over an
+      # SSH tunnel instead:
+      #     ssh -N -L 5433:localhost:5433 root@139.59.126.77
+      # (5432 is left free for a local psql install.)
+      - "127.0.0.1:5433:5432"
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U neurostudy_user -d neurostudy"]
       interval: 5s

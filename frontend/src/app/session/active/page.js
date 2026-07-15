@@ -16,6 +16,10 @@ import {
 } from "@/utils/api";
 import { SessionTopBar } from "@/components/TopNav";
 import { Card, Button, Label, Pill, Alert, Spinner, Field, Input } from "@/components/ui";
+import LikertSurvey, { allAnswered as allSurveyAnswered } from "@/components/LikertSurvey";
+
+// How long each stimulus image stays on screen (ms).
+const IMAGE_DISPLAY_MS = 3000;
 
 const PHASES = [
   { key: "connect", label: "Connect" },
@@ -92,7 +96,10 @@ export default function ActiveSessionMockup() {
     setPatientName(localStorage.getItem("currentClientName") || "");
   }, []);
 
-  // 1. FETCH IMAGES ON LOAD
+  // 1. FETCH ALL STIMULI ON LOAD — images AND math questions. Both are needed
+  // mid-recording, and fetching them lazily put a network round-trip (and an
+  // image download) inside the stimulus timeline, leaving the participant on a
+  // blank stage — visible as unmarked gaps in the recorded EEG.
   useEffect(() => {
     const fetchImages = async () => {
       try {
@@ -100,39 +107,55 @@ export default function ActiveSessionMockup() {
         if (res.ok) {
           const data = await res.json();
           setImages(data);
+          // Warm the browser cache so every swap during the timed sequence is
+          // instant instead of waiting on a fetch from object storage.
+          data.forEach((img) => {
+            if (img.url) {
+              const pre = new window.Image();
+              pre.src = img.url;
+            }
+          });
         }
       } catch (err) {
         console.error("Failed to fetch images", err);
       }
     };
+    const fetchQuestions = async () => {
+      try {
+        const res = await getQuestions();
+        if (res.ok) setQuestions(await res.json());
+      } catch (err) {
+        console.error("Failed to fetch questions", err);
+      }
+    };
     fetchImages();
+    fetchQuestions();
   }, []);
 
-  // 2. FETCH MATH QUESTIONS
+  // 2. MATH PHASE ENTRY — questions are already prefetched; just log the first
+  // one as shown. The refs guard strict-mode/effect re-runs from double-logging
+  // and cap the fallback refetch (mount prefetch failed) at a single retry.
+  const mathStartedRef = useRef(false);
+  const mathRefetchedRef = useRef(false);
   useEffect(() => {
-    if (currentStep === "math" && questions.length === 0 && !isLoadingData) {
-      const fetchQuestions = async () => {
-        setIsLoadingData(true);
-        try {
-          const res = await getQuestions();
-          if (res.ok) {
-            const data = await res.json();
-            setQuestions(data);
-            if (data.length > 0) {
-              setCurrentMathIndex(0);
-              setMathInputEnabled(false);
-              logQuestionShown(data[0].question_id);
-            }
-          }
-        } catch (err) {
-          console.error("Failed to fetch questions", err);
-        } finally {
-          setIsLoadingData(false);
-        }
-      };
-      fetchQuestions();
+    if (currentStep !== "math") return;
+    if (questions.length === 0) {
+      if (mathRefetchedRef.current) return;
+      mathRefetchedRef.current = true;
+      getQuestions()
+        .then(async (res) => {
+          if (res.ok) setQuestions(await res.json());
+        })
+        .catch((err) => console.error("Failed to fetch questions", err));
+      return;
     }
-  }, [currentStep]);
+    if (!mathStartedRef.current) {
+      mathStartedRef.current = true;
+      setCurrentMathIndex(0);
+      setMathInputEnabled(false);
+      logQuestionShown(questions[0].question_id);
+    }
+  }, [currentStep, questions]);
 
   // 3. TIMER TO ENABLE MATH INPUT (3-5s)
   useEffect(() => {
@@ -195,62 +218,69 @@ export default function ActiveSessionMockup() {
   };
 
   // EVENT LOGGING HELPERS
-  const logImageShown = async (imageId) => {
-    if (!imageId) return;
-    try {
-      const sessionId = localStorage.getItem("currentSessionId");
-      const res = await createEvent(sessionId, { image_id: imageId });
-      if (res.ok) {
+  //
+  // Mid-sequence transitions send ONE create per stimulus: the backend closes the
+  // previous open event and stamps the new one in the same request, so consecutive
+  // windows are contiguous by construction — a client-side hide + create pair can
+  // arrive out of order under latency spikes and record overlapping windows.
+  // Explicit hides are only for phase exits (last image, last question), and must
+  // be AWAITED there: setHiddenAt overwrites unconditionally, so a slow hide PATCH
+  // landing after the next phase's create would push hidden_at past that event's
+  // shown_at. The refs hold the create-request PROMISE, not the resolved id, so a
+  // hide can never miss its event just because the create response was slow.
+  const logStimulusShown = (ref, payload, what) => {
+    const sessionId = localStorage.getItem("currentSessionId");
+    ref.current = createEvent(sessionId, payload)
+      .then(async (res) => {
+        if (!res.ok) throw new Error(await res.text());
         const data = await res.json();
-        currentEventIdRef.current = data.event_id || data.id;
-      }
-    } catch (err) { console.error("Event start failed", err); }
+        return data.event_id || data.id || null;
+      })
+      .catch((err) => {
+        console.error(`${what} event start failed`, err);
+        return null;
+      });
   };
 
-  const logImageHidden = async () => {
-    const eventId = currentEventIdRef.current;
-    if (!eventId) return;
-    try {
-      await hideEvent(eventId);
-      currentEventIdRef.current = null;
-    } catch (err) { console.error("Event hide failed", err); }
+  // Claims the pending event synchronously (no double-hide race) and hides it
+  // once its id is known. Returns a promise so session teardown can await the
+  // final stamp; mid-sequence callers just fire and forget.
+  const logStimulusHidden = (ref, what) => {
+    const pending = ref.current;
+    ref.current = null;
+    if (!pending) return Promise.resolve();
+    return Promise.resolve(pending)
+      .then((eventId) => (eventId ? hideEvent(eventId) : null))
+      .catch((err) => console.error(`${what} event hide failed`, err));
   };
 
-  const logQuestionShown = async (questionId) => {
-    if (!questionId) return;
-    try {
-      const sessionId = localStorage.getItem("currentSessionId");
-      const res = await createEvent(sessionId, { question_id: questionId });
-      if (res.ok) {
-        const data = await res.json();
-        currentMathEventIdRef.current = data.event_id || data.id;
-      }
-    } catch (err) { console.error("Question event start failed", err); }
+  const logImageShown = (imageId) => {
+    if (imageId) logStimulusShown(currentEventIdRef, { image_id: imageId }, "Image");
   };
-
-  const logQuestionHidden = async () => {
-    const eventId = currentMathEventIdRef.current;
-    if (!eventId) return;
-    try {
-      await hideEvent(eventId);
-      currentMathEventIdRef.current = null;
-    } catch (err) { console.error("Question event hide failed", err); }
+  const logImageHidden = () => logStimulusHidden(currentEventIdRef, "Image");
+  const logQuestionShown = (questionId) => {
+    if (questionId) logStimulusShown(currentMathEventIdRef, { question_id: questionId }, "Question");
   };
+  const logQuestionHidden = () => logStimulusHidden(currentMathEventIdRef, "Question");
 
-  // 5. IMAGES: AUTO-ADVANCE
+  // 5. IMAGES: AUTO-ADVANCE. Mid-sequence there is no hide call — the next
+  // image's create closes the previous event server-side, atomically. Leaving
+  // the phase, the hide must RESOLVE before the math step mounts, or it could
+  // land after the first question's create and overwrite its auto-closed
+  // hidden_at with a later time.
   useEffect(() => {
     let timer;
     if (currentStep === "images" && images.length > 0) {
       timer = setTimeout(async () => {
         if (currentImageIndex < images.length - 1) {
           const nextIdx = currentImageIndex + 1;
+          logImageShown(images[nextIdx].image_id);
           setCurrentImageIndex(nextIdx);
-          await logImageShown(images[nextIdx].image_id);
         } else {
           await logImageHidden();
           setCurrentStep("math");
         }
-      }, 1000);
+      }, IMAGE_DISPLAY_MS);
     }
     return () => clearTimeout(timer);
   }, [currentStep, currentImageIndex, images]);
@@ -281,10 +311,8 @@ export default function ActiveSessionMockup() {
           if (sessionData.bridge_recording_at !== null) {
             clearInterval(pollInterval);
             setIsWaitingForBridge(false);
+            if (images.length > 0) logImageShown(images[0].image_id);
             setCurrentStep("images");
-            if (images.length > 0) {
-              await logImageShown(images[0].image_id);
-            }
             return;
           }
         }
@@ -312,11 +340,13 @@ export default function ActiveSessionMockup() {
       return;
     }
     if (currentMathIndex < questions.length - 1) {
+      // No hide: the next question's create auto-closes this event server-side.
       const nextIdx = currentMathIndex + 1;
+      logQuestionShown(questions[nextIdx].question_id);
       setCurrentMathIndex(nextIdx);
       setMathInputEnabled(false);
-      await logQuestionShown(questions[nextIdx].question_id);
     } else {
+      // Last stimulus: make sure its hidden_at lands before end_time is stamped.
       await logQuestionHidden();
       await endSessionAndGoToSurvey();
     }
@@ -337,10 +367,7 @@ export default function ActiveSessionMockup() {
 
   // 9. SURVEY NAVIGATION
   const handleSubmitSurvey = async () => {
-    const allAnswered = surveyQuestions.every(
-      (_, idx) => surveyAnswers[idx] && surveyAnswers[idx].trim() !== ""
-    );
-    if (!allAnswered) {
+    if (!allSurveyAnswered(surveyQuestions, surveyAnswers)) {
       alert("Please answer all questions.");
       return;
     }
@@ -349,7 +376,7 @@ export default function ActiveSessionMockup() {
       const sessionId = localStorage.getItem("currentSessionId");
       const answers = surveyQuestions.map((q, idx) => ({
         question_id: q.question_id,
-        answer_value: parseInt(surveyAnswers[idx], 10) || 0,
+        answer_value: Number(surveyAnswers[idx]),
       }));
 
       const res = await submitQuestionnaireAnswers(sessionId, selectedQuestionnaireId, answers);
@@ -412,12 +439,12 @@ export default function ActiveSessionMockup() {
     const hasImage = currentImg.url && currentImg.url.trim() !== "";
 
     return (
-      <Card className="max-w-4xl mx-auto p-6 anim-fade">
-        <div className="flex justify-between items-center mb-4">
+      <Card className="max-w-7xl mx-auto p-4 sm:p-5 anim-fade">
+        <div className="flex justify-between items-center mb-3">
           <Label>Image {currentImageIndex + 1} of {images.length}</Label>
           {currentImg.category && <Pill tone="neutral">{currentImg.category}</Pill>}
         </div>
-        <div className="w-full aspect-[16/10] bg-inset rounded-xl flex items-center justify-center border border-border overflow-hidden">
+        <div className="w-full h-[72vh] min-h-[420px] bg-inset rounded-xl flex items-center justify-center border border-border overflow-hidden">
           {hasImage ? (
             <img
               src={currentImg.url}
@@ -512,9 +539,7 @@ export default function ActiveSessionMockup() {
       );
     }
 
-    const allAnswered = surveyQuestions.every(
-      (_, idx) => surveyAnswers[idx] && surveyAnswers[idx].trim() !== ""
-    );
+    const ready = allSurveyAnswered(surveyQuestions, surveyAnswers);
 
     return (
       <Card className="max-w-4xl mx-auto p-8">
@@ -535,28 +560,15 @@ export default function ActiveSessionMockup() {
           </div>
         </div>
 
-        <div className="space-y-5">
-          {surveyQuestions.map((q, idx) => {
-            const statementObj = q.statement || {};
-            const questionText = statementObj[selectedLanguage] || statementObj.en || "Question text not available";
-            const answer = surveyAnswers[idx] || "";
-            return (
-              <Field key={q.question_id || idx} label={`Question ${idx + 1}`}>
-                <p className="text-[15px] text-ink mb-2 -mt-1">{questionText}</p>
-                <Input
-                  type="text"
-                  inputMode="numeric"
-                  placeholder="Your answer (number)"
-                  value={answer}
-                  onChange={(e) => setSurveyAnswers((prev) => ({ ...prev, [idx]: e.target.value }))}
-                />
-              </Field>
-            );
-          })}
-        </div>
+        <LikertSurvey
+          questions={surveyQuestions}
+          answers={surveyAnswers}
+          language={selectedLanguage}
+          onChange={(idx, value) => setSurveyAnswers((prev) => ({ ...prev, [idx]: value }))}
+        />
 
         <div className="flex justify-end pt-5 mt-6 border-t border-border">
-          <Button onClick={handleSubmitSurvey} disabled={!allAnswered}>
+          <Button onClick={handleSubmitSurvey} disabled={!ready}>
             Finish survey
           </Button>
         </div>
@@ -599,7 +611,14 @@ export default function ActiveSessionMockup() {
               <div className="mx-auto mb-6 grid h-16 w-16 place-items-center rounded-full bg-good-soft text-good text-3xl">✓</div>
               <h2 className="text-2xl font-bold tracking-tight text-ink mb-2">Session completed &amp; saved</h2>
               <p className="text-muted mb-8">All data has been recorded to the database.</p>
-              <Button size="lg" onClick={() => router.push("/history")}>Return to dashboard</Button>
+              <div className="flex flex-col sm:flex-row gap-3 justify-center">
+                <Button size="lg" onClick={() => router.push("/session/result")}>
+                  View session results →
+                </Button>
+                <Button size="lg" variant="subtle" onClick={() => router.push("/history")}>
+                  Return to dashboard
+                </Button>
+              </div>
             </div>
           )}
         </div>
