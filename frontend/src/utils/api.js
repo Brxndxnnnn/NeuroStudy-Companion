@@ -108,6 +108,10 @@ export async function getCurrentUser() {
 }
 
 // IMAGES
+export async function getImageCategories() {
+  const res = await fetchWithAuth(`${BASE_URL}/images/categories`);
+  return res;
+}
 export async function getImages(params = {}) {
   const query = new URLSearchParams(params);
   const suffix = query.toString() ? `?${query}` : "";
