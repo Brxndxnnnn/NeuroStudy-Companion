@@ -661,6 +661,69 @@ namespace NeuuroBridge
             return n;
         }
 
+        /// <summary>
+        /// Filtered-stream twin of <see cref="CopyRaw"/>: expands every queued filtered frame into one
+        /// row per sample and bulk-COPYs them into eeg_filtered_samples. Uses the SAME monotonic 250 Hz
+        /// sample-counter clock (uniform, µs-aligned, strictly increasing) and the SAME drift/resync guard
+        /// as the raw path — but on its own independent anchor (filtered arrives on a separate SDK callback)
+        /// and writes SDK-filtered µV floats (real) instead of raw ADC counts. Channel columns map the SDK
+        /// frame order [0]=Fp1 [1]=Fp2 [2]=T4 [3]=T3 onto fp1,fp2,t3,t4 (note t3/t4 swap), identical to raw.
+        /// </summary>
+        private int CopyFiltered()
+        {
+            if (_filtQ.IsEmpty) return 0;
+            long periodTicks = TimeSpan.TicksPerSecond / _sampleRate;
+            long maxDriftTicks = 3 * TimeSpan.TicksPerSecond;
+            int n = 0;
+            using (var w = _conn.BeginBinaryImport(
+                "COPY eeg_filtered_samples (session_id, time, fp1, fp2, t3, t4) FROM STDIN (FORMAT BINARY)"))
+            {
+                while (_filtQ.TryDequeue(out var f))
+                {
+                    var samples = f.Samples;
+                    if (samples == null || samples.Length < ChannelCount) continue;
+                    int spc = samples.Length / ChannelCount;
+
+                    if (!_filtAnchored)
+                    {
+                        _filtBaseTicks = f.FrameEnd.Ticks - (long)(spc - 1) * periodTicks;
+                        _filtBaseTicks -= _filtBaseTicks % (TimeSpan.TicksPerMillisecond / 1000);
+                        _filtSampleIndex = 0;
+                        _filtAnchored = true;
+                    }
+
+                    // Same drift/resync guard as CopyRaw — see there for the rationale.
+                    long counterLastTicks = _filtBaseTicks + (_filtSampleIndex + spc - 1) * periodTicks;
+                    if (f.FrameEnd.Ticks - counterLastTicks > maxDriftTicks)
+                    {
+                        long resyncIndex = (long)Math.Round((double)(f.FrameEnd.Ticks - _filtBaseTicks) / periodTicks) - (spc - 1);
+                        if (resyncIndex > _filtSampleIndex)
+                        {
+                            _filtSampleIndex = resyncIndex;
+                            Interlocked.Increment(ref _filtResyncs);
+                        }
+                    }
+
+                    for (int i = 0; i < spc; i++)
+                    {
+                        long t = _filtBaseTicks + _filtSampleIndex * periodTicks;   // exact, uniform, µs-aligned
+                        _filtSampleIndex++;
+
+                        w.StartRow();
+                        w.Write(_sessionId, NpgsqlDbType.Uuid);
+                        w.Write(new DateTime(t, DateTimeKind.Utc), NpgsqlDbType.TimestampTz);
+                        w.Write(samples[0 * spc + i], NpgsqlDbType.Real);  // fp1 = frame ch0
+                        w.Write(samples[1 * spc + i], NpgsqlDbType.Real);  // fp2 = frame ch1
+                        w.Write(samples[3 * spc + i], NpgsqlDbType.Real);  // t3  = frame ch3
+                        w.Write(samples[2 * spc + i], NpgsqlDbType.Real);  // t4  = frame ch2
+                        n++;
+                    }
+                }
+                w.Complete();
+            }
+            return n;
+        }
+
         private int CopyEeg()
         {
             if (_eegQ.IsEmpty) return 0;

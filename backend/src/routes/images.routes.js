@@ -13,28 +13,88 @@ const router = Router()
  *     tags: [Images]
  *     security:
  *       - bearerAuth: []
+ *     parameters:
+ *       - in: query
+ *         name: page
+ *         required: false
+ *         schema:
+ *           type: integer
+ *           minimum: 1
+ *           default: 1
+ *         description: The page number to retrieve
+ *       - in: query
+ *         name: limit
+ *         required: false
+ *         schema:
+ *           type: integer
+ *           minimum: 1
+ *           maximum: 50
+ *           default: 25
+ *         description: The number of images to retrieve per page
+ *       - in: query
+ *         name: search
+ *         required: false
+ *         schema:
+ *           type: string
+ *         description: A search term to filter images by filename
+ *       - in: query
+ *         name: category
+ *         required: false
+ *         schema:
+ *           type: string
+ *         description: A category to filter images by
  *     responses:
  *       200:
  *         description: A list of images
  *         content:
  *           application/json:
  *             schema:
- *               type: array
- *               items:
- *                 type: object
- *                 properties:
- *                   image_id:
- *                     type: string
- *                     format: uuid
- *                   filename:
- *                     type: string
- *                   url:
- *                     type: string
- *                   category:
- *                     type: string
- *                   created_at:
- *                     type: string
- *                     format: date-time
+ *               type: object
+ *               properties:
+ *                 images:
+ *                   type: array
+ *                   items:
+ *                     type: object
+ *                     properties:
+ *                       image_id:
+ *                         type: string
+ *                         format: uuid
+ *                       filename:
+ *                         type: string
+ *                       category:
+ *                         type: string
+ *                       url:
+ *                         type: string
+ *                       valence_mean:
+ *                         type: number
+ *                       valence_sd:
+ *                         type: number
+ *                       arousal_mean:
+ *                         type: number
+ *                       arousal_sd:
+ *                         type: number
+ *                       display_order:
+ *                         type: integer
+ *                       created_at:
+ *                         type: string
+ *                         format: date-time
+ *                 pagination:
+ *                   type: object
+ *                   properties:
+ *                     page:
+ *                       type: integer
+ *                     limit:
+ *                       type: integer
+ *                     total:
+ *                       type: integer
+ *                     totalPages:
+ *                       type: integer
+ *                     prev:
+ *                       type: string
+ *                       nullable: true
+ *                     next:
+ *                       type: string
+ *                       nullable: true
  */
 router.get(
     '/',
@@ -76,6 +136,16 @@ router.get(
  *                   type: string
  *                 category:
  *                   type: string
+ *                 valence_mean:
+ *                   type: number
+ *                 valence_sd:
+ *                   type: number
+ *                 arousal_mean:
+ *                   type: number
+ *                 arousal_sd:
+ *                   type: number
+ *                 display_order:
+ *                   type: integer
  *                 created_at:
  *                   type: string
  *                   format: date-time
