@@ -1,6 +1,11 @@
 import pool from '../config/db.js'
 import query from '../utils/query.js'
 
+const getImageCategories = async (client = pool) => {
+    const { rows } = await query(client, `SELECT DISTINCT category FROM images ORDER BY category ASC`)
+    return rows.map(row => row.category).filter(category => category !== null)
+}
+
 const findAll = async (client = pool) => {
     const { rows } = await query(client, 
         `SELECT image_id, display_order, filename, url, category, valence_mean, valence_sd, arousal_mean, arousal_sd from images ORDER BY display_order NULLS LAST, image_id DESC`
@@ -80,4 +85,4 @@ const getAll = async ({ search = null, category = null, page = 1, limit = 25}, c
     }
 }
 
-export default { findAll, findById, getAll }
+export default { getImageCategories, findAll, findById, getAll }
