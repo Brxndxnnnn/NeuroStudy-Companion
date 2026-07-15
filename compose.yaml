@@ -81,6 +81,9 @@ services:
       - frontend
       - backend
       - ml
+    networks:
+      - neurostudy
+      
 volumes:
   postgres-data:
 networks:
