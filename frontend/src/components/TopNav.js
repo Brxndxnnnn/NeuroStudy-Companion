@@ -9,6 +9,7 @@ import { logout } from "@/utils/api";
 const CLINICIAN_LINKS = [
   { href: "/history", label: "Clients" },
   { href: "/sessions", label: "Sessions" },
+  { href: "/stimulus-sets", label: "Stimulus set" },
   { href: "/insights", label: "Insights" },
 ];
 
