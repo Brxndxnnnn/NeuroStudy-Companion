@@ -37,7 +37,13 @@ export default function SessionSetup() {
       const response = await pairSession(pairingCode, selectedClient.id);
       if (response.ok) {
         const data = await response.json();
-        localStorage.setItem("currentSessionId", data.session?.session_id || data.id);
+        const session = data.session || data;
+        localStorage.setItem("currentSessionId", session.session_id || session.id);
+        if (session.stimulus_set_id) {
+          localStorage.setItem("currentStimulusSetId", session.stimulus_set_id);
+        } else {
+          localStorage.removeItem("currentStimulusSetId");
+        }
         setFeedback({ type: "success", message: "Paired successfully. Initializing…" });
         setTimeout(() => router.push("/session/active"), 1200);
       } else {

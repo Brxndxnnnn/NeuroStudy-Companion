@@ -1,0 +1,29 @@
+# compose.prod.yaml — production overrides for the droplet (139.59.126.77).
+#
+#     docker compose -f compose.yaml -f compose.prod.yaml up -d
+#
+# WHY THIS FILE EXISTS
+# --------------------
+# These settings used to live ONLY as uncommitted edits in the droplet's working tree.
+# Nothing in git knew about them, so `git reset --hard` — which is exactly what a deploy
+# has to do, since main's history was rewritten — silently reverted them. The most
+# dangerous one was the database port: the committed compose.yaml published Postgres on
+# 0.0.0.0, so a deploy would have taken the DB from loopback-only to reachable by
+# anyone who scanned the port, with nothing on screen to say so.
+#
+# The loopback binding now lives in compose.yaml itself (it is correct everywhere, not
+# just here). What is left is genuinely environment-specific: which port faces the world.
+#
+# Anything that must survive a deploy belongs in git. If you find yourself editing a
+# tracked file directly on the droplet, put it here instead.
+
+services:
+
+  nginx:
+    # !override REPLACES the base list instead of appending to it. Compose merges
+    # `ports` by concatenation, so without this the droplet would publish 8090 as well
+    # as 80 — the dev port, quietly exposed to the internet, for no reason.
+    ports: !override
+      # The droplet serves the public API on :80. Locally the default stays 8090, so it
+      # cannot collide with whatever else is already on port 80 on a dev machine.
+      - "80:80"

@@ -308,8 +308,7 @@ namespace NeuuroBridge
                         bool? ok = channels != null && ch < channels.Length ? channels[ch] : (bool?)null;
                         float k = imp != null && ch < imp.Length ? imp[ch] : float.NaN;
                         string contact = ok == null ? "?" : ok.Value ? "OK" : "--";
-                        string kTxt = float.IsNaN(k) ? "   n/a" : $"{k,6:F1}";
-                        Print($"     {ChannelLabels[ch],-4} contact={contact,-2}  impedance={kTxt} kΩ ({SignalQuality.GradeImpedance(k)})");
+                        Print($"     {ChannelLabels[ch],-4} contact={contact,-2}  impedance={SignalQuality.FormatImpedance(k)}");
                     }
                 }
                 Thread.Sleep(50);
@@ -652,6 +651,10 @@ namespace NeuuroBridge
 
             using (var sw = new StreamWriter(filename, append: false, encoding: Encoding.UTF8))
             {
+                // Columns follow SDK FRAME order (Fp1, Fp2, T4, T3) — T4 before T3 — not the
+                // fp1,fp2,t3,t4 order every DB table and every downstream consumer uses. Anyone
+                // loading this file must read the header, not assume the DB ordering: getting it
+                // wrong transposes the two temporal electrodes and swaps left for right.
                 sw.WriteLine("elapsed_ms,frame,sample_idx,Fp1,Fp2,T4,T3");
                 foreach (var (ms, frameNum, samples) in frames)
                 {
