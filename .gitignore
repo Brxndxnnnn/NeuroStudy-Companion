@@ -27,3 +27,6 @@ venv/
 
 # Node.js
 node_modules/
+
+# Compose override files (local overrides for development, not for production)
+compose.override.yaml
