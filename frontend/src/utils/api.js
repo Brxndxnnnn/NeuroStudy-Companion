@@ -268,6 +268,31 @@ export async function getSessionResultsBandPower(sessionId, startSeconds, endSec
 
 
 
+// ML PHASE 1 (Insights tab)
+// The ML service sits behind nginx at /ml/ (not /api), so this bypasses BASE_URL.
+// Returns a readiness snapshot: whether a valence/arousal model is trained yet and
+// how much OASIS-labelled EEG has accumulated toward training one.
+export async function getPhase1Status() {
+  const res = await fetchWithAuth(`/ml/phase1/status`);
+  return res;
+}
+// Current trained model + version history (metrics for the model card).
+export async function getPhase1Model() {
+  const res = await fetchWithAuth(`/ml/phase1/model`);
+  return res;
+}
+// Completed sessions + their prediction status (session picker).
+export async function getPhase1Sessions() {
+  const res = await fetchWithAuth(`/ml/phase1/sessions`);
+  return res;
+}
+// One session's predicted valence/arousal trajectory.
+export async function getPhase1Predictions(sessionId) {
+  const res = await fetchWithAuth(`/ml/phase1/predictions/${sessionId}`);
+  return res;
+}
+
+
 // EVENTS
 export async function createEvent(sessionId, payload) {
   const res = await fetchWithAuth(`${BASE_URL}/events`, {

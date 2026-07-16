@@ -1,7 +1,7 @@
 """
 scripts/load_oasis_labels.py
 
-Populate images.valence_score / arousal_score / valence_sd / arousal_sd from the
+Populate images.valence_mean / arousal_mean / valence_sd / arousal_sd from the
 OASIS norms, joining on images.oasis_theme.
 
     python -m scripts.load_oasis_labels --check     # report only, touch nothing
@@ -30,6 +30,14 @@ import argparse
 import csv
 import sys
 from pathlib import Path
+
+# --check prints unicode warning glyphs (⚠). Windows' cp1252 console cannot
+# encode them and would crash the report mid-run; force UTF-8 output.
+for _stream in (sys.stdout, sys.stderr):
+    try:
+        _stream.reconfigure(encoding="utf-8")
+    except (AttributeError, ValueError):
+        pass
 
 from sqlalchemy import text
 
@@ -65,10 +73,30 @@ def load_norms(csv_path: Path) -> dict:
     return norms
 
 
+def resolve_theme(img: dict) -> str | None:
+    """
+    The OASIS Theme is the only key joining an image to its norms. Prefer the
+    explicit images.oasis_theme column, but fall back to the filename when it is
+    NULL: the 900 OASIS rows were loaded keyed by filename ("Acorns 1") with
+    oasis_theme left unset, and the filename IS the theme. Placeholder rows
+    ("image7") resolve to a name that simply isn't in the CSV and are correctly
+    reported as unlabellable — nothing is silently mislabelled.
+    """
+    theme = img.get("oasis_theme")
+    if theme:
+        return theme
+    name = (img.get("filename") or "").strip()
+    for ext in (".jpg", ".jpeg", ".png"):
+        if name.lower().endswith(ext):
+            name = name[: -len(ext)]
+            break
+    return name or None
+
+
 def fetch_images(conn) -> list[dict]:
     rows = conn.execute(text("""
         SELECT image_id, filename, oasis_theme,
-               valence_score, arousal_score, valence_sd, arousal_sd
+               valence_mean, arousal_mean, valence_sd, arousal_sd
         FROM   images
         ORDER  BY filename
     """)).mappings().all()
@@ -94,15 +122,15 @@ def main() -> int:
             print("images table is empty — nothing to do.")
             return 0
 
-        no_theme = [i for i in images if not i["oasis_theme"]]
+        no_theme = [i for i in images if not resolve_theme(i)]
         unknown  = [i for i in images
-                    if i["oasis_theme"] and i["oasis_theme"] not in norms]
+                    if resolve_theme(i) and resolve_theme(i) not in norms]
         matched  = [i for i in images
-                    if i["oasis_theme"] and i["oasis_theme"] in norms]
+                    if resolve_theme(i) and resolve_theme(i) in norms]
 
         print(f"images rows: {len(images)}")
         print(f"  matched to an OASIS theme : {len(matched)}")
-        print(f"  no oasis_theme set        : {len(no_theme)}")
+        print(f"  no theme resolvable       : {len(no_theme)}")
         print(f"  theme not found in CSV    : {len(unknown)}")
 
         if no_theme:
@@ -134,8 +162,8 @@ def main() -> int:
         if args.dry_run:
             print("\n--dry-run: would write these (first 10):")
             for i in matched[:10]:
-                n = norms[i["oasis_theme"]]
-                print(f"  {i['oasis_theme']:<24} "
+                n = norms[resolve_theme(i)]
+                print(f"  {resolve_theme(i):<24} "
                       f"valence {n['valence_mean']:.2f} (sd {n['valence_sd']:.2f})  "
                       f"arousal {n['arousal_mean']:.2f} (sd {n['arousal_sd']:.2f})")
             print(f"\n{len(matched)} rows would be updated. Nothing written.")
@@ -145,12 +173,12 @@ def main() -> int:
         # opened — either every label lands or none does. A half-labelled images
         # table would silently train on a mixture of real and missing labels.
         for i in matched:
-            n = norms[i["oasis_theme"]]
+            n = norms[resolve_theme(i)]
             conn.execute(text("""
                 UPDATE images
-                SET    valence_score = :vm,
+                SET    valence_mean = :vm,
                        valence_sd    = :vsd,
-                       arousal_score = :am,
+                       arousal_mean  = :am,
                        arousal_sd    = :asd
                 WHERE  image_id = :image_id
             """), {

@@ -7,8 +7,9 @@ from fastapi import FastAPI
 
 from app.api.health import router as health_router
 from app.api.infer import router as infer_router
+from app.api.insights import router as insights_router
 from app.api.process import router as process_router
-from app.workers import feature_jobs
+from app.workers import feature_jobs, prediction_jobs
 
 logging.basicConfig(level=logging.INFO)
 log = logging.getLogger(__name__)
@@ -17,23 +18,48 @@ log = logging.getLogger(__name__)
 # FEATURE_JOB_ENABLED=false to run the API without the background worker.
 FEATURE_JOB_ENABLED = os.getenv("FEATURE_JOB_ENABLED", "true").lower() != "false"
 
+# Phase 1 inference worker: runs the current model over completed sessions.
+PREDICTION_JOB_ENABLED = os.getenv("PREDICTION_JOB_ENABLED", "true").lower() != "false"
+
+# Phase 1 training cron: retrains on a cadence (default weekly). The first run
+# fires one interval AFTER startup, so a deploy never triggers a retrain storm.
+PHASE1_TRAIN_ENABLED = os.getenv("PHASE1_TRAIN_ENABLED", "true").lower() != "false"
+PHASE1_TRAIN_INTERVAL_DAYS = int(os.getenv("PHASE1_TRAIN_INTERVAL_DAYS", "7"))
+
+
+def _scheduled_train():
+    """Weekly retrain. Skips quietly when there isn't enough data to fit."""
+    from app.database import engine
+    from app.phase1 import train
+    try:
+        with engine.begin() as conn:
+            summary = train.train_and_save(conn)
+        if summary:
+            log.info("Scheduled retrain produced model v%s.", summary["model_version"])
+        else:
+            log.info("Scheduled retrain: not enough data yet, skipped.")
+    except Exception:
+        log.exception("Scheduled Phase 1 retrain failed.")
+
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """
-    Start the feature worker alongside the API, so a completed session gets its
-    features computed without anyone running anything.
+    Start the background jobs alongside the API, so nobody has to remember to run
+    anything. Three independently-gated jobs share one scheduler:
 
-    This complements the /process endpoint rather than replacing it: /process
-    computes a session on demand, the worker notices sessions nobody asked about.
-    Both end up in the same table, and both are safe to have running at once —
-    the worker's claim is atomic (see feature_jobs).
+      • feature worker   — elliptic band stats for the results chart (existing)
+      • prediction worker — Phase 1 inference: runs the current model over completed
+                            sessions (see workers/prediction_jobs.py)
+      • training cron     — Phase 1 retrain on a cadence (default weekly)
 
     Several workers may be alive at once (uvicorn --workers, or the dev reloader),
-    so more than one scheduler will tick. That is safe for the same reason: exactly
-    one of them wins each session and the rest move on.
+    so more than one scheduler will tick. That is safe: every job claims its work
+    atomically, so exactly one wins and the rest move on.
     """
-    scheduler = None
+    scheduler = AsyncIOScheduler()
+    scheduled = False
+
     if FEATURE_JOB_ENABLED:
         compute_fn = feature_jobs.load_compute_fn()
         if compute_fn is None:
@@ -47,27 +73,43 @@ async def lifespan(app: FastAPI):
             for problem in feature_jobs.preflight():
                 log.error("Feature worker: %s", problem)
 
-            scheduler = AsyncIOScheduler()
             scheduler.add_job(
-                feature_jobs.tick,
-                "interval",
+                feature_jobs.tick, "interval",
                 seconds=feature_jobs.POLL_INTERVAL_S,
                 kwargs={"compute_fn": compute_fn},
-                # A slow session must not stack ticks on top of each other.
-                max_instances=1,
-                coalesce=True,
-                id="feature_jobs",
+                max_instances=1, coalesce=True, id="feature_jobs",
             )
-            scheduler.start()
-            log.info(
-                "Feature worker started: polling every %ss for sessions with "
-                "sync_status='completed' and no features yet.",
-                feature_jobs.POLL_INTERVAL_S,
-            )
+            scheduled = True
+            log.info("Feature worker started: polling every %ss.",
+                     feature_jobs.POLL_INTERVAL_S)
+
+    if PREDICTION_JOB_ENABLED:
+        scheduler.add_job(
+            prediction_jobs.tick, "interval",
+            seconds=prediction_jobs.POLL_INTERVAL_S,
+            max_instances=1, coalesce=True, id="prediction_jobs",
+        )
+        scheduled = True
+        log.info("Prediction worker started: polling every %ss for completed "
+                 "sessions to run inference on (no-op until a model is trained).",
+                 prediction_jobs.POLL_INTERVAL_S)
+
+    if PHASE1_TRAIN_ENABLED:
+        scheduler.add_job(
+            _scheduled_train, "interval",
+            days=PHASE1_TRAIN_INTERVAL_DAYS,
+            max_instances=1, coalesce=True, id="phase1_train",
+        )
+        scheduled = True
+        log.info("Phase 1 training cron scheduled every %d day(s).",
+                 PHASE1_TRAIN_INTERVAL_DAYS)
+
+    if scheduled:
+        scheduler.start()
 
     yield
 
-    if scheduler:
+    if scheduled:
         scheduler.shutdown(wait=False)
 
 
@@ -83,4 +125,5 @@ app = FastAPI(
 
 app.include_router(health_router)
 app.include_router(infer_router)
+app.include_router(insights_router)
 app.include_router(process_router)

@@ -118,6 +118,16 @@ def _per_session_zscore(
     return Xn
 
 
+def per_session_zscore(X: np.ndarray, sessions: np.ndarray) -> np.ndarray:
+    """
+    Normalise every row against its own session's statistics — the transform used
+    when fitting the FINAL model and, identically, at inference (one session
+    normalised against itself). Same maths as the CV path, with the fit mask set to
+    every row, which is leakage-free because the transform never touches the labels.
+    """
+    return _per_session_zscore(X, sessions, np.ones(len(X), dtype=bool))
+
+
 def cross_validate(
     X: np.ndarray,
     y: np.ndarray,

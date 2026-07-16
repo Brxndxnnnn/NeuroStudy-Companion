@@ -51,8 +51,8 @@ def _event(shown_at, hidden_at, valence=4.5, arousal=3.2, v_sd=0.8, a_sd=1.0):
         "event_id": "e1", "image_id": "img-1",
         "shown_at": shown_at, "hidden_at": hidden_at,
         "filename": "Snake 5.jpg", "oasis_theme": "Snake 5",
-        "valence_score": valence, "valence_sd": v_sd,
-        "arousal_score": arousal, "arousal_sd": a_sd,
+        "valence_mean": valence, "valence_sd": v_sd,
+        "arousal_mean": arousal, "arousal_sd": a_sd,
     }
 
 
