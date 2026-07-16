@@ -179,7 +179,7 @@ class TestQueries:
             assert "shown_at"      in first
             assert "hidden_at"     in first
             assert "category"      in first
-            assert "valence_score" in first
+            assert "valence_mean" in first
 
     def test_fetch_nonexistent_session(self, db_conn):
         """Fetching a non-existent session returns None gracefully."""

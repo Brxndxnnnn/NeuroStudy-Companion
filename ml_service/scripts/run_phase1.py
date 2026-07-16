@@ -17,6 +17,16 @@ prove the CV harness works without needing any of it.
 import argparse
 import sys
 
+# The reports print unicode warning glyphs (⚠, ²). Windows' default console
+# encoding is cp1252, which cannot encode them and raises UnicodeEncodeError
+# mid-report. Force UTF-8 on the output streams so the script runs the same on
+# Brandon's Windows box as on the Linux droplet.
+for _stream in (sys.stdout, sys.stderr):
+    try:
+        _stream.reconfigure(encoding="utf-8")
+    except (AttributeError, ValueError):
+        pass
+
 from app.database import engine
 from app.phase1 import evaluate
 from app.phase1.config import DEFAULT

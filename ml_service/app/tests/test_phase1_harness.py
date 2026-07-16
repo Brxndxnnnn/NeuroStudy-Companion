@@ -159,7 +159,7 @@ class TestFeatureVector:
         rng = np.random.default_rng(0)
         fs = 250
         epoch = Epoch(
-            session_id="s", image_id="i", event_id="e", t_start=None,
+            session_id="s", image_id="i", event_id="e", t_start=None, t_end=None,
             signals={ch: rng.normal(scale=20, size=2 * fs)
                      for ch in ("fp1", "fp2", "t3", "t4")},
             valence=4.0, arousal=3.0, valence_sd=0.8, arousal_sd=1.1,
@@ -183,7 +183,7 @@ class TestFeatureVector:
 
         def epoch_with(fp1_gain, fp2_gain):
             return Epoch(
-                session_id="s", image_id="i", event_id="e", t_start=None,
+                session_id="s", image_id="i", event_id="e", t_start=None, t_end=None,
                 signals={
                     "fp1": fp1_gain * alpha * 20 + rng.normal(scale=1, size=n),
                     "fp2": fp2_gain * alpha * 20 + rng.normal(scale=1, size=n),

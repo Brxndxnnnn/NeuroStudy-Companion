@@ -13,7 +13,7 @@ Tables read:
   - events                : stimulus shown_at / hidden_at, linked to EITHER an
                             image OR a question (mutually exclusive per
                             005_functions_and_updates.sql's chk_events_stimulus)
-  - images                : category, valence_score, arousal_score per image
+  - images                : category, valence_mean, arousal_mean (+ _sd) per image
   - questions             : prompt, correct_answer, difficulty per question
 
 All functions accept an open SQLAlchemy connection so the caller controls
@@ -154,7 +154,7 @@ def fetch_labelled_image_events(conn, session_id: str) -> list[dict]:
 
     Returns one dict per event:
       { event_id, image_id, shown_at, hidden_at, filename, oasis_theme,
-        valence_score, valence_sd, arousal_score, arousal_sd }
+        valence_mean, valence_sd, arousal_mean, arousal_sd }
 
     Only events with a resolvable stimulus window (hidden_at IS NOT NULL) are
     returned — an event still open at session end has no bounded EEG window.
@@ -168,9 +168,9 @@ def fetch_labelled_image_events(conn, session_id: str) -> list[dict]:
                e.hidden_at,
                i.filename,
                i.oasis_theme,
-               i.valence_score,
+               i.valence_mean,
                i.valence_sd,
-               i.arousal_score,
+               i.arousal_mean,
                i.arousal_sd
         FROM   events e
         JOIN   images i ON i.image_id = e.image_id
@@ -292,7 +292,7 @@ def fetch_events(conn, session_id: str) -> list[dict]:
 
     Returns one dict per event:
       { event_id, image_id, question_id, shown_at, hidden_at,
-        filename, category, valence_score, arousal_score,
+        filename, category, valence_mean, arousal_mean,
         question_no, prompt, correct_answer, difficulty }
     """
     rows = conn.execute(text("""
@@ -303,8 +303,8 @@ def fetch_events(conn, session_id: str) -> list[dict]:
                e.hidden_at,
                i.filename,
                i.category,
-               i.valence_score,
-               i.arousal_score,
+               i.valence_mean,
+               i.arousal_mean,
                q.question_no,
                q.prompt,
                q.correct_answer,
@@ -326,10 +326,10 @@ def fetch_image(conn, image_id: str) -> dict | None:
     Fetch metadata for a single image.
 
     Returns:
-      { image_id, filename, category, valence_score, arousal_score }
+      { image_id, filename, category, valence_mean, arousal_mean }
     """
     row = conn.execute(text("""
-        SELECT image_id, filename, category, valence_score, arousal_score
+        SELECT image_id, filename, category, valence_mean, arousal_mean
         FROM   images
         WHERE  image_id = :image_id
     """), {"image_id": image_id}).mappings().first()

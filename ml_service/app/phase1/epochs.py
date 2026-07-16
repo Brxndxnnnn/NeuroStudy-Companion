@@ -33,6 +33,7 @@ class Epoch:
     image_id:   str
     event_id:   str
     t_start:    datetime
+    t_end:      datetime
     signals:    dict            # {channel -> 1D np.ndarray of µV}
     valence:    float
     arousal:    float
@@ -91,13 +92,22 @@ def extract_session_epochs(
     conn,
     session_id: str,
     cfg: Phase1Config = DEFAULT,
+    require_label: bool = True,
 ) -> tuple[list[Epoch], ExtractionReport]:
     """
-    Build labelled epochs for one session.
+    Build epochs for one session.
 
-    Returns (epochs, report). An empty list is a normal outcome for a session
-    whose electrodes were dead or whose images carry no OASIS labels — the report
-    says which, rather than leaving you to guess at a silent zero.
+    require_label=True (training): an image event contributes epochs only if its
+    image carries an OASIS label within the SD gate; each epoch is labelled with it.
+
+    require_label=False (inference): epochs are cut from EVERY image event, labelled
+    or not, and carry NaN valence/arousal. Prediction reads EEG, not labels, so a
+    session recorded over unlabelled (even placeholder) images still yields
+    predictions — which is why every completed session can populate the Insights tab.
+
+    Returns (epochs, report). An empty list is a normal outcome for a session whose
+    electrodes were dead (or, in training mode, whose images carry no OASIS labels) —
+    the report says which, rather than leaving you to guess at a silent zero.
     """
     report = ExtractionReport(session_id=session_id)
 
@@ -126,19 +136,27 @@ def extract_session_epochs(
     max_span_s = (n_epoch - 1) / cfg.sample_rate + (0.5 / cfg.sample_rate)
 
     for ev in events:
-        if ev["valence_score"] is None or ev["arousal_score"] is None:
-            report.events_no_label += 1
-            continue
+        if require_label:
+            if ev["valence_mean"] is None or ev["arousal_mean"] is None:
+                report.events_no_label += 1
+                continue
 
-        # Rater disagreement makes a label unlearnable — exclude rather than
-        # train the model to fit noise. SDs may be NULL on legacy rows; treat a
-        # missing SD as acceptable rather than silently dropping every image.
-        v_sd = ev["valence_sd"]
-        a_sd = ev["arousal_sd"]
-        if (v_sd is not None and v_sd > cfg.max_label_sd) or \
-           (a_sd is not None and a_sd > cfg.max_label_sd):
-            report.events_label_too_noisy += 1
-            continue
+            # Rater disagreement makes a label unlearnable — exclude rather than
+            # train the model to fit noise. SDs may be NULL on legacy rows; treat a
+            # missing SD as acceptable rather than silently dropping every image.
+            v_sd = ev["valence_sd"]
+            a_sd = ev["arousal_sd"]
+            if (v_sd is not None and v_sd > cfg.max_label_sd) or \
+               (a_sd is not None and a_sd > cfg.max_label_sd):
+                report.events_label_too_noisy += 1
+                continue
+            valence = float(ev["valence_mean"])
+            arousal = float(ev["arousal_mean"])
+            valence_sd = float(v_sd) if v_sd is not None else float("nan")
+            arousal_sd = float(a_sd) if a_sd is not None else float("nan")
+        else:
+            # Inference: no label needed. The features still come from the EEG.
+            valence = arousal = valence_sd = arousal_sd = float("nan")
 
         # Samples strictly inside this image's on-screen window. Epochs are cut
         # only from here, so no epoch can straddle two images.
@@ -177,11 +195,12 @@ def extract_session_epochs(
                 image_id=str(ev["image_id"]),
                 event_id=str(ev["event_id"]),
                 t_start=win_t[0],
+                t_end=win_t[-1],
                 signals={ch: win_v[:, ci].copy() for ci, ch in enumerate(CHANNELS)},
-                valence=float(ev["valence_score"]),
-                arousal=float(ev["arousal_score"]),
-                valence_sd=float(v_sd) if v_sd is not None else float("nan"),
-                arousal_sd=float(a_sd) if a_sd is not None else float("nan"),
+                valence=valence,
+                arousal=arousal,
+                valence_sd=valence_sd,
+                arousal_sd=arousal_sd,
                 oasis_theme=ev.get("oasis_theme"),
             ))
 

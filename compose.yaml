@@ -51,9 +51,15 @@ services:
           condition: service_healthy
       expose:
         - "8000"   # ← only nginx faces the outside
+      volumes:
+        # Trained Phase 1 model artifacts (MODEL_DIR=/app/saved_models). A named
+        # volume so a `docker compose up` that recreates the container does not wipe
+        # the current model — otherwise ml_models rows would point at files that no
+        # longer exist and inference would fail to load them.
+        - ml-models:/app/saved_models
       networks:
         - neurostudy
-  
+
   frontend:
       build:
         context: ./frontend
@@ -86,6 +92,7 @@ services:
       
 volumes:
   postgres-data:
+  ml-models:
 networks:
   neurostudy:
    driver: bridge
