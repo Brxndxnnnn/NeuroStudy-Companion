@@ -16,8 +16,13 @@ RUN pip install --no-cache-dir -r requirements.txt
 # Copy application files
 COPY . .
 
-# Create a non-root user and set ownership of the application directory
+# Create a non-root user and set ownership of the application directory.
+# saved_models is created here (before the chown and before it becomes a mount
+# point) so that when the ml-models named volume first mounts over it, the volume
+# inherits appuser ownership. Without this the fresh volume is root-owned and the
+# appuser process cannot write trained model artifacts into it.
 RUN useradd --create-home --uid 1001 appuser && \
+    mkdir -p /app/saved_models && \
     chown -R appuser:appuser /app
 
 USER appuser
