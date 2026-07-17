@@ -35,9 +35,15 @@ def _scheduled_train():
         with engine.begin() as conn:
             summary = train.train_and_save(conn)
         if summary:
-            log.info("Scheduled retrain produced model v%s.", summary["model_version"])
+            log.info(
+                "Scheduled retrain produced model v%s (%s).",
+                summary["model_version"],
+                "now current" if summary["is_current"] else "kept as candidate",
+            )
         else:
-            log.info("Scheduled retrain: not enough data yet, skipped.")
+            # train_and_save has already logged the specific reason (not enough data,
+            # or no new data since the current model).
+            log.info("Scheduled retrain: skipped, see reason above.")
     except Exception:
         log.exception("Scheduled Phase 1 retrain failed.")
 

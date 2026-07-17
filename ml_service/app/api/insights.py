@@ -133,7 +133,10 @@ def train_endpoint():
     """
     try:
         with engine.begin() as conn:
-            summary = train.train_and_save(conn)
+            # force=True: an operator asked explicitly, so retrain even if no new
+            # data has arrived. The promotion gate still applies — a worse model is
+            # registered but not made current.
+            summary = train.train_and_save(conn, force=True)
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -141,4 +144,13 @@ def train_endpoint():
         return {"trained": False,
                 "message": "Not enough data to fit a model yet "
                            "(need at least 2 distinct labelled images)."}
-    return {"trained": True, "model": summary}
+    promoted = summary["is_current"]
+    return {
+        "trained": True,
+        "promoted": promoted,
+        "message": ("Trained and promoted to the current model."
+                    if promoted else
+                    "Trained and registered, but kept as a candidate — it did not "
+                    "beat the model currently in service, which was retained."),
+        "model": summary,
+    }

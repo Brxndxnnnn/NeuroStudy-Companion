@@ -14,13 +14,27 @@ trajectory, one prediction per 2 s epoch.
 
 from __future__ import annotations
 
+import logging
+import os
+
 import joblib
 import numpy as np
 
 from app.phase1 import evaluate
-from app.phase1.config import DEFAULT, Phase1Config
+from app.phase1.config import DEFAULT, OASIS_SCALE_MAX, OASIS_SCALE_MIN, Phase1Config
 from app.phase1.epochs import extract_session_epochs
 from app.phase1.features import build_features
+
+log = logging.getLogger(__name__)
+
+# Per-session z-scoring normalises a session's features against that session's own
+# mean/std. Estimated from only one or two epochs, those statistics are noise: a
+# single-epoch session collapses to all-zero features (mean == the row), and the
+# model then emits one constant value for the whole session. Rather than write a
+# flat, meaningless "trajectory" that reads on the tab as a real result, decline to
+# predict below this many labelled epochs. At the real 10 s image duration one image
+# already yields ~17 epochs, so this only ever trims pathologically short sessions.
+MIN_SESSION_EPOCHS = int(os.getenv("PHASE1_MIN_SESSION_EPOCHS", "4"))
 
 
 def load_bundle(artifact_path: str) -> dict:
@@ -47,6 +61,17 @@ def predict_session(
     if not epochs:
         return []
 
+    if len(epochs) < MIN_SESSION_EPOCHS:
+        # Too few epochs to normalise against reliably; predicting here would emit a
+        # constant that looks like a real result. Recorded as a successful run with
+        # zero predictions (same outcome the worker gives a no-OASIS-images session).
+        log.info(
+            "Session %s has only %d labelled epoch(s) (< %d); skipping inference to "
+            "avoid an unreliable flat prediction.",
+            session_id, len(epochs), MIN_SESSION_EPOCHS,
+        )
+        return []
+
     X = np.vstack([build_features(e, cfg) for e in epochs])
     sessions_arr = np.array([e.session_id for e in epochs], dtype=object)
     # One session, normalised against itself — identical to the transform each
@@ -55,6 +80,9 @@ def predict_session(
 
     preds = bundle["model"].predict(Xn)
     preds = np.atleast_2d(preds)
+    # Clamp to the OASIS 1–7 scale: the model can extrapolate past it, and an
+    # out-of-range value is meaningless charted against the OASIS ground truth.
+    preds = np.clip(preds, OASIS_SCALE_MIN, OASIS_SCALE_MAX)
 
     return [
         {

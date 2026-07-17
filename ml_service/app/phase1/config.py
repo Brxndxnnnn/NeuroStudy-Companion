@@ -82,3 +82,11 @@ class Phase1Config:
 
 
 DEFAULT = Phase1Config()
+
+
+# OASIS rates valence and arousal on a 1–7 scale. A linear model can extrapolate
+# past those bounds — especially when a session's per-session z-score is fitted on
+# only a handful of epochs — so predictions are clamped to this range at inference.
+# A value outside 1–7 is meaningless next to the OASIS norms it is charted against.
+OASIS_SCALE_MIN: float = 1.0
+OASIS_SCALE_MAX: float = 7.0
