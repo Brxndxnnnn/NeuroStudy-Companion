@@ -27,3 +27,7 @@ venv/
 
 # Node.js
 node_modules/
+
+# Certbot
+certbot/conf/
+certbot/www/
