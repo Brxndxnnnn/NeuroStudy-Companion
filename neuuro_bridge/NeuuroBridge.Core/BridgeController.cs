@@ -262,6 +262,15 @@ namespace NeuuroBridge
             };
             _svc.OnDisconnected += addr =>
             {
+                // A disconnect callback can land LATE — after the technician has already reconnected
+                // (the SDK resolving the OLD link's teardown after the NEW link is up). Acting on it
+                // then would tear down the fresh session and leave the bridge recording nothing until a
+                // restart. If the link is currently up, this callback is stale: drop it.
+                if (_svc.IsConnected)
+                {
+                    Log?.Invoke("[reconnect] ignoring a stale disconnect for " + addr + " — link is up");
+                    return;
+                }
                 // Terminal disconnect: technician-initiated, or the reconnect budget was exhausted. If a
                 // recording was active, flush + mark the session 'completed' so it closes cleanly rather
                 // than dangling on 'recording' (StopSession is a no-op when nothing was recording). A later
@@ -381,11 +390,25 @@ namespace NeuuroBridge
             // fail until a retry warmed the pool. Run it off-thread; uploads stay gated behind Start.
             Task.Run(() =>
             {
-                try
+                // The DB can be transiently unreachable (cold TLS, brief network blip, a reconnect
+                // racing the previous connection's teardown). Retry a few times with backoff before
+                // giving up, so a momentary hiccup doesn't leave the session with no upload at all.
+                const int attempts = 3;
+                for (int i = 1; i <= attempts; i++)
                 {
-                    if (StartDbUpload()) { StartSyncPoll(); StartProgressPoll(); }   // connect + anchor + INSERT unclaimed row + flush timer
+                    try
+                    {
+                        if (StartDbUpload()) { StartSyncPoll(); StartProgressPoll(); return; }
+                        Log?.Invoke($"[db] prepare attempt {i}/{attempts} failed (DB unreachable) — retrying…");
+                    }
+                    catch (Exception ex) { Log?.Invoke($"[db] prepare attempt {i}/{attempts} error: {ex.Message}"); }
+                    if (i < attempts) Thread.Sleep(1000 * i);
                 }
-                catch (Exception ex) { Log?.Invoke("[db] prepare failed: " + ex.Message); }
+                // Total failure: no session row / no upload. Live preview keeps running. Clear _prepared
+                // so a later reconnect re-attempts a clean prepare rather than short-circuiting.
+                _prepared = false;
+                Log?.Invoke("[db] prepare FAILED after " + attempts + " attempts — recording is NOT live " +
+                            "(no DB upload). Live preview continues; reconnect or check the DB/network.");
             });
         }
 
@@ -613,10 +636,23 @@ namespace NeuuroBridge
         private bool StartDbUpload()
         {
             _dbConnString = EnvConfig.BuildConnectionString();
-            _db = new DbUploader(_dbConnString, m => Log?.Invoke("[db] " + m));
-            if (!_db.Connect()) return false;
+            // Build into a LOCAL and only publish to _db once it is fully connected AND the session row
+            // exists. The old code assigned _db before Connect(), so a failed/retried prepare left _db
+            // pointing at a dead, non-streaming uploader; a failed attempt now disposes cleanly instead.
+            var db = new DbUploader(_dbConnString, m => Log?.Invoke("[db] " + m));
+            if (!db.Connect())
+            {
+                try { db.Dispose(); } catch { /* ignore */ }
+                return false;
+            }
             int sampleRate = EegProcessor.SampleRate == 125 ? 125 : 250;
-            return _db.CreateSession(Guid.Parse(SessionId), _connAddress, PairingCode, sampleRate, SessionStartUtc);
+            if (!db.CreateSession(Guid.Parse(SessionId), _connAddress, PairingCode, sampleRate, SessionStartUtc))
+            {
+                try { db.Dispose(); } catch { /* ignore */ }
+                return false;
+            }
+            _db = db;
+            return true;
         }
 
         // ── SDK raw frame handling (mirrors the console path) ────────────────
@@ -648,13 +684,16 @@ namespace NeuuroBridge
 
         private void UploadEegSnapshot()
         {
+            var db = _db;   // _db may be disposed/replaced on another thread mid-call
+            if (db == null || !db.Streaming) return;
+
             int[] raw; float[] filt;
             lock (_stateLock) { raw = _lastRawInt; filt = _lastFiltered; }
             if (raw == null && filt == null) return;
 
             var row = new EegReadingRow
             {
-                Time = _db.DbNow,
+                Time = db.DbNow,
                 RawLast = raw != null ? new float[ChannelCount] : null,
                 RawPkpk = raw != null ? new float[ChannelCount] : null,
                 FiltLast = filt != null ? new float[ChannelCount] : null,
@@ -665,7 +704,7 @@ namespace NeuuroBridge
                 if (raw != null) { var s = IntLastPkpk(raw, ch); row.RawLast[ch] = s.last; row.RawPkpk[ch] = s.pkpk; }
                 if (filt != null) { var s = FloatLastPkpk(filt, ch); row.FiltLast[ch] = s.last; row.FiltPkpk[ch] = s.pkpk; }
             }
-            _db.EnqueueEeg(row);
+            db.EnqueueEeg(row);
         }
 
         // Streams the SDK's full-resolution filtered (µV) frames to eeg_filtered_samples, mirroring the
@@ -682,7 +721,8 @@ namespace NeuuroBridge
 
         private void UploadBandPowers(BandPowers[] powers)
         {
-            if (!(SessionActive || _draining) || _db == null || !_db.Streaming) return;
+            var db = _db;   // capture once — _db may be disposed/replaced on another thread mid-call
+            if (!(SessionActive || _draining) || db == null || !db.Streaming) return;
             float att, rel, mwl; bool? ready; bool[] channels; bool[] live; int? hr, spo2;
             lock (_stateLock)
             {
@@ -690,9 +730,9 @@ namespace NeuuroBridge
                 ready = _signalReady; channels = _channels; live = _channelLive;
                 hr = _heartRate; spo2 = _spo2;
             }
-            _db.EnqueueBand(new BandPowerRow
+            db.EnqueueBand(new BandPowerRow
             {
-                Time = _db.DbNow,
+                Time = db.DbNow,
                 Attention = att,
                 Relaxation = rel,
                 MentalWorkload = mwl,
