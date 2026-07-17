@@ -162,12 +162,27 @@ fit a FINAL model on all the data (not a fold)  [train.py, NEW]
 save artifact  →  MODEL_DIR/phase1_v{n}.joblib   (persistent volume)
 insert ml_models row (version, path, metrics, trained-on counts)
   │
-  ├─ promotion gate (optional, recommended): only set is_current=true if the new
-  │  model beats the current one + the null baseline. Under "accuracy doesn't
-  │  matter" we can promote unconditionally for now, but the hook belongs here.
+  ├─ promotion gate [IMPLEMENTED, train.py _should_promote]: a retrain only becomes
+  │  is_current if it does not regress the model in service —
+  │    • no current model → promote (inference must have something to serve);
+  │    • neither new nor incumbent can be CV-scored (tiny-data regime) → promote the
+  │      newer (no honest score to protect; keeps the flow visibly working now);
+  │    • new unscored but incumbent scored → keep incumbent;
+  │    • new scored → must beat the null on BOTH targets AND not score below a
+  │      scored incumbent, else keep incumbent.
+  │  A model that isn't promoted is still registered in ml_models as a candidate.
   ▼
 flip is_current → next inference runs use the new model
 ```
+
+**No-new-data guard [IMPLEMENTED]:** the weekly cron skips entirely if no new
+epochs/sessions have arrived since the current model, so a quiet week doesn't mint a
+redundant version. A manual `POST /phase1/train` passes `force=True` to bypass this
+(operator asked explicitly) — but the promotion gate above still applies.
+
+**Artifact pruning [IMPLEMENTED]:** each train writes a new `.joblib`; the trainer
+prunes superseded files, keeping the newest few (`PHASE1_KEEP_ARTIFACTS`, default 5)
+plus whichever is current. The `ml_models` rows (and their metrics) are kept.
 
 **Insight freezing:** predictions are stamped with the `model_version` that
 produced them. A newly promoted model applies to **new sessions going forward**;
@@ -301,7 +316,10 @@ flow is what's proven; accuracy follows once sessions are recorded over OASIS im
 | Training trigger | weekly cron + admin manual | manual only |
 | Model pointer | `ml_models` DB table (`is_current`) | metadata file beside the artifact |
 | Insight recompute on new model | freeze (new model → new sessions only) | recompute all on promotion |
-| Promotion gate | promote unconditionally for now | gate on beating current + null |
+| Promotion gate | **gate on beating current + null (IMPLEMENTED)** | promote unconditionally |
+| Retrain on no new data | **skip (cron); force bypasses (IMPLEMENTED)** | always retrain |
+| Short-session inference | **skip below `PHASE1_MIN_SESSION_EPOCHS`=4 (IMPLEMENTED)** | predict anyway |
+| Out-of-range predictions | **clamp to OASIS 1–7 (IMPLEMENTED)** | leave raw |
 
 See also: [feature-jobs-and-image-sets.md](feature-jobs-and-image-sets.md),
 [session-data-flow.md](session-data-flow.md).

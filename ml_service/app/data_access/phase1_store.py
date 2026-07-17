@@ -66,6 +66,19 @@ def model_history(conn, limit: int = 20) -> list[dict]:
     return [dict(r) for r in rows]
 
 
+def model_artifacts(conn) -> list[dict]:
+    """
+    Every model's version, artifact path, and current flag, newest first — for the
+    trainer's artifact-pruning housekeeping (see phase1/train.py).
+    """
+    rows = conn.execute(text("""
+        SELECT model_version, artifact_path, is_current
+        FROM   ml_models
+        ORDER  BY model_version DESC
+    """)).mappings().all()
+    return [dict(r) for r in rows]
+
+
 # ── Predictions ───────────────────────────────────────────────────────────────
 
 def replace_session_predictions(conn, session_id: str, model_version: int,

@@ -41,11 +41,16 @@ def main() -> int:
         return 0
 
     if args.train:
+        # force=True: a manual run always retrains (bypasses the cron's no-new-data
+        # guard). The promotion gate still decides whether it becomes current.
         with engine.begin() as conn:
-            summary = train.train_and_save(conn)
+            summary = train.train_and_save(conn, force=True)
         if summary:
+            promoted = "promoted to current" if summary["is_current"] else \
+                       "kept as candidate (current model retained)"
             print(f"Trained model v{summary['model_version']} ({summary['algo']}) on "
-                  f"{summary['n_epochs']} epochs / {summary['n_distinct_images']} images.")
+                  f"{summary['n_epochs']} epochs / {summary['n_distinct_images']} images "
+                  f"— {promoted}.")
             print(f"  CV R²  valence {summary['cv']['r2']['valence']}  "
                   f"arousal {summary['cv']['r2']['arousal']}")
         else:
