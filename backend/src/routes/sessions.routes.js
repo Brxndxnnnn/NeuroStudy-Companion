@@ -384,4 +384,34 @@ router.get(
     sessionController.getSessionEllipticBandStats
 )
 
+/**
+ * @openapi
+ * /api/sessions/{session_id}/results/fft_bandpower:
+ *  get:
+ *    summary: Retrieve our FFT-computed band powers for a specific session
+ *    description: |
+ *      Band powers computed by the ML service via FFT on the filtered EEG — the
+ *      replacement source for the "Frequency bands" chart (rather than the SenseBand
+ *      SDK's band_powers). Already downsampled, so the whole session is returned.
+ *
+ *      **Note**: The `session_id` must be a valid UUID.
+ *    tags: [Sessions]
+ *    security:
+ *      - bearerAuth: []
+ *    parameters:
+ *      - in: path
+ *        name: session_id
+ *        required: true
+ *    responses:
+ *      200:
+ *        description: FFT band powers retrieved successfully
+ *      404:
+ *        description: Could not find session with the provided session_id
+ */
+router.get(
+    '/:session_id/results/fft_bandpower',
+    requirePermission(PERMS.SESSIONS_READ_OWN_CLINIC),
+    sessionController.getSessionFftBandPowerResults
+)
+
 export default router

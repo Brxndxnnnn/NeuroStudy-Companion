@@ -75,7 +75,7 @@ log = logging.getLogger(__name__)
 #   * Raise on failure. The exception message is stored in sessions.features_error
 #     and shown to whoever opens the results page, so make it worth reading.
 COMPUTE_FN_PATH = os.getenv(
-    "FEATURE_COMPUTE_FN", "app.features.elliptic:compute_session_features"
+    "FEATURE_COMPUTE_FN", "app.features.session_features:compute_session_features"
 )
 
 POLL_INTERVAL_S = int(os.getenv("FEATURE_JOB_INTERVAL_S", "10"))

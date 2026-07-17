@@ -5,6 +5,7 @@ import {
   getSession,
   getSessionResultsFiltered,
   getSessionResultsBandPower,
+  getSessionResultsFftBandPower,
   getSessionResultEvents,
   getSessionEllipticBandStats,
 } from "@/utils/api";
@@ -247,7 +248,8 @@ function buildEventWindows(rows, startTime, durSec) {
 export default function SessionResults() {
   const router = useRouter();
   const [samples, setSamples] = useState([]);
-  const [bandRows, setBandRows] = useState([]);
+  const [bandRows, setBandRows] = useState([]);   // SDK band_powers — now only mental state + vitals
+  const [fftBandRows, setFftBandRows] = useState([]); // our FFT band powers — the Frequency bands chart
   const [bandError, setBandError] = useState("");
   const [ellipticRows, setEllipticRows] = useState([]);
   const [ellipticMeta, setEllipticMeta] = useState(null);
@@ -348,11 +350,12 @@ export default function SessionResults() {
         // 2. Filtered EEG (full-resolution; the chart decimates), the 1 Hz
         //    band-power stream, and the per-event summary, in parallel. Band or
         //    event failures degrade their own features — the EEG still renders.
-        const [fRes, bRes, eRes, elRes] = await Promise.all([
+        const [fRes, bRes, eRes, elRes, fftRes] = await Promise.all([
           getSessionResultsFiltered(sessionId, 0, Math.ceil(durSec) + 1),
           getSessionResultsBandPower(sessionId).catch(() => null),
           getSessionResultEvents(sessionId).catch(() => null),
           getSessionEllipticBandStats(sessionId).catch(() => null),
+          getSessionResultsFftBandPower(sessionId).catch(() => null),
         ]);
 
         if (!fRes.ok) throw new Error("filtered");
@@ -379,19 +382,33 @@ export default function SessionResults() {
         }
         if (eventRows) setEvents(buildEventWindows(eventRows, session.start_time, durSec));
 
-        if (!bRes || !bRes.ok) {
-          setBandError("Failed to load band powers, mental state and vitals.");
-        } else {
+        // SDK band_powers now feeds ONLY mental state + vitals — its band columns are
+        // superseded by our own FFT band powers (fftRes below). If it fails, those two
+        // secondary cards simply don't render; the frequency-band chart is unaffected.
+        if (bRes && bRes.ok) {
           const bData = await bRes.json();
           const bRows = bData.samples || [];
-          if (bRows.length === 0) {
-            setBandError("No band-power rows were recorded for this session.");
-          } else {
+          if (bRows.length) {
             const span = { from: bRows[0].t_seconds, to: bRows[bRows.length - 1].t_seconds };
             setBandRows(bRows);
-            setBandRange(span);
             setMentalRange(span);
             setVitalsRange(span);
+          }
+        }
+
+        // Frequency bands: our OWN FFT-computed powers, not the SDK's. Computed by
+        // ml_service after the session completes, so like the elliptic stats they may
+        // legitimately not be there yet on a freshly-finished session.
+        if (!fftRes || !fftRes.ok) {
+          setBandError("Failed to load frequency-band powers.");
+        } else {
+          const fftData = await fftRes.json();
+          const fftRows = fftData.samples || [];
+          if (fftRows.length === 0) {
+            setBandError("Frequency-band powers have not been computed for this session yet.");
+          } else {
+            setFftBandRows(fftRows);
+            setBandRange({ from: fftRows[0].t_seconds, to: fftRows[fftRows.length - 1].t_seconds });
           }
         }
 
@@ -544,25 +561,25 @@ export default function SessionResults() {
   }, [channel]);
 
   const bandStats = useMemo(() => {
-    if (!bandRows.length || bandMulti) return [];
+    if (!fftBandRows.length || bandMulti) return [];
     return BANDS.map((b) => ({
       ...b,
-      ...seriesStats(bandRows, `${channel}_${b.key}`, bandRange.from, bandRange.to),
+      ...seriesStats(fftBandRows, `${channel}_${b.key}`, bandRange.from, bandRange.to),
     }));
-  }, [bandRows, channel, bandRange, bandMulti]);
+  }, [fftBandRows, channel, bandRange, bandMulti]);
 
   // In a multi-channel view the per-band rail would have to be repeated four
   // times; a channel x band grid says the same thing once, and answers the
   // question the multi-channel views are asked for — which channel carries this.
   const bandGrid = useMemo(() => {
-    if (!bandRows.length || !bandMulti) return [];
+    if (!fftBandRows.length || !bandMulti) return [];
     return CHANNELS.map((ch) => ({
       ...ch,
       values: BANDS.map(
-        (b) => seriesStats(bandRows, `${ch.prefix}_${b.key}`, bandRange.from, bandRange.to).mean
+        (b) => seriesStats(fftBandRows, `${ch.prefix}_${b.key}`, bandRange.from, bandRange.to).mean
       ),
     }));
-  }, [bandRows, bandRange, bandMulti]);
+  }, [fftBandRows, bandRange, bandMulti]);
 
   // ── Elliptic band statistics (ml_service) ─────────────────────────────────
   // `ellipticChannel` is either a channel prefix or "all".
@@ -797,7 +814,12 @@ export default function SessionResults() {
   );
 
   const windowLen = Math.max(0, range.to - range.from);
-  const hasBands = bandRows.length > 0;
+  // The frequency-bands card is driven by our FFT powers; the surrounding results
+  // section shows whenever ANY of its cards has data (FFT bands, elliptic stats, or the
+  // SDK-derived mental-state / vitals), so repointing the bands to FFT never hides the
+  // others — e.g. an older session backfilled before FFT bands existed.
+  const hasFft = fftBandRows.length > 0;
+  const hasBands = hasFft || bandRows.length > 0 || ellipticRows.length > 0;
 
   return (
     <main className="min-h-screen bg-ground flex flex-col">
@@ -930,11 +952,12 @@ export default function SessionResults() {
 
             {hasBands && (
               <>
-                {/* ── Frequency bands ──────────────────────────────────────── */}
+                {/* ── Frequency bands (our FFT of the filtered EEG, not the SDK) ── */}
+                {hasFft ? (
                 <Card className="overflow-hidden">
                   <CardHeader
                     title="Frequency bands"
-                    subtitle="Band power at 1 Hz. Stacked gives a panel per channel; pick a channel for a single timeline."
+                    subtitle="Band power (µV²) computed by FFT on the filtered EEG. Stacked gives a panel per channel; pick a channel for a single timeline."
                     actions={
                       <div className="flex flex-wrap items-center gap-2">
                         <div
@@ -965,7 +988,7 @@ export default function SessionResults() {
                   />
                   <div className="p-3 sm:p-4">
                     <TimeSeriesChart
-                      samples={bandRows}
+                      samples={fftBandRows}
                       panels={bandPanels}
                       events={chartEvents("bands")}
                       onEventClick={setSelectedEvent}
@@ -1049,6 +1072,11 @@ export default function SessionResults() {
                   </div>
 
                 </Card>
+                ) : bandError ? (
+                  <Card className="p-6 flex items-center justify-center">
+                    <Alert tone="warn">{bandError}</Alert>
+                  </Card>
+                ) : null}
 
                 {/* ── Elliptic band statistics (ml_service) ─────────────────
                     Replaces the old spectral profile, which was derived from the
