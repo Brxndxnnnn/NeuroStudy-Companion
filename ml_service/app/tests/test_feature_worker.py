@@ -11,7 +11,7 @@ who deletes, who commits, and what survives a crash.
 import pytest
 from sqlalchemy import text
 
-from app.features import elliptic
+from app.features import elliptic, fft_bandpower, session_features
 from app.workers import feature_jobs
 
 
@@ -151,16 +151,84 @@ class TestEllipticAdapter:
             elliptic.compute_session_features(FakeConn(), "abc")
 
 
+class TestFftAdapter:
+
+    def test_deletes_before_writing_and_returns_row_count(self, monkeypatch):
+        """
+        Same idempotency guarantee as the elliptic adapter: DELETE the session's rows
+        first (so a shorter recompute leaves no orphans), then run the pipeline.
+        """
+        order = []
+        conn = FakeConn(results={"DELETE FROM fft_band_powers": FakeResult(rowcount=500)})
+
+        def fake_pipeline(c, sid, window_size_s, step_s):
+            order.append("pipeline")
+            return {"n_rows": 640, "window_size_s": window_size_s, "step_s": step_s}
+
+        monkeypatch.setattr(fft_bandpower, "run_fft_band_power_pipeline", fake_pipeline)
+
+        n = fft_bandpower.compute_session_fft_band_powers(conn, "abc")
+
+        assert conn.statements[0][0].startswith("DELETE FROM fft_band_powers")
+        assert "window_size_s" not in conn.statements[0][0], "DELETE must clear all rows"
+        assert order == ["pipeline"]
+        assert n == 640
+
+    def test_uses_a_2s_window_that_resolves_delta(self, monkeypatch):
+        """2s / 0.5s is the default: 2s holds a full 0.5 Hz delta cycle, unlike 1s."""
+        captured = {}
+
+        def fake_pipeline(c, sid, window_size_s, step_s):
+            captured.update(window_size_s=window_size_s, step_s=step_s)
+            return {"n_rows": 1, "window_size_s": window_size_s, "step_s": step_s}
+
+        monkeypatch.setattr(fft_bandpower, "run_fft_band_power_pipeline", fake_pipeline)
+        fft_bandpower.compute_session_fft_band_powers(FakeConn(), "abc")
+
+        assert captured["window_size_s"] == 2.0
+        assert captured["step_s"] == 0.5
+
+
+class TestSessionFeaturesOrchestrator:
+
+    def test_runs_both_stages_and_sums_rows(self, monkeypatch):
+        """The worker's entrypoint computes elliptic AND FFT, returning the total."""
+        monkeypatch.setattr(session_features, "_compute_elliptic",
+                            lambda c, sid: 4168)
+        monkeypatch.setattr(session_features, "compute_session_fft_band_powers",
+                            lambda c, sid: 640)
+
+        assert session_features.compute_session_features(FakeConn(), "abc") == 4808
+
+    def test_elliptic_failure_short_circuits_fft(self, monkeypatch):
+        """
+        Elliptic runs first and raises when a session has no filtered EEG. The FFT stage
+        must not run — neither feature set is computable without EEG, and the worker
+        fails the whole session.
+        """
+        def boom(c, sid):
+            raise ValueError("No eeg_filtered_samples found for session abc.")
+
+        fft_ran = []
+        monkeypatch.setattr(session_features, "_compute_elliptic", boom)
+        monkeypatch.setattr(session_features, "compute_session_fft_band_powers",
+                            lambda c, sid: fft_ran.append(True))
+
+        with pytest.raises(ValueError, match="No eeg_filtered_samples"):
+            session_features.compute_session_features(FakeConn(), "abc")
+        assert fft_ran == [], "FFT stage must not run after elliptic fails"
+
+
 class TestWorkerWiring:
 
     def test_worker_resolves_the_adapter(self):
         """
-        The default FEATURE_COMPUTE_FN must now import. Before this branch it did not
-        exist, and the worker refused to schedule itself.
+        The default FEATURE_COMPUTE_FN must import. It points at the orchestrator that
+        runs elliptic + FFT band powers together for a completed session.
         """
-        assert feature_jobs.COMPUTE_FN_PATH == "app.features.elliptic:compute_session_features"
+        assert feature_jobs.COMPUTE_FN_PATH == "app.features.session_features:compute_session_features"
         fn = feature_jobs.load_compute_fn()
-        assert fn is elliptic.compute_session_features
+        assert fn is session_features.compute_session_features
 
     def test_claim_is_conditional(self):
         """

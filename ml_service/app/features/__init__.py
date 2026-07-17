@@ -4,19 +4,19 @@ Feature computations run by the background worker (app/workers/feature_jobs.py).
 The worker imports its computation from the dotted path in FEATURE_COMPUTE_FN,
 which defaults to:
 
-    app.features.elliptic:compute_session_features
+    app.features.session_features:compute_session_features
 
-THAT MODULE DOES NOT EXIST YET — it is Zhengda's elliptic band-statistics code,
-which currently lives outside the repo. Until it does, the worker logs a warning at
-startup and does not schedule itself. It deliberately does NOT run with a stub: a
-stub would claim every completed session and mark it 'failed', which is worse than
-not running.
+That orchestrator runs BOTH feature sets for a completed session, inside the one
+transaction the worker owns:
 
-To wire it up, create app/features/elliptic.py with:
+    elliptic.compute_session_features        -> elliptic_band_stats  (µV amplitude stats)
+    fft_bandpower.compute_session_fft_band_powers -> fft_band_powers  (µV² FFT power)
 
-    def compute_session_features(conn, session_id: str) -> int:
-        ...
-        return rows_written
+The FFT band powers are our own replacement for the SenseBand SDK's band numbers
+(band_powers); the results page's "Frequency bands" chart reads them instead.
+
+Each stage is a self-contained adapter with the same contract below. Adding a third
+feature set = another adapter + one line in session_features.py.
 
 CONTRACT
 --------

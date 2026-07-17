@@ -265,6 +265,20 @@ export async function getSessionResultsBandPower(sessionId, startSeconds, endSec
   return res;
 }
 
+// Our OWN FFT-computed band powers — the source of the "Frequency bands" chart,
+// replacing the SenseBand SDK's band_powers (the SDK band numbers are the ones the
+// prof told us not to trust). The ml_service computes these from the filtered EEG
+// after a session completes. Same WIDE shape as getSessionResultsBandPower
+// (t_seconds + fp1_delta … t4_gamma), so the chart transform is unchanged — but
+// WITHOUT the SDK's mental-state / vitals columns, which still come from bandpower.
+// Returns { sample_length, samples: [...] }. Already downsampled: no start/end needed.
+export async function getSessionResultsFftBandPower(sessionId) {
+  const res = await fetchWithAuth(
+    `${BASE_URL}/sessions/${sessionId}/results/fft_bandpower`
+  );
+  return res;
+}
+
 
 
 

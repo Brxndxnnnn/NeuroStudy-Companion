@@ -186,4 +186,16 @@ const getSessionEllipticBandStats = catchAsync(async (req, res) => {
     return res.json(results)
 })
 
-export default { listSessions, getSessionById, pairSessions, startSession, endSession, getSessionResult, getSessionEEGResults, getSessionBandPowerResults, getSessionEllipticBandStats }
+// ── GET /api/sessions/:session_id/results/fft_bandpower ────────────────────────────────────────────
+// Our FFT-computed band powers (fft_band_powers) — the source of the "Frequency bands"
+// chart, replacing the SDK's band_powers. Already downsampled, so the whole session is
+// returned without start/end bounds.
+const getSessionFftBandPowerResults = catchAsync(async (req, res) => {
+    const { session_id } = req.params
+    if (!session_id)
+        throw new BadRequestError('Missing required field: session_id is required')
+    const results = await sessionModel.getSessionFftBandPowerResults(session_id, req.dbClient)
+    return res.json(results)
+})
+
+export default { listSessions, getSessionById, pairSessions, startSession, endSession, getSessionResult, getSessionEEGResults, getSessionBandPowerResults, getSessionEllipticBandStats, getSessionFftBandPowerResults }

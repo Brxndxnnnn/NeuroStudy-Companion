@@ -284,4 +284,30 @@ const getEllipticBandStats = async (session_id, client = pool) => {
     return rows;
 };
 
-export default { findAll, findById, pairSessions, startSession, endSession, getSessionResult, backfillSessionResults, getSessionEEGResults, getSessionBandPowerResults, getEllipticBandStats }
+// Our OWN FFT-computed band powers (fft_band_powers), the replacement for the SDK's
+// band_powers as the source of the "Frequency bands" chart. Same WIDE shape as
+// getSessionBandPowerResults (t_seconds + fp1_delta … t4_gamma), minus the SDK-only
+// mental-state / vitals columns, so the frontend transform is unchanged. Already
+// downsampled (~2 Hz), so the whole session is returned without bounds.
+const getSessionFftBandPowerResults = async (session_id, client = pool) => {
+    const samplesResult = await query(client,
+        `SELECT f.session_id, f."time",
+            EXTRACT(EPOCH FROM (f."time" - s.start_time))::double precision AS t_seconds,
+            f.fp1_delta, f.fp1_theta, f.fp1_alpha, f.fp1_beta, f.fp1_gamma,
+            f.fp2_delta, f.fp2_theta, f.fp2_alpha, f.fp2_beta, f.fp2_gamma,
+            f.t3_delta,  f.t3_theta,  f.t3_alpha,  f.t3_beta,  f.t3_gamma,
+            f.t4_delta,  f.t4_theta,  f.t4_alpha,  f.t4_beta,  f.t4_gamma,
+            f.window_size_s, f.step_s
+         FROM fft_band_powers f
+         JOIN sessions s ON f.session_id = s.session_id
+         WHERE f.session_id = $1::uuid
+         ORDER BY f."time" ASC`,
+        [session_id]
+    );
+    return {
+        sample_length: samplesResult.rowCount,
+        samples: samplesResult.rows
+    };
+};
+
+export default { findAll, findById, pairSessions, startSession, endSession, getSessionResult, backfillSessionResults, getSessionEEGResults, getSessionBandPowerResults, getEllipticBandStats, getSessionFftBandPowerResults }

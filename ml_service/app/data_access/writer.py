@@ -254,6 +254,87 @@ def write_elliptic_band_stats(
     return result.rowcount if result.rowcount is not None and result.rowcount >= 0 else len(rows)
 
 
+# ── fft_band_powers ──────────────────────────────────────────────────────────
+
+def write_fft_band_powers(
+    conn,
+    session_id:    str,
+    windows:       list[dict],
+    window_size_s: float,
+    step_s:        float,
+) -> int:
+    """
+    Insert our FFT-computed band powers into fft_band_powers — one WIDE row per window
+    (all 4 channels × 5 bands as columns), mirroring band_powers' column names so the
+    read endpoint and frontend transform stay almost identical to the SDK path.
+
+    Args:
+        windows: List from fft_band_powers_sliding(), each:
+                   {"time": datetime,   -- window centre (absolute)
+                    "powers": {"fp1": {"delta":.., "theta":.., "alpha":.., "beta":..,
+                                       "gamma":..}, "fp2": {...}, "t3": {...}, "t4": {...}}}
+        window_size_s / step_s: stored for provenance.
+
+    Returns the DB's actual affected-row count.
+
+    ON CONFLICT DO UPDATE so a recompute (backfill, changed window, reclaimed job)
+    overwrites rather than silently keeping stale values. The adapter also DELETEs the
+    session's rows before calling this, so a shrink in window count can't leave orphans.
+    """
+    if not windows:
+        return 0
+
+    rows = []
+    for w in windows:
+        time  = w["time"]
+        if not isinstance(time, datetime):
+            raise TypeError(
+                "write_fft_band_powers needs an ABSOLUTE datetime for 'time'; got "
+                f"{type(time).__name__}. Pass sample times through "
+                "fft_band_powers_sliding() so windows carry a real clock timestamp."
+            )
+        p = w["powers"]
+        row = {"session_id": session_id, "time": time,
+               "window_size_s": window_size_s, "step_s": step_s}
+        for ch in ("fp1", "fp2", "t3", "t4"):
+            for band in ("delta", "theta", "alpha", "beta", "gamma"):
+                row[f"{ch}_{band}"] = p[ch][band]
+        rows.append(row)
+
+    result = conn.execute(text("""
+        INSERT INTO fft_band_powers (
+            session_id, time, window_size_s, step_s,
+            fp1_delta, fp1_theta, fp1_alpha, fp1_beta, fp1_gamma,
+            fp2_delta, fp2_theta, fp2_alpha, fp2_beta, fp2_gamma,
+            t3_delta,  t3_theta,  t3_alpha,  t3_beta,  t3_gamma,
+            t4_delta,  t4_theta,  t4_alpha,  t4_beta,  t4_gamma
+        ) VALUES (
+            :session_id, :time, :window_size_s, :step_s,
+            :fp1_delta, :fp1_theta, :fp1_alpha, :fp1_beta, :fp1_gamma,
+            :fp2_delta, :fp2_theta, :fp2_alpha, :fp2_beta, :fp2_gamma,
+            :t3_delta,  :t3_theta,  :t3_alpha,  :t3_beta,  :t3_gamma,
+            :t4_delta,  :t4_theta,  :t4_alpha,  :t4_beta,  :t4_gamma
+        )
+        ON CONFLICT (session_id, time) DO UPDATE SET
+            window_size_s = EXCLUDED.window_size_s,
+            step_s        = EXCLUDED.step_s,
+            fp1_delta = EXCLUDED.fp1_delta, fp1_theta = EXCLUDED.fp1_theta,
+            fp1_alpha = EXCLUDED.fp1_alpha, fp1_beta  = EXCLUDED.fp1_beta,
+            fp1_gamma = EXCLUDED.fp1_gamma,
+            fp2_delta = EXCLUDED.fp2_delta, fp2_theta = EXCLUDED.fp2_theta,
+            fp2_alpha = EXCLUDED.fp2_alpha, fp2_beta  = EXCLUDED.fp2_beta,
+            fp2_gamma = EXCLUDED.fp2_gamma,
+            t3_delta  = EXCLUDED.t3_delta,  t3_theta  = EXCLUDED.t3_theta,
+            t3_alpha  = EXCLUDED.t3_alpha,  t3_beta   = EXCLUDED.t3_beta,
+            t3_gamma  = EXCLUDED.t3_gamma,
+            t4_delta  = EXCLUDED.t4_delta,  t4_theta  = EXCLUDED.t4_theta,
+            t4_alpha  = EXCLUDED.t4_alpha,  t4_beta   = EXCLUDED.t4_beta,
+            t4_gamma  = EXCLUDED.t4_gamma
+    """), rows)
+
+    return result.rowcount if result.rowcount is not None and result.rowcount >= 0 else len(rows)
+
+
 # ── ml_insights ────────────────────────────────────────────────────────────────
 
 def write_insight(
