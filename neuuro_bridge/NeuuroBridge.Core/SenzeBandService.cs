@@ -164,10 +164,26 @@ namespace NeuuroBridge
             _intentionalDisconnect = true;  // a drop callback from this teardown must NOT auto-reconnect
             CancelConnectRetry();
             CancelReconnect();
+            // Clear per-connection auth state so a later reconnect authenticates from scratch. Left
+            // stale, a reconnect would keep the old MCU id and a half-finished attempt, and raw EEG
+            // could stay locked until the whole process was restarted (the reconnect-then-no-data bug).
+            ResetAuthState();
             if (string.IsNullOrEmpty(_connectedAddress)) return;
-            SenzeBandWindowsInterface.getSBWIHandler().disconnectBT(_connectedAddress);
+            try { SenzeBandWindowsInterface.getSBWIHandler().disconnectBT(_connectedAddress); }
+            catch (Exception ex) { Log("disconnectBT error: " + ex.Message); }
             _connectedAddress = "";
             _connectedDeviceID = "";
+        }
+
+        /// <summary>Drops all per-connection authentication state. A fresh connection must
+        /// re-identify (MCU) and re-authenticate from zero; carrying any of this across a
+        /// disconnect is what left raw EEG locked after a reconnect.</summary>
+        private void ResetAuthState()
+        {
+            _mcuId = null;
+            _authAttempted = false;
+            _isAuthenticated = false;
+            try { DeviceAuthentication.instance.OnDisconnect(); } catch { /* ignore */ }
         }
 
         private void CancelConnectRetry()
@@ -362,6 +378,10 @@ namespace NeuuroBridge
         {
             _mcuId = mcuId;
             Log("MCU ID: " + mcuId);
+            // The device just (re)identified itself. If we are not yet authenticated, clear any
+            // earlier in-flight/stale attempt so THIS MCU always drives a real auth pass — otherwise a
+            // failed first attempt would leave _authAttempted set and block re-auth on a reconnect.
+            if (!_isAuthenticated) _authAttempted = false;
             Authenticate();   // MCU ID is the last prerequisite; attempt auth now
         }
 
@@ -374,6 +394,9 @@ namespace NeuuroBridge
             {
                 bool ok = result == "200";
                 _svc._isAuthenticated = ok;
+                // A failed result must not wedge: clear the attempt flag so the next MCU report or a
+                // manual Re-auth can try again, rather than being blocked by "already attempted".
+                if (!ok) _svc._authAttempted = false;
                 _svc.Log($"Auth result for {address}: {result} {message}");
                 _svc.Post(() => _svc.OnAuthStatus?.Invoke(ok, result + " " + message));
             }
@@ -381,6 +404,7 @@ namespace NeuuroBridge
             public void timeUp(object obj)
             {
                 _svc._isAuthenticated = false;
+                _svc._authAttempted = false;   // allow a retry instead of staying stuck unauthenticated
                 _svc.Log("Authentication timed out.");
                 _svc.Post(() => _svc.OnAuthStatus?.Invoke(false, "timeout"));
             }
@@ -421,7 +445,17 @@ namespace NeuuroBridge
         // ── Connection callbacks ────────────────────────────────────────────
         private void ConnectedCallback(string address, string id, bool hasExistingConnection)
         {
-            if (hasExistingConnection) return;
+            if (hasExistingConnection)
+            {
+                // The SDK already holds a link to this device — typically a prior disconnect that
+                // hadn't fully torn down before we reconnected. We used to return here unconditionally
+                // and WEDGE: no OnConnected/OnReconnected ever fired, so the app never re-prepared a
+                // session and the only cure was restarting the exe. If a (re)connect is actually
+                // pending, ADOPT the existing link and continue instead of dropping it on the floor.
+                Log("Connect reported an existing connection to " + id + " @ " + address + ".");
+                if (!_connecting && !_reconnecting)
+                    return;   // unsolicited, nothing pending — ignore as before
+            }
             bool wasReconnecting = _reconnecting;
             CancelConnectRetry();   // connect succeeded — stop the retry machinery
             CancelReconnect();      // ...and the drop-recovery loop, if this was a resume

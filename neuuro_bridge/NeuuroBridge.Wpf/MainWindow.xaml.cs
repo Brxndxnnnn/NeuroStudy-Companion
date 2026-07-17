@@ -348,7 +348,15 @@ namespace NeuuroBridge.Wpf
 
             // DB status
             var db = _ctl.Db;
-            if (db == null) { TxtDbState.Text = "not started"; TxtDbState.Foreground = Mut; }
+            if (db == null)
+            {
+                // No uploader yet. Distinguish the cases so the technician knows whether data is
+                // landing: mid-recording with no DB is a LOUD problem (recording locally only);
+                // just after connect it is the normal brief "connecting to the DB" window.
+                if (_ctl.SessionActive) { TxtDbState.Text = "NOT connected — recording locally only"; TxtDbState.Foreground = Bad; }
+                else if (_ctl.IsConnected) { TxtDbState.Text = "connecting to DB…"; TxtDbState.Foreground = Warn; }
+                else { TxtDbState.Text = "not started"; TxtDbState.Foreground = Mut; }
+            }
             else
             {
                 if (!_ctl.SessionActive)
