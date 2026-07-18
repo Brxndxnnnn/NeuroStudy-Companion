@@ -8,6 +8,7 @@ Tests for feature extraction — covers:
   - asymmetry.py           : frontal alpha asymmetry
   - elliptic_band_stats.py : elliptic bandpass filter mean/std/peak per band
   - pipeline.py            : elliptic sliding-window orchestration
+  - fft_analysis.py        : FFT amplitude spectrum per channel (0-45 Hz)
 
 Each test class validates against a SYNTHETIC signal with known ground truth
 first, then immediately runs the same computation on REAL session data.
@@ -34,6 +35,7 @@ from app.feature_extraction.ratios import theta_beta_ratio, alpha_beta_ratio, al
 from app.feature_extraction.asymmetry import frontal_alpha_asymmetry, frontal_alpha_asymmetry_from_bandpowers
 from app.preprocessing.pipeline import run_pipeline
 from app.data_access.queries import fetch_filtered_samples
+from app.feature_extraction.fft_analysis import compute_fft, run_fft_analysis
 
 
 def _make_band_signal(freq_hz: float, amplitude: float, duration_s: float = 4.0, noise_std: float = 0.5):
@@ -693,3 +695,77 @@ class TestFeaturesOnRealSession:
 #
 #         assert set(band_powers.keys()) == {"fp1", "fp2", "t3", "t4"}
 #         assert isinstance(faa, float)
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# 8. FFT amplitude spectrum — fft_analysis.py
+# ══════════════════════════════════════════════════════════════════════════════
+
+class TestFFT:
+    def test_peak_at_injected_frequency_synthetic(self):
+        """Synthetic ground truth: 10 Hz sine wave should produce an FFT peak near 10 Hz."""
+        fs     = settings.SAMPLE_RATE
+        t      = np.arange(4 * fs) / fs
+        signal = 15.0 * np.sin(2 * np.pi * 10.0 * t)   # pure 10 Hz, no noise
+        freqs, amplitudes = compute_fft(signal, fs)
+
+        mask       = freqs <= 45.0
+        freqs      = freqs[mask]
+        amplitudes = amplitudes[mask]
+
+        peak_freq = freqs[np.argmax(amplitudes)]
+        print(f"\n  [SYNTHETIC] Injected 10 Hz -> FFT peak at {peak_freq:.2f} Hz")
+        assert abs(peak_freq - 10.0) < 1.0
+
+    def test_amplitude_close_to_injected_synthetic(self):
+        """Synthetic ground truth: amplitude at 10 Hz should be close to 15 µV."""
+        fs     = settings.SAMPLE_RATE
+        t      = np.arange(4 * fs) / fs
+        signal = 15.0 * np.sin(2 * np.pi * 10.0 * t)
+        freqs, amplitudes = compute_fft(signal, fs)
+
+        idx       = np.argmin(np.abs(freqs - 10.0))
+        amp_at_10 = amplitudes[idx]
+        print(f"\n  [SYNTHETIC] Injected 15 µV at 10 Hz -> FFT amplitude={amp_at_10:.2f} µV")
+        assert abs(amp_at_10 - 15.0) < 1.0
+
+    def test_dc_removed_synthetic(self):
+        """After DC removal, amplitude at 0 Hz should be near zero."""
+        fs     = settings.SAMPLE_RATE
+        t      = np.arange(4 * fs) / fs
+        signal = 50.0 + 15.0 * np.sin(2 * np.pi * 10.0 * t)
+        signal = signal - np.mean(signal)   # DC removal (same as run_fft_analysis)
+        freqs, amplitudes = compute_fft(signal, fs)
+        print(f"\n  [SYNTHETIC] DC amplitude after removal: {amplitudes[0]:.4f} µV")
+        assert amplitudes[0] < 0.01
+
+    def test_too_short_raises(self):
+        """Signal with fewer than 2 samples should raise ValueError."""
+        with pytest.raises(ValueError, match="at least two samples"):
+            compute_fft(np.array([1.0]), fs=250)
+
+    def test_fft_on_real_session(self, db_conn, session_id):
+        """
+        Real data: run FFT on a time slice of SDK-filtered EEG and show the
+        amplitude spectrum (0-45 Hz) for all 4 channels.
+
+        Configurable:
+          time_start_s — start of the time range in seconds from session start
+          time_end_s   — end of the time range in seconds from session start
+        """
+        # ── CONFIGURABLE TIME RANGE ────────────────────────────────────────────
+        time_start_s = 0.0    # seconds from session start
+        time_end_s   = 20.0   # seconds from session start, None = full session
+
+        result = run_fft_analysis(
+            db_conn,
+            session_id   = session_id,
+            time_start_s = time_start_s,
+            time_end_s   = time_end_s,
+        )
+
+        assert "freqs"      in result
+        assert "amplitudes" in result
+        assert set(result["amplitudes"].keys()) == {"fp1", "fp2", "t3", "t4"}
+        assert result["freqs"][0]  == pytest.approx(0.0, abs=0.01)
+        assert result["freqs"][-1] <= 46.0
