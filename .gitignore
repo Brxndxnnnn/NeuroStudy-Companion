@@ -31,3 +31,7 @@ node_modules/
 # Certbot
 certbot/conf/
 certbot/www/
+
+# Database
+db/certs/*
+!db/certs/.gitkeep
