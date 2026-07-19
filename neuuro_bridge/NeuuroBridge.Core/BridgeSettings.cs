@@ -11,9 +11,10 @@ namespace NeuuroBridge
         // Both live on the droplet's nginx (clinics.axonview.sg). The feed location is
         // ours: nginx/nginx.conf `/bridge-updates/` serving /var/bridge-updates,
         // populated by neuuro_bridge/packaging/publish.ps1.
-        // NOTE the path: /api/activate (public, pre-auth), NOT /api/clinics/... — everything
-        // under /api/clinics sits behind the authenticate middleware and 401s.
-        private const string DefaultActivationUrl = "https://clinics.axonview.sg/api/activate";
+        // Path history: #118 exposed /api/activate; #119 moved it to /api/clinics/activate
+        // (still public — registered on the root router ABOVE the authenticated /clinics
+        // router, so it matches first). This is the final path per Eugene.
+        private const string DefaultActivationUrl = "https://clinics.axonview.sg/api/clinics/activate";
         private const string DefaultUpdateFeedUrl = "https://clinics.axonview.sg/bridge-updates/";
 
         /// <summary>Full URL of the backend activation endpoint (the bridge's only backend call).</summary>

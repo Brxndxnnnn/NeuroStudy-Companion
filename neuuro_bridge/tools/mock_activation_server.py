@@ -39,7 +39,7 @@ class Handler(BaseHTTPRequestHandler):
     CODE_PATTERN = re.compile(r"^[A-Z0-9]{4}(?:-[A-Z0-9]{4}){3}$")  # same as the backend
 
     def do_POST(self):
-        if self.path != "/api/activate":
+        if self.path != "/api/clinics/activate":
             return self._send(404, {"detail": "not found"})
         body = json.loads(self.rfile.read(int(self.headers.get("Content-Length", 0)) or 0) or b"{}")
         code = (body.get("activation_code") or "").strip().upper()
