@@ -1,7 +1,8 @@
+<!-- No StartupUri: App.OnStartup gates on activation before showing MainWindow. -->
 <Application x:Class="NeuuroBridge.Wpf.App"
              xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
              xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
-             StartupUri="MainWindow.xaml">
+             ShutdownMode="OnExplicitShutdown">
     <Application.Resources>
         <!-- Palette -->
         <SolidColorBrush x:Key="Bg"        Color="#0F1722"/>

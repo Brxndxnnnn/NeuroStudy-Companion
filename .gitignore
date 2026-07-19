@@ -2,6 +2,10 @@
 [Bb]in/
 [Oo]bj/
 
+# Velopack release output (Setup.exe, full/delta packages) — published to the
+# update feed, never committed
+neuuro_bridge/packaging/releases/
+
 # SDK runtime logs (contain the license/developer code — never commit)
 logs/
 

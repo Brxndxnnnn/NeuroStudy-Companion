@@ -28,3 +28,9 @@ services:
       # cannot collide with whatever else is already on port 80 on a dev machine.
       - "80:80"
       - "443:443"
+    volumes:
+      # Appends to the base list (volumes merge by concatenation, unlike ports above).
+      # Velopack release files for the Windows bridge's auto-update feed, uploaded by
+      # neuuro_bridge/packaging/publish.ps1. Lives OUTSIDE the repo tree on purpose:
+      # a deploy's `git reset --hard` must never touch published releases.
+      - /var/bridge-updates:/var/www/bridge-updates:ro

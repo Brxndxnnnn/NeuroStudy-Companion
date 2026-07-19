@@ -18,6 +18,14 @@
   </ItemGroup>
 
   <ItemGroup>
+    <!-- Framework assemblies (no NuGet needed on net48): DPAPI for the config store,
+         HttpClient + JavaScriptSerializer for the activation call. -->
+    <Reference Include="System.Security" />
+    <Reference Include="System.Net.Http" />
+    <Reference Include="System.Web.Extensions" />
+  </ItemGroup>
+
+  <ItemGroup>
     <!-- Neeuro SenzeBand SDK (STANDARD tier). DLLs live in lib\. -->
     <!-- SenzeBandSDK is managed; it flows to consumers' output as a normal reference. -->
     <Reference Include="SenzeBandSDK">

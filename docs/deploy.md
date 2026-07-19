@@ -53,6 +53,11 @@ The `.env.docker` files hold real secrets and are gitignored. They live on the d
 only. `git reset --hard` does not touch them (untracked files are left alone), so they
 survive a deploy.
 
+`/var/bridge-updates` (droplet host, outside the repo) holds the Windows bridge's
+Velopack release files, served by nginx as `/bridge-updates/`. It is populated from a
+dev machine via `neuuro_bridge/packaging/publish.ps1`, not by deploys — a deploy's
+`git reset --hard` never touches it, and it must never be moved into the repo tree.
+
 ## Rebuilds
 
 `ml_service` and `backend` are **bind-mounted** (`./ml_service:/app`, `./backend/src:/app/src`),

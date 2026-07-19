@@ -4,10 +4,11 @@ using System.IO;
 namespace NeuuroBridge
 {
     /// <summary>
-    /// Resolves the Neeuro license and the Postgres connection string from environment
-    /// variables / a <c>.env</c> file (the same files the rest of the stack uses), walking
-    /// up from both the working directory and the executable directory. Shared by the
-    /// console app and the WPF app so both read configuration identically.
+    /// Resolves the Neeuro license and the Postgres connection string. Precedence:
+    /// the activation-written <see cref="ConfigStore"/> (clinic machines), then
+    /// environment variables / a <c>.env</c> file walking up from both the working
+    /// directory and the executable directory (dev boxes). Shared by the console app
+    /// and the WPF app so both read configuration identically.
     /// </summary>
     public static class EnvConfig
     {
@@ -27,12 +28,29 @@ namespace NeuuroBridge
             string dbName = FindDotEnvValue("POSTGRES_DB") ?? "neurostudy";
             string user = FindDotEnvValue("POSTGRES_USER") ?? "neurostudy_user";
             string pass = FindDotEnvValue("POSTGRES_PASSWORD") ?? "neurostudy_pass";
-            return $"Host={host};Port={port};Database={dbName};Username={user};Password={pass};" +
-                   "Timeout=5;Command Timeout=10;Pooling=true";
+            var cs = $"Host={host};Port={port};Database={dbName};Username={user};Password={pass};" +
+                     "Timeout=5;Command Timeout=10;Pooling=true";
+
+            // Activation hands out sslmode with the creds; dev compose has no key → no clause,
+            // identical behaviour to before. Npgsql 6 validates the server cert under Require;
+            // POSTGRES_TRUST_SERVER_CERT=true opts out (self-signed certs only, not for prod).
+            string sslMode = FindDotEnvValue("POSTGRES_SSLMODE");
+            if (!string.IsNullOrWhiteSpace(sslMode)) cs += $";SSL Mode={sslMode.Trim()}";
+            string trust = FindDotEnvValue("POSTGRES_TRUST_SERVER_CERT");
+            if (string.Equals(trust?.Trim(), "true", StringComparison.OrdinalIgnoreCase))
+                cs += ";Trust Server Certificate=true";
+            return cs;
         }
 
         public static string FindDotEnvValue(string key)
         {
+            var env = Environment.GetEnvironmentVariable(key);
+            if (!string.IsNullOrWhiteSpace(env)) return env.Trim();
+
+            // Clinic machines: the activation-written store wins over any stray .env.
+            var stored = ConfigStore.Read(key);
+            if (!string.IsNullOrWhiteSpace(stored)) return stored;
+
             foreach (var start in new[] { Directory.GetCurrentDirectory(), AppContext.BaseDirectory })
             {
                 var dir = start;

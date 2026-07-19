@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.Threading;
@@ -279,42 +279,20 @@ namespace NeuuroBridge
                 try
                 {
                     EnsureOpen();
+                    // Placeholder rows live in their own transaction: per-clinic prod DB users
+                    // have no INSERT on clinics/roles/clients/users (by design), so seeding is
+                    // skipped there — migration 011 pre-seeds the same rows server-side. Dev
+                    // users keep the self-seeding behaviour for standalone runs.
+                    try
+                    {
+                        SeedPlaceholders();
+                    }
+                    catch (PostgresException ex) when (ex.SqlState == "42501")
+                    {
+                        _log("Placeholder seeding skipped (no privilege — expecting server-side seed, migration 011).");
+                    }
                     using (var tx = _conn.BeginTransaction())
                     {
-                        // Placeholder clinic + role first, so the FK/NOT-NULL constraints on
-                        // clients.clinic_id and users.role_id are always satisfiable.
-                        Exec(tx,
-                            "INSERT INTO clinics (clinic_id, name) VALUES (@id, @name) " +
-                            "ON CONFLICT (clinic_id) DO NOTHING",
-                            ("id", NpgsqlDbType.Uuid, Guid.Parse(PlaceholderClinicId)),
-                            ("name", NpgsqlDbType.Text, "⟨Unclaimed⟩ — bridge placeholder clinic"));
-
-                        // requires_clinic=false lets the placeholder user keep a NULL clinic_id
-                        // (the enforce_clinic_membership trigger only fires for clinic-requiring roles).
-                        Exec(tx,
-                            "INSERT INTO roles (role_id, name, requires_clinic, description) " +
-                            "VALUES (@id, @name, false, @desc) ON CONFLICT (role_id) DO NOTHING",
-                            ("id", NpgsqlDbType.Uuid, Guid.Parse(PlaceholderRoleId)),
-                            ("name", NpgsqlDbType.Text, "bridge_placeholder"),
-                            ("desc", NpgsqlDbType.Text, "Non-login placeholder role for the bridge system user."));
-
-                        Exec(tx,
-                            "INSERT INTO clients (client_id, clinic_id, name, notes) VALUES (@id, @clinic, @name, @notes) " +
-                            "ON CONFLICT (client_id) DO NOTHING",
-                            ("id", NpgsqlDbType.Uuid, Guid.Parse(PlaceholderClientId)),
-                            ("clinic", NpgsqlDbType.Uuid, Guid.Parse(PlaceholderClinicId)),
-                            ("name", NpgsqlDbType.Text, "⟨Unclaimed⟩ — pending pairing"),
-                            ("notes", NpgsqlDbType.Text, "Placeholder client for bridge-created sessions awaiting frontend claim."));
-
-                        Exec(tx,
-                            "INSERT INTO users (user_id, email, password_hash, role_id, clinic_id, display_name) " +
-                            "VALUES (@id, @email, @pw, @role, NULL, @name) ON CONFLICT (user_id) DO NOTHING",
-                            ("id", NpgsqlDbType.Uuid, Guid.Parse(PlaceholderUserId)),
-                            ("email", NpgsqlDbType.Text, "bridge-system@neurostudy.local"),
-                            ("pw", NpgsqlDbType.Text, "!"),   // non-bcrypt sentinel: can never authenticate
-                            ("role", NpgsqlDbType.Uuid, Guid.Parse(PlaceholderRoleId)),
-                            ("name", NpgsqlDbType.Text, "Neuuro Bridge (system)"));
-
                         Exec(tx,
                             "INSERT INTO sessions (session_id, client_id, conducted_by, device_id, pairing_code, sample_rate, sync_status) " +
                             "VALUES (@sid, @cid, @uid, @dev, @pair, @rate, 'unclaimed') ON CONFLICT (session_id) DO NOTHING",
@@ -324,7 +302,6 @@ namespace NeuuroBridge
                             ("dev", NpgsqlDbType.Text, (object)deviceMac ?? DBNull.Value),
                             ("pair", NpgsqlDbType.Text, (object)pairingCode ?? DBNull.Value),
                             ("rate", NpgsqlDbType.Integer, sampleRate));
-
                         tx.Commit();
                     }
                     _log($"Session row created (unclaimed): {sessionId}");
@@ -338,6 +315,53 @@ namespace NeuuroBridge
                     _log("Session INSERT failed: " + ex.Message);
                     return false;
                 }
+            }
+        }
+
+        /// <summary>
+        /// Ensures the fixed placeholder clinic/role/client/user rows exist (idempotent).
+        /// Requires INSERT on those tables — dev users have it, clinic prod users don't
+        /// (they rely on migration 011 having seeded the identical rows).
+        /// </summary>
+        private void SeedPlaceholders()
+        {
+            using (var tx = _conn.BeginTransaction())
+            {
+                // Placeholder clinic + role first, so the FK/NOT-NULL constraints on
+                // clients.clinic_id and users.role_id are always satisfiable.
+                Exec(tx,
+                    "INSERT INTO clinics (clinic_id, name) VALUES (@id, @name) " +
+                    "ON CONFLICT (clinic_id) DO NOTHING",
+                    ("id", NpgsqlDbType.Uuid, Guid.Parse(PlaceholderClinicId)),
+                    ("name", NpgsqlDbType.Text, "⟨Unclaimed⟩ — bridge placeholder clinic"));
+
+                // requires_clinic=false lets the placeholder user keep a NULL clinic_id
+                // (the enforce_clinic_membership trigger only fires for clinic-requiring roles).
+                Exec(tx,
+                    "INSERT INTO roles (role_id, name, requires_clinic, description) " +
+                    "VALUES (@id, @name, false, @desc) ON CONFLICT (role_id) DO NOTHING",
+                    ("id", NpgsqlDbType.Uuid, Guid.Parse(PlaceholderRoleId)),
+                    ("name", NpgsqlDbType.Text, "bridge_placeholder"),
+                    ("desc", NpgsqlDbType.Text, "Non-login placeholder role for the bridge system user."));
+
+                Exec(tx,
+                    "INSERT INTO clients (client_id, clinic_id, name, notes) VALUES (@id, @clinic, @name, @notes) " +
+                    "ON CONFLICT (client_id) DO NOTHING",
+                    ("id", NpgsqlDbType.Uuid, Guid.Parse(PlaceholderClientId)),
+                    ("clinic", NpgsqlDbType.Uuid, Guid.Parse(PlaceholderClinicId)),
+                    ("name", NpgsqlDbType.Text, "⟨Unclaimed⟩ — pending pairing"),
+                    ("notes", NpgsqlDbType.Text, "Placeholder client for bridge-created sessions awaiting frontend claim."));
+
+                Exec(tx,
+                    "INSERT INTO users (user_id, email, password_hash, role_id, clinic_id, display_name) " +
+                    "VALUES (@id, @email, @pw, @role, NULL, @name) ON CONFLICT (user_id) DO NOTHING",
+                    ("id", NpgsqlDbType.Uuid, Guid.Parse(PlaceholderUserId)),
+                    ("email", NpgsqlDbType.Text, "bridge-system@neurostudy.local"),
+                    ("pw", NpgsqlDbType.Text, "!"),   // non-bcrypt sentinel: can never authenticate
+                    ("role", NpgsqlDbType.Uuid, Guid.Parse(PlaceholderRoleId)),
+                    ("name", NpgsqlDbType.Text, "Neuuro Bridge (system)"));
+
+                tx.Commit();
             }
         }
 
