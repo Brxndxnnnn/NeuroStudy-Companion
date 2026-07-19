@@ -143,11 +143,14 @@ string can request TLS. Small change, do it as part of the cutover.
    sessions SELECT+INSERT ✅, all four EEG/band data tables INSERT ✅, clinics/roles/
    clients/users correctly locked ✅. **Missing: UPDATE on `sessions`** — the bridge
    stamps `bridge_recording_at` at recording start and flips `sync_status='completed'`
-   at Stop. Ask: `GRANT UPDATE (bridge_recording_at, sync_status) ON sessions TO
-   bridge_writer` (column-level; full-row UPDATE not needed). **Still missing as of
-   Eugene's 19 Jul reply** — his `010_database_roles.sql` grants bridge_writer only
-   `INSERT,SELECT` on sessions; re-probe confirmed UPDATE=NO. Placeholder seed
-   (migration 011) already run by Eugene ✅.
+   at Stop. **RESOLVED 19 Jul (evening):** Eugene granted column-level
+   `UPDATE (bridge_recording_at, sync_status)` to `bridge_writer`; clinic roles
+   inherit it. Verified with our clinic creds: `has_column_privilege` YES on both
+   columns, `clinic_id` correctly NO, and both of the bridge's real UPDATE
+   statements execute (0-row test, rolled back). Probe gotcha for the future:
+   `has_table_privilege('UPDATE')` is false for column-level grants — check
+   `has_column_privilege` instead. Placeholder seed (migration 011) already run
+   by Eugene ✅. **No DB blockers remain.**
 
 ---
 
