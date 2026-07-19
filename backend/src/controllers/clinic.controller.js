@@ -245,6 +245,8 @@ const activateClinicDatabaseAccess=catchAsync(async(req,res) => {
         data:{
             activation_id:activated.activation_id,
             clinic_id:activated.clinic_id,
+            clinic_name:activated.clinic_name,
+            license_key:process.env.NEUURO_LICENSE_KEY,
             database:{
                 host:process.env.PUBLIC_DB_HOST
                     ?? 'clinics.axonview.sg',

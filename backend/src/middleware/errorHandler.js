@@ -1,10 +1,20 @@
-import { BadRequestError, ConflictError, NotFoundError } from '../utils/AppError.js';
+import { BadRequestError, ConflictError, NotFoundError, AppError } from '../utils/AppError.js';
 
 // Helper to translate Postgres error codes into user-friendly AppErrors
 const handlePostgresErrors = (err) => {
     // Postgres error codes: https://www.postgresql.org/docs/current/errcodes-appendix.html
     const safeMessage = typeof err.message === 'string' && err.message.trim() ? err.message : 'Database operation failed';
     switch (err.code) {
+        case 'ZA001':
+            return new BadRequestError(safeMessage);
+        case 'ZA002':
+            return new ConflictError(safeMessage);
+        case 'ZA003':
+        case 'ZA004':
+            return new AppError(safeMessage, 410);
+        case 'ZA005':
+            return new NotFoundError(safeMessage);
+
         case 'P2001':
         case 'P2002':
             return new NotFoundError(safeMessage);
