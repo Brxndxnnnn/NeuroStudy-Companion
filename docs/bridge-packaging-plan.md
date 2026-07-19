@@ -125,10 +125,11 @@ string can request TLS. Small change, do it as part of the cutover.
 1. **DB reachability over SSL** — the existing blocker. Prod Postgres is loopback-only;
    a clinic can't reach it. Needs Rashid's domain → Eugene exposes Postgres w/ an SSL
    cert. (Bridge side: add `POSTGRES_SSLMODE`.)
-2. **A static HTTPS path for the update feed** — one nginx `location` serving a folder
-   (e.g. `/bridge-updates/`) where we drop Velopack release files. Publicly readable
-   over HTTPS is fine (release binaries, no secrets). This is all auto-update needs from
-   infra.
+2. ~~A static HTTPS path for the update feed~~ — **DONE BY US (19 Jul):** the droplet
+   nginx is ours (`nginx/nginx.conf`), so `/bridge-updates/` now serves
+   `/var/bridge-updates` (host path outside the repo; mounted in `compose.prod.yaml`;
+   uploaded via `packaging/publish.ps1`). Goes live on the next droplet deploy —
+   nothing needed from Eugene.
 3. **Activation backend (Eugene confirmed 19 Jul he's building this)** — the
    `/api/clinics/activate` endpoint, `activation_codes` + clinic→DB-user tables, and
    code issuance, per the contract in §4. Reachable over HTTPS from clinics (same

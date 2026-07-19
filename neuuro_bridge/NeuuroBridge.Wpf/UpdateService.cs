@@ -17,7 +17,7 @@ namespace NeuuroBridge.Wpf
         {
             try
             {
-                if (BridgeSettings.IsPlaceholderFeed) return;
+                if (!BridgeSettings.IsFeedConfigured) return;
 
                 var feed = BridgeSettings.UpdateFeedUrl;
                 IUpdateSource source = feed.StartsWith("http", StringComparison.OrdinalIgnoreCase)
