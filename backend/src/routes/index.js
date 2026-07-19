@@ -18,7 +18,7 @@ const router = Router()
 // Must be a public route because the clinic is not yet activated and therefore cannot authenticate
 /**
  * @openapi
- * /api/activate:
+ * /api/clinics/activate:
  *   post:
  *     summary: Activate a clinic desktop installation
  *     tags: [Clinics]
@@ -41,7 +41,7 @@ const router = Router()
  *         description: Invalid, expired, revoked or used activation code
  */
 router.post(
-    '/activate',
+    '/clinics/activate',
     clinicController.activateClinicDatabaseAccess
 )
 router.get('/health', async (req, res) => res.json({ status: 'ok' }))
