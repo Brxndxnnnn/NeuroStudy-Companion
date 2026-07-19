@@ -6,35 +6,6 @@ import PERMS from '../constants/permissions.js'
 const router = Router()
 
 /**
- * @openapi
- * /api/clinics/activate:
- *   post:
- *     summary: Activate a clinic desktop installation
- *     tags: [Clinics]
- *     requestBody:
- *       required: true
- *       content:
- *         application/json:
- *           schema:
- *             type: object
- *             required:
- *               - activation_code
- *             properties:
- *               activation_code:
- *                 type: string
- *                 example: A1B2-C3D4-E5F6-A7B8
- *     responses:
- *       200:
- *         description: Installation activated
- *       400:
- *         description: Invalid, expired, revoked or used activation code
- */
-router.post(
-    '/activate',
-    clinicController.activateClinicDatabaseAccess
-)
-
-/**
  * @swagger
  * /api/clinics/stimulus-sets:
  *   get:

@@ -198,6 +198,7 @@ CREATE OR REPLACE FUNCTION security_admin.redeem_clinic_activation(
 RETURNS TABLE(
   activation_id uuid,
   clinic_id uuid,
+  clinic_name text,
   database_role name
 )
 LANGUAGE plpgsql
@@ -206,21 +207,47 @@ SET search_path=pg_catalog,public,security_admin,pg_temp
 AS $$
 DECLARE
   v_activation public.clinic_activation_codes%ROWTYPE;
+  v_clinic_name text;
 BEGIN
-  SELECT *
+  SELECT cac.*
   INTO v_activation
-  FROM public.clinic_activation_codes
-  WHERE activation_code_hash=p_activation_code_hash
+  FROM public.clinic_activation_codes cac
+  WHERE cac.activation_code_hash=p_activation_code_hash
   FOR UPDATE;
 
   IF NOT FOUND THEN
-    RETURN;
+    RAISE EXCEPTION USING
+      ERRCODE='ZA001',
+      MESSAGE='Unknown activation code';
   END IF;
 
-  IF v_activation.revoked_at IS NOT NULL
-     OR v_activation.expires_at<=now()
-     OR v_activation.use_count>=v_activation.max_uses THEN
-    RETURN;
+  IF v_activation.use_count>=v_activation.max_uses THEN
+    RAISE EXCEPTION USING
+      ERRCODE='ZA002',
+      MESSAGE='Activation code has already been used';
+  END IF;
+
+  IF v_activation.expires_at<=now() THEN
+    RAISE EXCEPTION USING
+      ERRCODE='ZA003',
+      MESSAGE='Activation code has expired';
+  END IF;
+
+  IF v_activation.revoked_at IS NOT NULL THEN
+    RAISE EXCEPTION USING
+      ERRCODE='ZA004',
+      MESSAGE='Activation code has been revoked';
+  END IF;
+
+  SELECT c.name
+  INTO v_clinic_name
+  FROM public.clinics c
+  WHERE c.clinic_id=v_activation.clinic_id;
+
+  IF NOT FOUND THEN
+    RAISE EXCEPTION USING
+      ERRCODE='ZA005',
+      MESSAGE='Clinic associated with activation code was not found';
   END IF;
 
   EXECUTE format(
@@ -242,6 +269,7 @@ BEGIN
   SELECT
     v_activation.activation_id,
     v_activation.clinic_id,
+    v_clinic_name,
     v_activation.database_role;
 END;
 $$;
@@ -361,3 +389,13 @@ GRANT bridge_writer TO clinic_001;
 GRANT bridge_writer TO clinic_002;
 COMMIT;
 
+GRANT USAGE ON SCHEMA public TO clinic_provisioner;
+
+GRANT SELECT ON TABLE public.clinics
+TO clinic_provisioner;
+
+GRANT INSERT ON TABLE public.clinic_database_roles
+TO clinic_provisioner;
+
+GRANT SELECT,INSERT,UPDATE ON TABLE public.clinic_activation_codes
+TO clinic_provisioner;

@@ -356,6 +356,7 @@ const redeemDatabaseAccess = async ({ activationCodeHash, databasePassword }, cl
         SELECT
             activation_id,
             clinic_id,
+            clinic_name,
             database_role
         FROM security_admin.redeem_clinic_activation(
             $1::text,
