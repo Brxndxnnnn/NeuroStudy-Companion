@@ -130,9 +130,17 @@ string can request TLS. Small change, do it as part of the cutover.
    over HTTPS is fine (release binaries, no secrets). This is all auto-update needs from
    infra.
 3. **Activation backend (Eugene confirmed 19 Jul he's building this)** — the
-   `/bridge/activate` endpoint, `activation_codes` + clinic→DB-user tables, and code
-   issuance, per the contract in §4. Reachable over HTTPS from clinics (same domain
-   work as 1–2).
+   `/api/clinics/activate` endpoint, `activation_codes` + clinic→DB-user tables, and
+   code issuance, per the contract in §4. Reachable over HTTPS from clinics (same
+   domain work as 1–2).
+4. **Per-clinic DB grants (found by live probe, 19 Jul):** Postgres is UP on
+   `clinics.axonview.sg:5432` (VerifyFull works, creds valid ✅). Grants verified:
+   sessions SELECT+INSERT ✅, all four EEG/band data tables INSERT ✅, clinics/roles/
+   clients/users correctly locked ✅. **Missing: UPDATE on `sessions`** — the bridge
+   stamps `bridge_recording_at` at recording start and flips `sync_status='completed'`
+   at Stop. Ask: `GRANT UPDATE (bridge_recording_at, sync_status) ON sessions TO
+   <clinic role>` (column-level; full-row UPDATE not needed). Also run migration 010
+   (placeholder seed) on the clinics DB — the bridge no longer needs INSERT there.
 
 ---
 
