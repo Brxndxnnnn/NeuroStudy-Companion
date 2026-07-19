@@ -2,7 +2,7 @@ import pool from '../config/db.js'
 import query from '../utils/query.js'
 
 const findAll = async (client = pool) => {
-    const { rows } = await query(client, 
+    const { rows } = await query(client,
         `SELECT clinic_id, name, address, created_at
          FROM clinics
          ORDER BY created_at DESC`
@@ -35,7 +35,7 @@ const update = async (clinic_id, fields, client = pool) => {
     const vals = []
     let idx = 1
 
-    if (fields.name    !== undefined) { cols.push(`name    = $${idx++}`); vals.push(fields.name)    }
+    if (fields.name !== undefined) { cols.push(`name    = $${idx++}`); vals.push(fields.name) }
     if (fields.address !== undefined) { cols.push(`address = $${idx++}`); vals.push(fields.address) }
 
     if (!cols.length) return null  // nothing to update
@@ -51,11 +51,11 @@ const update = async (clinic_id, fields, client = pool) => {
     return rows[0] ?? undefined  // undefined = not found, null = nothing to update
 }
 
-const getClinicStimulusSets = async ({isAdmin = false, clinicId = null} = {}, client = pool) => {
+const getClinicStimulusSets = async ({ isAdmin = false, clinicId = null } = {}, client = pool) => {
     const params = isAdmin ? [clinicId] : []
     const where = isAdmin ? 'WHERE css.clinic_id = $1::uuid' : ''
 
-    const {rows} = await query(client, `
+    const { rows } = await query(client, `
         SELECT
             css.stimulus_set_id,
             css.clinic_id,
@@ -88,7 +88,7 @@ const getClinicStimulusSets = async ({isAdmin = false, clinicId = null} = {}, cl
     return rows
 }
 
-const getClinicStimulusSetById = async (stimulusSetId, {isAdmin = false, clinicId = null} = {}, client = pool) => {
+const getClinicStimulusSetById = async (stimulusSetId, { isAdmin = false, clinicId = null } = {}, client = pool) => {
     const params = [stimulusSetId]
     let clinicFilter = ''
 
@@ -97,7 +97,7 @@ const getClinicStimulusSetById = async (stimulusSetId, {isAdmin = false, clinicI
         clinicFilter = 'AND css.clinic_id = $2::uuid'
     }
 
-    const {rows} = await query(client, `
+    const { rows } = await query(client, `
         SELECT
             css.stimulus_set_id,
             css.clinic_id,
@@ -148,8 +148,8 @@ const getClinicStimulusSetById = async (stimulusSetId, {isAdmin = false, clinicI
 
 const updateClinicStimulusSet = async (
     stimulusSetId,
-    {name = null, status = 'draft', imageIds},
-    {isAdmin = false, clinicId = null, userId = null} = {},
+    { name = null, status = 'draft', imageIds },
+    { isAdmin = false, clinicId = null, userId = null } = {},
     client = pool
 ) => {
     await query(client, 'BEGIN')
@@ -311,7 +311,7 @@ const updateClinicStimulusSet = async (
 
         const updated = await getClinicStimulusSetById(
             targetStimulusSetId,
-            {isAdmin, clinicId: source.clinic_id},
+            { isAdmin, clinicId: source.clinic_id },
             client
         )
 
@@ -328,4 +328,45 @@ const updateClinicStimulusSet = async (
     }
 }
 
-export default { findAll, findById, create, update, getClinicStimulusSets, getClinicStimulusSetById, updateClinicStimulusSet }
+const createDatabaseAccess = async ({ clinicId, databaseRole, activationCodeHash, expiresAt }, client = pool) => {
+    const { rows } = await query(client, `
+        SELECT
+            activation_id,
+            clinic_id,
+            database_role,
+            expires_at
+        FROM security_admin.create_clinic_database_access(
+            $1::uuid,
+            $2::name,
+            $3::text,
+            $4::timestamptz
+        )
+    `, [
+        clinicId,
+        databaseRole,
+        activationCodeHash,
+        expiresAt
+    ])
+
+    return rows[0] ?? null
+}
+
+const redeemDatabaseAccess = async ({ activationCodeHash, databasePassword }, client = pool) => {
+    const { rows } = await query(client, `
+        SELECT
+            activation_id,
+            clinic_id,
+            database_role
+        FROM security_admin.redeem_clinic_activation(
+            $1::text,
+            $2::text
+        )
+    `, [
+        activationCodeHash,
+        databasePassword
+    ])
+
+    return rows[0] ?? null
+}
+
+export default { findAll, findById, create, update, getClinicStimulusSets, getClinicStimulusSetById, updateClinicStimulusSet, createDatabaseAccess, redeemDatabaseAccess }

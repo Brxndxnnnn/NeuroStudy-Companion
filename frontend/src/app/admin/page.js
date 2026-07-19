@@ -2,6 +2,7 @@
 import { useState, useEffect } from "react";
 import { useRouter } from "next/navigation";
 import TopNav from "@/components/TopNav";
+import { createUser, deleteUser, getUsers, updateUser, getClinics } from "@/utils/api";
 import {
   PageContainer,
   PageHeading,
@@ -35,18 +36,11 @@ export default function AdminDashboard() {
   const [clinicId, setClinicId] = useState("");
   const [roleId, setRoleId] = useState("");
 
-  const API_BASE_URL = "http://139.59.126.77/api";
-
-  const getAuthHeaders = () => {
-    const token = localStorage.getItem("token");
-    return { "Content-Type": "application/json", Authorization: `Bearer ${token}` };
-  };
-
   const fetchUsers = async () => {
     setLoading(true);
     setErrorMessage("");
     try {
-      const response = await fetch(`${API_BASE_URL}/users`, { method: "GET", headers: getAuthHeaders() });
+      const response = await getUsers();
       if (response.ok) {
         const data = await response.json();
         setUsers(Array.isArray(data) ? data : data.users || []);
@@ -61,6 +55,7 @@ export default function AdminDashboard() {
       setLoading(false);
     }
   };
+  
 
   useEffect(() => {
     const token = localStorage.getItem("token");
@@ -103,7 +98,7 @@ export default function AdminDashboard() {
         if (clinicId.trim()) payload.clinic_id = clinicId.trim();
         if (roleId.trim()) payload.role_id = roleId.trim();
 
-        const response = await fetch(`${API_BASE_URL}/users`, { method: "POST", headers: getAuthHeaders(), body: JSON.stringify(payload) });
+        const response = await createUser(payload);
         if (response.ok) {
           setSuccessMessage("User account provisioned successfully.");
           setIsModalOpen(false);
@@ -117,7 +112,7 @@ export default function AdminDashboard() {
         if (displayName.trim()) payload.display_name = displayName.trim();
         if (clinicId.trim()) payload.clinic_id = clinicId.trim();
 
-        const response = await fetch(`${API_BASE_URL}/users/${selectedUserId}`, { method: "PATCH", headers: getAuthHeaders(), body: JSON.stringify(payload) });
+        const response = await updateUser(selectedUserId, payload);
         if (response.ok) {
           setSuccessMessage("User details updated successfully.");
           setIsModalOpen(false);
@@ -137,7 +132,7 @@ export default function AdminDashboard() {
     setErrorMessage("");
     setSuccessMessage("");
     try {
-      const response = await fetch(`${API_BASE_URL}/users/${userId}`, { method: "DELETE", headers: getAuthHeaders() });
+      const response = await deleteUser(userId);
       if (response.ok) {
         setSuccessMessage("Account access revoked.");
         fetchUsers();
@@ -305,7 +300,7 @@ function UserTable({ users, onEdit, onDelete, readOnly = false }) {
                   <Pill tone="neutral">Global admin</Pill>
                 )}
               </td>
-              {!readOnly && (
+              {!readOnly && ['technician'].includes(user.role) &&  (
                 <td className="px-6 py-4 text-right">
                   <div className="flex justify-end gap-2">
                     <Button variant="subtle" size="sm" onClick={() => onEdit(user)}>Edit</Button>
