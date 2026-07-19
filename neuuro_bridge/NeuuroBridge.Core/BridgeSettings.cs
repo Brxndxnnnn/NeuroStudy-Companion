@@ -11,8 +11,9 @@ namespace NeuuroBridge
     /// </summary>
     public static class BridgeSettings
     {
-        // TODO(domain): replace with https://<domain> once infra exists.
-        private const string DefaultActivationUrl = "https://REPLACE-WITH-DOMAIN/bridge/activate";
+        // Real endpoint per Eugene (19 Jul): domain is clinics.axonview.sg.
+        private const string DefaultActivationUrl = "https://clinics.axonview.sg/api/clinics/activate";
+        // TODO(feed): confirm the feed path with Eugene, expected under the same domain.
         private const string DefaultUpdateFeedUrl = "https://REPLACE-WITH-DOMAIN/bridge-updates/";
 
         /// <summary>Full URL of the backend activation endpoint (the bridge's only backend call).</summary>

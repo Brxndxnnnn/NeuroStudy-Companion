@@ -77,21 +77,30 @@ Flow, on every launch: config store present → normal startup. Absent → activ
 dialog (small WPF window):
 
 1. User enters the activation code (issued by us/admin per clinic).
-2. Bridge → `POST https://<domain>/bridge/activate` — the **only** backend call the
-   bridge ever makes:
+2. Bridge → `POST https://clinics.axonview.sg/api/clinics/activate` — the **only**
+   backend call the bridge ever makes (shape = Eugene's endpoint, 19 Jul, plus our
+   audit extras which the server may ignore):
    ```json
-   { "code": "XXXX-XXXX-XXXX", "machine_name": "CLINIC-PC-01", "bridge_version": "1.2.0" }
+   { "activation_code": "2CFE-9BC1-A844-A5B3",
+     "machine_name": "CLINIC-PC-01", "bridge_version": "1.0.0" }
    ```
 3. Backend validates (exists, not used, not expired, not revoked), marks it used,
-   responds:
+   responds (⚠ = missing from Eugene's current shape, requested 19 Jul):
    ```json
-   { "clinic_id": 3, "clinic_name": "…",
-     "postgres": { "host": "…", "port": 5432, "database": "…",
-                    "user": "bridge_clinic3", "password": "…", "sslmode": "require" },
-     "license_key": "…" }
+   { "status": "success",
+     "data": {
+       "activation_id": "b3d11201-…",
+       "clinic_id": "a0000000-…",
+       "clinic_name": "…",                      ⚠ nice-to-have (shown in the dialog)
+       "database": { "host": "clinics.axonview.sg", "port": 5432, "name": "neurostudy",
+                     "username": "clinic_…", "password": "…", "ssl_mode": "VerifyFull" },
+       "license_key": "…"                       ⚠ REQUIRED — SenzeBand auth needs it
+     } }
    ```
-   Errors: 404 unknown / 409 already used / 410 expired-or-revoked — dialog shows a
-   plain-language message and lets the user retry.
+   Errors: 404 unknown / 409 already used / 410 expired-or-revoked (to be confirmed
+   with Eugene) — dialog shows a plain-language message and lets the user retry.
+   ⚠ The endpoint must be callable **without** a Bearer token: the code IS the
+   credential (the bridge has nothing else pre-activation). Rate-limit it instead.
 4. Bridge writes the DPAPI-protected config store, then continues to normal startup.
 
 **Backend side (Eugene owns):** endpoint + `activation_codes` table

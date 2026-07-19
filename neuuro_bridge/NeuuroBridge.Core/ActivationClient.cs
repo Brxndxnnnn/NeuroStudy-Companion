@@ -11,15 +11,16 @@ namespace NeuuroBridge
     /// <summary>Everything the backend returns on a successful activation.</summary>
     public sealed class ActivationResult
     {
+        public string ActivationId;
         public string ClinicId;
-        public string ClinicName;
+        public string ClinicName;       // not in Eugene's shape yet — requested, tolerated absent
         public string PostgresHost;
         public string PostgresPort;
         public string PostgresDb;
         public string PostgresUser;
         public string PostgresPassword;
-        public string PostgresSslMode;
-        public string LicenseKey;
+        public string PostgresSslMode;  // Npgsql enum name, e.g. VerifyFull
+        public string LicenseKey;       // not in Eugene's shape yet — REQUIRED for SenzeBand auth, requested
     }
 
     public sealed class ActivationException : Exception
@@ -37,10 +38,12 @@ namespace NeuuroBridge
     {
         public static async Task<ActivationResult> ActivateAsync(string code)
         {
+            // Shape per Eugene's endpoint (POST /api/clinics/activate, 19 Jul screenshot).
+            // machine_name/bridge_version are extras for server-side audit; harmless if ignored.
             var js = new JavaScriptSerializer();
             var payload = js.Serialize(new Dictionary<string, object>
             {
-                ["code"] = code?.Trim(),
+                ["activation_code"] = code?.Trim(),
                 ["machine_name"] = Environment.MachineName,
                 ["bridge_version"] = typeof(ActivationClient).Assembly.GetName().Version?.ToString(3),
             });
@@ -76,19 +79,27 @@ namespace NeuuroBridge
 
             try
             {
+                // Envelope: { "status": "success", "data": { activation_id, clinic_id,
+                //   database: { host, port, name, username, password, ssl_mode }, ... } }
                 var root = (Dictionary<string, object>)js.DeserializeObject(body);
-                var pg = (Dictionary<string, object>)root["postgres"];
+                var data = (Dictionary<string, object>)root["data"];
+                var db = (Dictionary<string, object>)data["database"];
+                string Opt(Dictionary<string, object> d, string k) =>
+                    d.TryGetValue(k, out var v) && v != null ? Convert.ToString(v) : null;
                 return new ActivationResult
                 {
-                    ClinicId = Convert.ToString(root["clinic_id"]),
-                    ClinicName = root.TryGetValue("clinic_name", out var cn) ? Convert.ToString(cn) : null,
-                    PostgresHost = Convert.ToString(pg["host"]),
-                    PostgresPort = Convert.ToString(pg["port"]),
-                    PostgresDb = Convert.ToString(pg["database"]),
-                    PostgresUser = Convert.ToString(pg["user"]),
-                    PostgresPassword = Convert.ToString(pg["password"]),
-                    PostgresSslMode = pg.TryGetValue("sslmode", out var sm) ? Convert.ToString(sm) : "require",
-                    LicenseKey = Convert.ToString(root["license_key"]),
+                    ActivationId = Opt(data, "activation_id"),
+                    ClinicId = Convert.ToString(data["clinic_id"]),
+                    ClinicName = Opt(data, "clinic_name"),
+                    PostgresHost = Convert.ToString(db["host"]),
+                    PostgresPort = Convert.ToString(db["port"]),
+                    PostgresDb = Convert.ToString(db["name"]),
+                    PostgresUser = Convert.ToString(db["username"]),
+                    PostgresPassword = Convert.ToString(db["password"]),
+                    PostgresSslMode = Opt(db, "ssl_mode") ?? "Require",
+                    // license_key still missing from Eugene's shape; tolerate absence so the
+                    // client doesn't break, but activation is incomplete without it.
+                    LicenseKey = Opt(data, "license_key") ?? Opt(root, "license_key"),
                 };
             }
             catch (Exception ex)
@@ -102,6 +113,7 @@ namespace NeuuroBridge
         {
             ConfigStore.Write(new Dictionary<string, string>
             {
+                ["ACTIVATION_ID"] = r.ActivationId,
                 ["CLINIC_ID"] = r.ClinicId,
                 ["CLINIC_NAME"] = r.ClinicName,
                 ["POSTGRES_HOST"] = r.PostgresHost,

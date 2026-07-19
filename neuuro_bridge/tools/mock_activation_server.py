@@ -37,29 +37,36 @@ class Handler(BaseHTTPRequestHandler):
         if self.path != "/bridge/activate":
             return self._send(404, {"detail": "not found"})
         body = json.loads(self.rfile.read(int(self.headers.get("Content-Length", 0)) or 0) or b"{}")
-        code = (body.get("code") or "").strip().upper()
+        code = (body.get("activation_code") or "").strip().upper()
         print(f"activation attempt: code={code!r} machine={body.get('machine_name')!r} "
               f"bridge_version={body.get('bridge_version')!r}")
 
         if code == "USED-CODE":
-            return self._send(409, {"detail": "code already used"})
+            return self._send(409, {"status": "error", "detail": "code already used"})
         if code == "EXPIRED-CODE":
-            return self._send(410, {"detail": "code expired or revoked"})
+            return self._send(410, {"status": "error", "detail": "code expired or revoked"})
         if code != "TEST-CODE-0001":
-            return self._send(404, {"detail": "unknown code"})
+            return self._send(404, {"status": "error", "detail": "unknown code"})
 
+        # Envelope mirrors Eugene's endpoint (19 Jul Swagger screenshot). clinic_name and
+        # license_key are OUR requested additions — keep them here so the client's handling
+        # is exercised before the real endpoint gains them.
         return self._send(200, {
-            "clinic_id": 1,
-            "clinic_name": "Dev Clinic (mock)",
-            "postgres": {
-                "host": "localhost",
-                "port": 5433,
-                "database": "neurostudy",
-                "user": "neurostudy_user",
-                "password": "neurostudy_pass",
-                "sslmode": "disable",  # dev compose Postgres has no TLS
+            "status": "success",
+            "data": {
+                "activation_id": "b3d11201-6420-4ccb-a839-mock00000000",
+                "clinic_id": "a0000000-0000-0000-0000-000000000001",
+                "clinic_name": "Dev Clinic (mock)",
+                "database": {
+                    "host": "localhost",
+                    "port": 5433,
+                    "name": "neurostudy",
+                    "username": "neurostudy_user",
+                    "password": "neurostudy_pass",
+                    "ssl_mode": "Disable",  # dev compose Postgres has no TLS; prod sends VerifyFull
+                },
+                "license_key": _dev_license_key(),
             },
-            "license_key": _dev_license_key(),
         })
 
     def _send(self, status: int, payload: dict):
