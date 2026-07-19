@@ -3,7 +3,7 @@
 #   powershell -ExecutionPolicy Bypass -File neuuro_bridge\packaging\publish.ps1
 #
 # Uploads packaging\releases\* to /var/bridge-updates on the droplet (outside the
-# repo tree — deploys never touch it), which nginx serves as
+# repo tree - deploys never touch it), which nginx serves as
 # https://clinics.axonview.sg/bridge-updates/ (see nginx/nginx.conf + compose.prod.yaml).
 # Requires an authorised SSH key for the droplet (same access as deploying).
 #
@@ -22,7 +22,7 @@ $ErrorActionPreference = "Stop"
 
 if (-not $ReleasesDir) { $ReleasesDir = Join-Path $PSScriptRoot "releases" }
 if (-not (Test-Path (Join-Path $ReleasesDir "releases.win.json"))) {
-    throw "No release set in $ReleasesDir (releases.win.json missing) — run pack.ps1 first"
+    throw "No release set in $ReleasesDir (releases.win.json missing) - run pack.ps1 first"
 }
 
 Write-Host "== Publishing $ReleasesDir -> ${Target}:$RemoteDir =="
