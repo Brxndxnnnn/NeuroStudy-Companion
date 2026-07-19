@@ -423,7 +423,7 @@ BEGIN
 
     WHERE pairing_code = UPPER(TRIM(p_pairing_code))
       AND sync_status = 'unclaimed'
-      AND clinic_id IS NULL
+      AND (clinic_id IS NULL OR clinic_id = p_clinic_id)
 
     RETURNING jsonb_build_object(
         'session_id', session_id,

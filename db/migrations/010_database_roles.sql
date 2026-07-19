@@ -399,3 +399,80 @@ TO clinic_provisioner;
 
 GRANT SELECT,INSERT,UPDATE ON TABLE public.clinic_activation_codes
 TO clinic_provisioner;
+
+-- 19/07/2026: Ensure RLS does not block the bridge_writer and it's inherited clinic roles 
+-- from selecting and updating sessions, and selecting events and session_questionnaire_responses. 
+CREATE SCHEMA IF NOT EXISTS security;
+
+REVOKE ALL ON SCHEMA security FROM PUBLIC;
+
+CREATE OR REPLACE FUNCTION security.current_clinic_id()
+RETURNS uuid
+LANGUAGE sql
+STABLE
+SECURITY DEFINER
+SET search_path=pg_catalog,public,pg_temp
+AS $$
+  SELECT cdr.clinic_id
+  FROM public.clinic_database_roles cdr
+  WHERE cdr.database_role=session_user
+$$;
+
+REVOKE ALL
+ON FUNCTION security.current_clinic_id()
+FROM PUBLIC;
+
+GRANT USAGE ON SCHEMA security
+TO bridge_writer;
+
+GRANT EXECUTE
+ON FUNCTION security.current_clinic_id()
+TO bridge_writer;
+
+DROP POLICY IF EXISTS sessions_clinic_select
+ON public.sessions;
+
+CREATE POLICY sessions_clinic_select
+ON public.sessions
+FOR SELECT
+TO bridge_writer
+USING(
+  clinic_id=security.current_clinic_id()
+);
+
+DROP POLICY IF EXISTS events_bridge_select
+ON public.events;
+
+CREATE POLICY events_bridge_select
+ON public.events
+FOR SELECT
+TO bridge_writer
+USING(
+  EXISTS(
+    SELECT 1
+    FROM public.sessions s
+    WHERE s.session_id=events.session_id
+      AND s.clinic_id=security.current_clinic_id()
+  )
+);
+
+DROP POLICY IF EXISTS session_questionnaire_responses_bridge_select
+ON public.session_questionnaire_responses;
+
+CREATE POLICY session_questionnaire_responses_bridge_select
+ON public.session_questionnaire_responses
+FOR SELECT
+TO bridge_writer
+USING(
+  EXISTS(
+    SELECT 1
+    FROM public.sessions s
+    WHERE s.session_id=session_questionnaire_responses.session_id
+      AND s.clinic_id=security.current_clinic_id()
+  )
+);
+
+CREATE POLICY sessions_bridge_update ON public.sessions
+  FOR UPDATE TO bridge_writer
+  USING (clinic_id = security.current_clinic_id())
+  WITH CHECK (clinic_id = security.current_clinic_id());
