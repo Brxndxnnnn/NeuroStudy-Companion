@@ -283,25 +283,48 @@ namespace NeuuroBridge
                     // have no INSERT on clinics/roles/clients/users (by design), so seeding is
                     // skipped there — migration 011 pre-seeds the same rows server-side. Dev
                     // users keep the self-seeding behaviour for standalone runs.
-                    try
+                    if (!ConfigStore.Exists)
                     {
-                        SeedPlaceholders();
-                    }
-                    catch (PostgresException ex) when (ex.SqlState == "42501")
-                    {
-                        _log("Placeholder seeding skipped (no privilege — expecting server-side seed, migration 011).");
+                        try
+                        {
+                            SeedPlaceholders();
+                        }
+                        catch (PostgresException ex) when (ex.SqlState == "42501")
+                        {
+                            _log("Placeholder seeding skipped (no privilege — expecting server-side seed, migration 011).");
+                        }
                     }
                     using (var tx = _conn.BeginTransaction())
                     {
-                        Exec(tx,
-                            "INSERT INTO sessions (session_id, client_id, conducted_by, device_id, pairing_code, sample_rate, sync_status) " +
-                            "VALUES (@sid, @cid, @uid, @dev, @pair, @rate, 'unclaimed') ON CONFLICT (session_id) DO NOTHING",
-                            ("sid", NpgsqlDbType.Uuid, sessionId),
-                            ("cid", NpgsqlDbType.Uuid, Guid.Parse(PlaceholderClientId)),
-                            ("uid", NpgsqlDbType.Uuid, Guid.Parse(PlaceholderUserId)),
-                            ("dev", NpgsqlDbType.Text, (object)deviceMac ?? DBNull.Value),
-                            ("pair", NpgsqlDbType.Text, (object)pairingCode ?? DBNull.Value),
-                            ("rate", NpgsqlDbType.Integer, sampleRate));
+                        if (ConfigStore.Exists)
+                        {
+                            // Activated clinic machine: sessions has FORCED row-level security, so a
+                            // direct INSERT violates the tenant policy (the bridge never carries the
+                            // backend's app.current_clinic_id setting). The SECURITY DEFINER function
+                            // maps our DB role → clinic_id via clinic_database_roles and inserts with
+                            // it (idempotent: ON CONFLICT DO NOTHING inside).
+                            Exec(tx,
+                                "SELECT create_clinic_session(@sid, @cid, @uid, @dev, @pair, @rate)",
+                                ("sid", NpgsqlDbType.Uuid, sessionId),
+                                ("cid", NpgsqlDbType.Uuid, Guid.Parse(PlaceholderClientId)),
+                                ("uid", NpgsqlDbType.Uuid, Guid.Parse(PlaceholderUserId)),
+                                ("dev", NpgsqlDbType.Text, (object)deviceMac ?? DBNull.Value),
+                                ("pair", NpgsqlDbType.Text, (object)pairingCode ?? DBNull.Value),
+                                ("rate", NpgsqlDbType.Integer, sampleRate));
+                        }
+                        else
+                        {
+                            // Dev box (no activation store): direct INSERT as always.
+                            Exec(tx,
+                                "INSERT INTO sessions (session_id, client_id, conducted_by, device_id, pairing_code, sample_rate, sync_status) " +
+                                "VALUES (@sid, @cid, @uid, @dev, @pair, @rate, 'unclaimed') ON CONFLICT (session_id) DO NOTHING",
+                                ("sid", NpgsqlDbType.Uuid, sessionId),
+                                ("cid", NpgsqlDbType.Uuid, Guid.Parse(PlaceholderClientId)),
+                                ("uid", NpgsqlDbType.Uuid, Guid.Parse(PlaceholderUserId)),
+                                ("dev", NpgsqlDbType.Text, (object)deviceMac ?? DBNull.Value),
+                                ("pair", NpgsqlDbType.Text, (object)pairingCode ?? DBNull.Value),
+                                ("rate", NpgsqlDbType.Integer, sampleRate));
+                        }
                         tx.Commit();
                     }
                     _log($"Session row created (unclaimed): {sessionId}");
@@ -459,8 +482,21 @@ namespace NeuuroBridge
                     "WHERE session_id = @sid AND bridge_recording_at IS NULL", _conn))
                 {
                     cmd.Parameters.AddWithValue("sid", NpgsqlDbType.Uuid, _sessionId);
-                    cmd.ExecuteNonQuery();   // 0 rows = already stamped earlier; still "confirmed"
-                    return true;
+                    if (cmd.ExecuteNonQuery() > 0) return true;
+                }
+                // 0 rows is ambiguous: normally "already stamped", but under row-level
+                // security a missing UPDATE policy ALSO yields 0 rows with no error.
+                // Confirm via SELECT (which has its own policy) before reporting success.
+                using (var cmd = new NpgsqlCommand(
+                    "SELECT bridge_recording_at IS NOT NULL FROM sessions WHERE session_id = @sid", _conn))
+                {
+                    cmd.Parameters.AddWithValue("sid", NpgsqlDbType.Uuid, _sessionId);
+                    var stamped = cmd.ExecuteScalar();
+                    if (stamped is bool b && b) return true;
+                    _lastError = "bridge_recording_at UPDATE affected 0 rows and the column is still NULL — " +
+                                 "likely a missing row-level-security UPDATE policy for the bridge DB role.";
+                    _log(_lastError);
+                    return false;
                 }
             }
             catch (Exception ex) { _lastError = ex.Message; return false; }
@@ -838,7 +874,22 @@ namespace NeuuroBridge
                 {
                     cmd.Parameters.AddWithValue("sid", NpgsqlDbType.Uuid, _sessionId);
                     int rows = cmd.ExecuteNonQuery();
-                    _log(rows > 0 ? "Session marked 'completed'." : "Session already 'completed' (no change).");
+                    if (rows > 0) { _log("Session marked 'completed'."); }
+                    else
+                    {
+                        // Disambiguate "already completed" from an RLS-filtered no-op (see
+                        // MarkRecordingStarted): verify via SELECT before trusting the 0.
+                        using (var chk = new NpgsqlCommand(
+                            "SELECT sync_status FROM sessions WHERE session_id = @sid", _conn))
+                        {
+                            chk.Parameters.AddWithValue("sid", NpgsqlDbType.Uuid, _sessionId);
+                            var status = chk.ExecuteScalar() as string;
+                            _log(status == "completed"
+                                ? "Session already 'completed' (no change)."
+                                : $"WARNING: completed-flip affected 0 rows and sync_status is '{status ?? "unknown"}' — " +
+                                  "likely a missing row-level-security UPDATE policy for the bridge DB role.");
+                        }
+                    }
                 }
             }
             catch (Exception ex)
