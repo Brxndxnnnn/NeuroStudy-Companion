@@ -1,196 +1,205 @@
-# NeuroStudy-Companion
-SE_2: NeuroStudy Companion(EEG Focus Meter, Session Tracking and Insights)
+# NeuroStudy Companion
 
-## Backend
+EEG study/therapy companion for QIROM Consulting: a clinician runs an image-based
+session in the web app while the client wears a **Neeuro SenzeBand** headset; a
+Windows bridge streams the EEG straight into the database in real time, and the
+platform produces session insights (focus/relaxation metrics, frequency-band
+analysis, and an ML model that learns emotional-response predictions from
+OASIS-labelled images).
 
-This repository includes a Dockerized PostgreSQL database and a Node.js backend so the API can be run without installing PostgreSQL or Node.js locally. This is the recommended path for anyone who just wants to use the backend service from another client, such as the frontend.
+**Production:** https://clinics.axonview.sg (droplet `139.59.126.77`)
 
-## How Docker Networking Works Here (Read This First)
+---
 
-Understanding this prevents the most common setup mistake.
+## Architecture
 
-When services run **inside Docker**, they communicate using Docker's internal DNS — each service is reachable by its **service name** as the hostname (e.g. `db`, `backend`). The port used is the container's **internal** port.
+```
+ CLINIC MACHINE (Windows)                    DROPLET (Docker Compose)
+┌──────────────────────────┐               ┌────────────────────────────────────────┐
+│  NeuuroBridge (C# WPF)   │               │  nginx ── TLS, routing, update feed    │
+│  SenzeBand ──BLE──▶ app  │               │   ├── /            → frontend (Next.js)│
+│                          │   one-time    │   ├── /api/        → backend (Express) │
+│  activation dialog ──────┼──HTTPS───────▶│   ├── /ml/         → ml_service (FastAPI)
+│                          │  /api/clinics/│   └── /bridge-updates/ → Velopack feed │
+│  EEG + band powers ──────┼──TLS 5432────▶│  db ── TimescaleDB (Postgres 17)       │
+│  (binary COPY, direct)   │               │  certbot ── Let's Encrypt renewals     │
+└──────────────────────────┘               └────────────────────────────────────────┘
+```
 
-When a service runs **outside Docker** (e.g. `npm run dev` on your machine), it cannot use Docker's internal DNS. Instead, it reaches the DB through the **host machine** using `localhost` and the **exposed** port.
+| Component | Tech | Role |
+|---|---|---|
+| `frontend/` | Next.js | Clinician web app: clients, session flow (images/questions), results, admin, ML insights |
+| `backend/` | Node.js / Express | REST API **for the frontend only** (JWT auth, per-request RLS tenant context). Single exception: the public `POST /api/clinics/activate` enrollment endpoint for the bridge |
+| `ml_service/` | Python / FastAPI | Post-session feature workers (elliptic band stats + our own FFT/Welch band powers), ML Phase 1 (EEG → OASIS valence/arousal): weekly training cron, model registry, inference |
+| `neuuro_bridge/` | C# WPF (.NET Framework 4.8, x64) | Windows app at the clinic. Connects the SenzeBand over BLE and writes EEG **directly to the DB** via binary COPY — the backend is never in the data path |
+| `db/` | TimescaleDB | Hypertables `eeg_raw_samples`, `eeg_filtered_samples`, `eeg_readings`, `band_powers`; forced row-level security for clinic tenancy; migrations in `db/migrations/` |
+| `nginx/` + certbot | nginx | TLS termination, service routing, and the static Velopack update feed at `/bridge-updates/` |
 
-This is why two separate environment files exist:
+**Data-flow rules (load-bearing, don't break them):**
 
-| Context | `POSTGRES_HOST` | `POSTGRES_PORT` | Why |
-|---|---|---|---|
-| Inside Docker (`docker compose up backend`) | `db` | `5432` | Docker internal DNS, container's native port |
-| Outside Docker (`npm run dev`) | `localhost` | `5433` | Host machine, exposed port mapping from `compose.yaml` |
+1. **The bridge writes directly to the database.** No backend hop, no polling in the
+   write path. A DB hiccup never blocks streaming — rows queue and flush on a timer.
+2. **The backend serves the frontend only.** The one sanctioned exception is one-time
+   bridge **enrollment** (activation); after that the bridge never talks to it again.
+3. **Session lifecycle:** the bridge creates the session row (`unclaimed`, with a
+   pairing code) when the headset connects → the web claims it by pairing code →
+   recording auto-starts when the web flips `sync_status='recording'` → images and
+   events are recorded by the web → Stop flips the session to `completed`, after which
+   the ML service's feature jobs run. Details: [docs/session-data-flow.md](docs/session-data-flow.md).
 
-The `5433` port only exists on your host machine as the entry point into the DB container. Inside Docker, everything still runs on `5432`.
+---
 
-## Environment Files
+## Installing the bridge at a clinic
 
-Two environment files control which context your backend runs in:
+No config files, no credentials to type — install, enter an activation code, done.
 
-| File | Used by | `POSTGRES_HOST` | `POSTGRES_PORT` |
-|---|---|---|---|
-| `.env.docker` | `docker compose` (via `env_file` in `compose.yaml`) | `db` | `5432` |
-| `.env` | `npm run dev` (local Node.js process) and your other local services eventually | `localhost` | `5433` |
+1. **Requirements:** Windows 10 (1903+)/11 64-bit, Bluetooth LE, internet access.
+2. Download and run
+   [`NeuuroBridge-win-Setup.exe`](https://clinics.axonview.sg/bridge-updates/NeuuroBridge-win-Setup.exe).
+   Windows will show "Windows protected your PC" (the app is not yet code-signed):
+   click **More info → Run anyway**. This happens once.
+3. The app starts and asks for an **activation code** (format `XXXX-XXXX-XXXX-XXXX`,
+   issued per clinic by the administrator). Activation fetches the clinic's database
+   credentials and license key from the server and stores them encrypted (Windows
+   DPAPI) in `%ProgramData%\NeuuroBridge\` — they survive every update.
+4. **Updates are automatic:** on launch the app checks the update feed and asks
+   before installing. Activation is never repeated.
 
-***
-### 1. Copy `.env.example` to create both files if missing:
+Codes are single-use; to re-activate a machine (credential rotation, replacement PC),
+delete `%ProgramData%\NeuuroBridge\bridge.env`, relaunch, and enter a fresh code.
+Daily-use and troubleshooting notes for clinic staff:
+[neuuro_bridge/packaging/CLINIC-README.txt](neuuro_bridge/packaging/CLINIC-README.txt).
+
+---
+
+## Development setup
+
+Prerequisites: Docker Desktop; Node.js (frontend/backend dev loops); Python 3.11+
+(ml_service dev); .NET SDK (builds the net48 bridge solution).
+
+### 1. Environment files
+
+Copy the root `.env.example` into each service, twice — `.env` for processes running
+**on your machine**, `.env.docker` for the **containerized** context:
 
 ```bash
-cp .env.example backend/.env
-cp .env.example backend/.env.docker
+cp .env.example backend/.env       # POSTGRES_HOST=localhost, POSTGRES_PORT=5433
+cp .env.example backend/.env.docker  # POSTGRES_HOST=db,        POSTGRES_PORT=5432
 cp .env.example db/.env.docker
-```
-Do the same to your respective folders if needed, eg:
-```bash
-cp .env.example frontend/.env
-cp .env.example frontend/.env.docker
-cp .env.example ml_service/.env
-cp .env.example ml_service/.env.docker
-cp .env.example neuuro_bridge/.env
-cp .env.example neuuro_bridge/.env.docker
-```
-| File | Purpose |
-|---|---|
-| `backend/.env` | Local backend via `npm run dev` |
-| `backend/.env.docker` | Backend running inside Docker |
-| `db/.env.docker` | Database container credentials |
-
-All three files are gitignored. Never commit them.
-
-### 2. Edit `.env.docker` for Dockerized backend — use Docker internal addresses:
-
-```env
-NODE_PORT=3000
-POSTGRES_DB=neurostudy
-POSTGRES_USER=your_own_username
-POSTGRES_PASSWORD=your_own_password
-POSTGRES_HOST=db
-POSTGRES_PORT=5432
+# same pattern for frontend/, ml_service/, neuuro_bridge/ as needed
 ```
 
-### 3. Edit `.env` for local development.
+Why two: inside Docker, services resolve each other by service name (`db:5432`);
+from your host you reach the DB through the published port (`localhost:5433` — 5433
+so it can't collide with a locally installed Postgres). All env files are gitignored.
 
-```env
-NODE_PORT=5000
-POSTGRES_DB=neurostudy
-POSTGRES_USER=your_own_username
-POSTGRES_PASSWORD=your_own_password
-POSTGRES_HOST=localhost
-POSTGRES_PORT=5433
-```
+For the **bridge** dev `.env` (`neuuro_bridge/.env`), see
+[neuuro_bridge/NeuuroBridge/.env.example](neuuro_bridge/NeuuroBridge/.env.example):
+it needs `NEUURO_LICENSE_KEY` plus the `POSTGRES_*` values, and
+`ACTIVATION_OPTIONAL=true` so dev runs skip the first-run activation dialog.
 
-Notes:
-
-- `docker compose` reads the file referenced by `env_file` in [compose.yaml](compose.yaml) — by default this repository uses `./.env.docker` for the `backend` service.
-- Do not commit secrets (like real production `JWT_SECRET`) to the repository.
-- To generate a strong `JWT_SECRET` you can run (Node):
+### 2. Run the stack
 
 ```bash
-node -e "console.log(require('crypto').randomBytes(64).toString('hex'))"
+docker compose up --build          # db + backend + frontend + ml + nginx
 ```
 
-or in PowerShell:
+Everything is fronted by nginx at **http://localhost:8090** (`/` frontend,
+`/api/` backend + `/api-docs` Swagger, `/ml/` ml_service). Only the DB is reachable
+directly (`localhost:5433`, psql: `psql -h localhost -p 5433 -U neurostudy_user -d neurostudy`).
 
-```powershell
-[Convert]::ToBase64String((1..64 | ForEach-Object { Get-Random -Maximum 256 }))
-```
-
-***
-
-## Option A — Fully Dockerized
-
-Runs both the database and backend inside Docker. No Node.js or PostgreSQL installation required.
-
-```bash
-docker compose up --build db backend
-```
-
-This starts:
-
-- `db` (TimescaleDB) — accessible at `localhost:5433` from your host machine
-- `backend` (Node.js/Express) — accessible at `localhost:3000`
-
-The backend waits for the database health check before starting. The schema is automatically applied from `db/migrations/001_init.sql` on first start.
-
-**Verify the backend is running:**
-
-```bash
-curl http://localhost:3000/api/health
-```
-
-Expected response:
-
-```json
-{
-  "status": "ok"
-}
-```
-
-If you are connecting a frontend or another service, point it at `http://localhost:3000`.
-
-***
-
-## Option B — Dockerized DB, Local Backend
-
-Runs only the database in Docker. The Node.js backend runs directly on your machine. Use this for active backend development with faster iteration.
-
-**Step 1 — Start only the database:**
+For faster iteration run the DB in Docker and the service you're working on locally:
 
 ```bash
 docker compose up db
+cd backend && npm install && npm run dev      # or: cd frontend && npm run dev
 ```
 
-**Step 2 — Run the backend locally:**
+### 3. Bridge development (Windows)
 
-```bash
-cd backend
-npm install
-npm run dev
+```powershell
+dotnet build neuuro_bridge\NeuuroBridge.sln -c Release   # Core + console + WPF, x64
 ```
 
-**Step 3 — Run the frontend locally:**
-```bash
-cd frontend
-npm install
-npm run dev
-```
+Run `NeuuroBridge.Wpf` from `bin\` — with `ACTIVATION_OPTIONAL=true` in the repo
+`.env` it uses your dev DB directly, exactly as before packaging existed. Real
+SenzeBand hardware (BLE + online license auth) is required for actual streaming.
+To exercise the activation flow without the real backend:
+`python neuuro_bridge/tools/mock_activation_server.py` and set
+`ACTIVATION_URL=http://localhost:8765/api/clinics/activate` (valid code
+`TEST-C0DE-0001-MOCK`).
 
-The backend reads `.env` (not `.env.docker`) when run this way. Make sure `.env` has `POSTGRES_HOST=localhost` and `POSTGRES_PORT=5433`.
-
-
-
-**Why `localhost:5433` and not `localhost:5432`?**
-
-Your machine may have a local PostgreSQL installation already running on port `5432`. The Docker DB container is exposed on `5433` to avoid a collision. If you accidentally connect to `5432`, you will hit your local PostgreSQL instance (which has no `neurostudy` database) and see a `database does not exist` error.
-
-## If You Are Building Another Service (ML, C#, etc.)
-
-The same networking rules apply to any service that needs to talk to the database or backend:
-
-- **Inside Docker** → use `db:5432` for the database, `backend:3000` for the backend API
-- **Outside Docker** → use `localhost:5433` for the database, `localhost:3000` for the backend API
-
-When your service is ready to be added to Docker Compose, add it to `compose.yaml` and point it at `db:5432`. The commented-out `neuuro_bridge` section in `compose.yaml` shows the expected structure.
-
-### Useful Commands
-
-| Action | Command |
+| Useful commands | |
 |---|---|
-| Start DB and backend | `docker compose up --build db backend` |
-| Start DB only | `docker compose up db` |
 | Stop all services | `docker compose down` |
-| Stop and wipe DB volume (full reset) | `docker compose down -v` |
-| View backend logs | `docker compose logs -f backend` |
-| View DB logs | `docker compose logs -f db` |
-| Connect to DB via psql | `psql -h localhost -p 5433 -U neurostudy_user -d neurostudy` |
+| Full DB reset (wipes volume) | `docker compose down -v` |
+| Tail a service log | `docker compose logs -f backend` |
 
-### Optional local development
+---
 
-If you do have Node.js installed and want to run the backend outside Docker for faster iteration:
+## Releasing a bridge update
 
-```bash
-cd backend
-npm install
-npm run dev
+One-time: `dotnet tool install -g vpk`. Then, with the fix merged to `main`:
+
+```powershell
+# 1. bump <Version> in neuuro_bridge\NeuuroBridge.Wpf\NeuuroBridge.Wpf.csproj
+powershell -ExecutionPolicy Bypass -File neuuro_bridge\packaging\pack.ps1     # build + vpk pack
+powershell -ExecutionPolicy Bypass -File neuuro_bridge\packaging\publish.ps1  # scp to the droplet feed
 ```
 
-For local development, keep [backend/.env](backend/.env) pointed at the Dockerized Postgres instance by using the equivalent `POSTGRES_*` variables, or update those `POSTGRES_*` values to match your own Postgres setup.
+Installed bridges offer the update on next launch (delta downloads, config survives).
+Roll a bad release **forward** (publish a higher version), never delete from the feed.
+Packing against a fresh clone? Pull the current release set first so deltas build:
+`vpk download http --url https://clinics.axonview.sg/bridge-updates/ -o neuuro_bridge\packaging\releases`.
+A no-server local test of the full install → activate → update loop:
+[neuuro_bridge/packaging/LOCAL-TEST.md](neuuro_bridge/packaging/LOCAL-TEST.md).
+
+---
+
+## Deploying the web stack
+
+Deploys are a `git reset --hard` on the droplet plus a compose up — see
+[docs/deploy.md](docs/deploy.md) for the full procedure and its rules (never edit
+tracked files on the droplet; `.env.docker` secrets and `/var/bridge-updates` live
+outside git and survive deploys).
+
+```bash
+ssh root@139.59.126.77
+cd /opt/NeuroStudy-Companion
+git fetch origin && git reset --hard origin/main
+docker compose -f compose.yaml -f compose.prod.yaml up -d
+```
+
+DB migrations (`db/migrations/*.sql`) are applied manually — numbered, in order.
+
+---
+
+## Security model (summary)
+
+- **Multi-tenancy:** forced Postgres row-level security on tenant tables; the backend
+  sets `app.current_clinic_id` / `app.is_admin` per request from the JWT; clinic DB
+  roles are constrained by policy to their own clinic's rows.
+- **Bridge DB access:** each clinic gets its own login role inheriting `bridge_writer`
+  — INSERT on the four streaming tables, INSERT/SELECT on `sessions`, column-level
+  UPDATE on `sessions(bridge_recording_at, sync_status)`, and nothing else. Sessions
+  are created via the `create_clinic_session()` SECURITY DEFINER function, which
+  stamps the role's clinic. Connections use TLS with full certificate verification.
+- **Enrollment:** activation codes are single-use, hashed + peppered server-side, and
+  exchanged over HTTPS for per-clinic credentials, stored DPAPI-encrypted on the
+  clinic machine. The endpoint is public by necessity (the code *is* the credential)
+  and rate-limitable.
+- **Installer:** currently unsigned (SmartScreen warning at install); an Authenticode
+  cert is a planned, purely additive step.
+
+---
+
+## Further documentation
+
+| Doc | What it covers |
+|---|---|
+| [docs/session-data-flow.md](docs/session-data-flow.md) | Session lifecycle, events timeline, clock sync, bridge/web ownership contract |
+| [docs/bridge-packaging-plan.md](docs/bridge-packaging-plan.md) | Installer/auto-update/activation design and its decision history |
+| [docs/deploy.md](docs/deploy.md) | Droplet deployment procedure and rules |
+| [docs/feature-jobs-and-image-sets.md](docs/feature-jobs-and-image-sets.md) | Post-session feature jobs, image sets |
+| [docs/ml-phase1-plan.md](docs/ml-phase1-plan.md) | ML Phase 1: training, promotion gating, inference, insights |
+| [docs/frontend-db-contract.md](docs/frontend-db-contract.md) | What the frontend reads/writes vs what the bridge owns |
