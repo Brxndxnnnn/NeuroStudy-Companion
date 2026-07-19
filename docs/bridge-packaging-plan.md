@@ -18,7 +18,7 @@ it **auto-update**: on launch, if a newer version exists, prompt the user to upd
 | Tooling | **Velopack** | Open-source (MIT), free incl. auto-update + delta updates. Successor to Squirrel.Windows, same author. Supports .NET Framework 4.8. Does installer **and** update in one tool. |
 | Update feed host | **Static HTTPS path on droplet nginx** | e.g. `https://<domain>/bridge-updates/`. One nginx `location` block; rides along with the SSL/domain work. |
 | Code signing | **Unsigned for now** | Drop-in later: Velopack signs installer + update packages natively once we have an Authenticode cert. May change within days. |
-| Provisioning (19 Jul) | **First-run activation code** | No manual `.env` at clinics. First run → bridge shows an activation dialog → `POST /bridge/activate` → backend validates the code and returns clinic identity + DB creds + license key → bridge persists them locally. **Eugene builds the backend side** (endpoint + tables + code issuance). Industry-standard enrollment pattern; supersedes "installer seeds a template `.env`". |
+| Provisioning (19 Jul) | **First-run activation code** | No manual `.env` at clinics. First run → bridge shows an activation dialog → `POST /api/activate` → backend validates the code and returns clinic identity + DB creds + license key → bridge persists them locally. **Eugene builds the backend side** (endpoint + tables + code issuance). Industry-standard enrollment pattern; supersedes "installer seeds a template `.env`". |
 | Secret storage (19 Jul) | **DPAPI, machine scope** | Secret values (DB password, license key) stored DPAPI-encrypted (`ProtectedData`, `DataProtectionScope.LocalMachine`) in the stable config, not plaintext. |
 
 **Architecture rule, restated:** the bridge never touches the backend during session
@@ -76,31 +76,34 @@ edits a file at the clinic):
 Flow, on every launch: config store present → normal startup. Absent → activation
 dialog (small WPF window):
 
-1. User enters the activation code (issued by us/admin per clinic).
-2. Bridge → `POST https://clinics.axonview.sg/api/clinics/activate` — the **only**
-   backend call the bridge ever makes (shape = Eugene's endpoint, 19 Jul, plus our
-   audit extras which the server may ignore):
+1. User enters the activation code (issued per clinic; format `XXXX-XXXX-XXXX-XXXX`,
+   backend regex `^[A-Z0-9]{4}(-[A-Z0-9]{4}){3}$`, server upper-cases).
+2. Bridge → `POST https://clinics.axonview.sg/api/activate` — the **only** backend
+   call the bridge ever makes. **NOTE the path:** `/api/activate` is the public
+   pre-auth route (mounted above the authenticate middleware, PR #118); anything
+   under `/api/clinics/...` requires a JWT and 401s. Request (audit extras ignored
+   by the server are fine):
    ```json
    { "activation_code": "2CFE-9BC1-A844-A5B3",
      "machine_name": "CLINIC-PC-01", "bridge_version": "1.0.0" }
    ```
-3. Backend validates (exists, not used, not expired, not revoked), marks it used,
-   responds (⚠ = missing from Eugene's current shape, requested 19 Jul):
+3. Backend validates, marks the code used, responds (CONFIRMED shape, live since
+   PR #118 — incl. clinic_name + license_key added 19 Jul):
    ```json
    { "status": "success",
      "data": {
        "activation_id": "b3d11201-…",
        "clinic_id": "a0000000-…",
-       "clinic_name": "…",                      ⚠ nice-to-have (shown in the dialog)
+       "clinic_name": "…",
        "database": { "host": "clinics.axonview.sg", "port": 5432, "name": "neurostudy",
                      "username": "clinic_…", "password": "…", "ssl_mode": "VerifyFull" },
-       "license_key": "…"                       ⚠ REQUIRED — SenzeBand auth needs it
+       "license_key": "…"
      } }
    ```
-   Errors: 404 unknown / 409 already used / 410 expired-or-revoked (to be confirmed
-   with Eugene) — dialog shows a plain-language message and lets the user retry.
-   ⚠ The endpoint must be callable **without** a Bearer token: the code IS the
-   credential (the bridge has nothing else pre-activation). Rate-limit it instead.
+   Error contract (Eugene, 19 Jul; SQLSTATE → HTTP): malformed code → **400**;
+   ZA001 unknown / ZA005 clinic missing → **404**; ZA002 already used → **409**;
+   ZA003 expired / ZA004 revoked → **410**. The dialog maps each to a plain-language
+   message and lets the user retry.
 4. Bridge writes the DPAPI-protected config store, then continues to normal startup.
 
 **Backend side (Eugene owns):** endpoint + `activation_codes` table
@@ -130,18 +133,21 @@ string can request TLS. Small change, do it as part of the cutover.
    `/var/bridge-updates` (host path outside the repo; mounted in `compose.prod.yaml`;
    uploaded via `packaging/publish.ps1`). Goes live on the next droplet deploy —
    nothing needed from Eugene.
-3. **Activation backend (Eugene confirmed 19 Jul he's building this)** — the
-   `/api/clinics/activate` endpoint, `activation_codes` + clinic→DB-user tables, and
-   code issuance, per the contract in §4. Reachable over HTTPS from clinics (same
-   domain work as 1–2).
+3. ~~Activation backend~~ — **DONE by Eugene (19 Jul, PR #118 on main):** public
+   `/api/activate` route, hashed+peppered codes (`ACTIVATION_CODE_PEPPER` env),
+   clinic→DB-role provisioning (his migration `010_database_roles.sql`), clinic_name
+   + license_key in the payload, error contract in §4. Ran our placeholder-seed
+   migration (now renumbered `011_seed_bridge_placeholders.sql`) via pgAdmin.
 4. **Per-clinic DB grants (found by live probe, 19 Jul):** Postgres is UP on
    `clinics.axonview.sg:5432` (VerifyFull works, creds valid ✅). Grants verified:
    sessions SELECT+INSERT ✅, all four EEG/band data tables INSERT ✅, clinics/roles/
    clients/users correctly locked ✅. **Missing: UPDATE on `sessions`** — the bridge
    stamps `bridge_recording_at` at recording start and flips `sync_status='completed'`
    at Stop. Ask: `GRANT UPDATE (bridge_recording_at, sync_status) ON sessions TO
-   <clinic role>` (column-level; full-row UPDATE not needed). Also run migration 010
-   (placeholder seed) on the clinics DB — the bridge no longer needs INSERT there.
+   bridge_writer` (column-level; full-row UPDATE not needed). **Still missing as of
+   Eugene's 19 Jul reply** — his `010_database_roles.sql` grants bridge_writer only
+   `INSERT,SELECT` on sessions; re-probe confirmed UPDATE=NO. Placeholder seed
+   (migration 011) already run by Eugene ✅.
 
 ---
 

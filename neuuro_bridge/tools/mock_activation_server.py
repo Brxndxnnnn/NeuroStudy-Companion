@@ -1,14 +1,17 @@
 """Dev mock of the backend activation endpoint (docs/bridge-packaging-plan.md §4).
 
-Lets the bridge's first-run activation flow be exercised end-to-end before Eugene's
-real /bridge/activate exists. Returns the local dev-compose Postgres credentials, so
-an "activated" bridge on a dev box writes to the same DB as always.
+Mirrors Eugene's real /api/activate (path, envelope, error contract) so the bridge's
+first-run activation flow can be exercised offline. Returns the local dev-compose
+Postgres credentials, so an "activated" bridge on a dev box writes to the same DB
+as always.
 
     python neuuro_bridge/tools/mock_activation_server.py  # listens on :8765
 
-Point the bridge at it via .env or env var:  ACTIVATION_URL=http://localhost:8765/bridge/activate
+Point the bridge at it via .env or env var:  ACTIVATION_URL=http://localhost:8765/api/activate
 
-Codes: TEST-CODE-0001 -> 200, USED-CODE -> 409, EXPIRED-CODE -> 410, anything else -> 404.
+Codes (server requires XXXX-XXXX-XXXX-XXXX, else 400):
+  TEST-C0DE-0001-MOCK -> 200,  USED-C0DE-0000-MOCK -> 409,
+  EXP1-RED0-0000-MOCK -> 410,  any other well-formed code -> 404.
 """
 import json
 import os
@@ -33,24 +36,26 @@ def _dev_license_key() -> str:
 
 
 class Handler(BaseHTTPRequestHandler):
+    CODE_PATTERN = re.compile(r"^[A-Z0-9]{4}(?:-[A-Z0-9]{4}){3}$")  # same as the backend
+
     def do_POST(self):
-        if self.path != "/bridge/activate":
+        if self.path != "/api/activate":
             return self._send(404, {"detail": "not found"})
         body = json.loads(self.rfile.read(int(self.headers.get("Content-Length", 0)) or 0) or b"{}")
         code = (body.get("activation_code") or "").strip().upper()
         print(f"activation attempt: code={code!r} machine={body.get('machine_name')!r} "
               f"bridge_version={body.get('bridge_version')!r}")
 
-        if code == "USED-CODE":
+        if not self.CODE_PATTERN.match(code):
+            return self._send(400, {"status": "error", "detail": "invalid activation code format"})
+        if code == "USED-C0DE-0000-MOCK":
             return self._send(409, {"status": "error", "detail": "code already used"})
-        if code == "EXPIRED-CODE":
+        if code == "EXP1-RED0-0000-MOCK":
             return self._send(410, {"status": "error", "detail": "code expired or revoked"})
-        if code != "TEST-CODE-0001":
+        if code != "TEST-C0DE-0001-MOCK":
             return self._send(404, {"status": "error", "detail": "unknown code"})
 
-        # Envelope mirrors Eugene's endpoint (19 Jul Swagger screenshot). clinic_name and
-        # license_key are OUR requested additions — keep them here so the client's handling
-        # is exercised before the real endpoint gains them.
+        # Envelope mirrors Eugene's endpoint (incl. clinic_name + license_key, added 19 Jul).
         return self._send(200, {
             "status": "success",
             "data": {
@@ -82,6 +87,6 @@ class Handler(BaseHTTPRequestHandler):
 
 
 if __name__ == "__main__":
-    print(f"mock activation server on http://localhost:{PORT}/bridge/activate "
-          f"(valid code: TEST-CODE-0001)")
+    print(f"mock activation server on http://localhost:{PORT}/api/activate "
+          f"(valid code: TEST-C0DE-0001-MOCK)")
     HTTPServer(("127.0.0.1", PORT), Handler).serve_forever()

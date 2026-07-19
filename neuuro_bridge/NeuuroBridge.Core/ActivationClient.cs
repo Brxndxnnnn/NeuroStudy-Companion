@@ -68,9 +68,14 @@ namespace NeuuroBridge
                     "Could not reach the activation server. Check the internet connection and try again.", ex);
             }
 
+            // Codes mirror the backend's error contract (Eugene, 19 Jul): 400 malformed,
+            // ZA001/ZA005→404, ZA002→409, ZA003/ZA004→410.
             switch ((int)resp.StatusCode)
             {
                 case 200: break;
+                // Live behaviour: the backend also answers 400 for well-formed but unknown
+                // codes (not just malformed), so the message covers both.
+                case 400: throw new ActivationException("Activation code not recognised. Check it carefully and try again (format: XXXX-XXXX-XXXX-XXXX).");
                 case 404: throw new ActivationException("Unknown activation code. Check for typos and try again.");
                 case 409: throw new ActivationException("This activation code has already been used. Ask the administrator for a new one.");
                 case 410: throw new ActivationException("This activation code has expired or was revoked. Ask the administrator for a new one.");

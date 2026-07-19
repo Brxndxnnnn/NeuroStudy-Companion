@@ -17,7 +17,7 @@
                      KeyDown="CodeBox_KeyDown"/>
             <TextBlock x:Name="StatusText" Margin="0,10,0,0" FontSize="12" TextWrapping="Wrap"
                        Foreground="{StaticResource Muted2}"
-                       Text="Codes look like XXXX-XXXX-XXXX."/>
+                       Text="Codes look like XXXX-XXXX-XXXX-XXXX."/>
             <DockPanel Margin="0,14,0,0">
                 <TextBlock DockPanel.Dock="Left" VerticalAlignment="Center" FontSize="11"
                            Foreground="{StaticResource Muted}" x:Name="MachineText"/>

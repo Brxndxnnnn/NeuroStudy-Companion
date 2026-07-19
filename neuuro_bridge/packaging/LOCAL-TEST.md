@@ -9,18 +9,18 @@ One-time: `dotnet tool install -g vpk`
 ```powershell
 # 1. Feed folder + mock activation backend
 mkdir C:\bridge-feed
-python neuuro_bridge\tools\mock_activation_server.py   # leave running; valid code TEST-CODE-0001
+python neuuro_bridge\tools\mock_activation_server.py   # leave running; valid code TEST-C0DE-0001-MOCK
 
 # 2. In a second terminal: point the (installed) app at the mock + local feed.
 #    setx = persistent user env vars; new processes pick them up.
-setx ACTIVATION_URL http://localhost:8765/bridge/activate
+setx ACTIVATION_URL http://localhost:8765/api/activate
 setx UPDATE_FEED_URL C:\bridge-feed
 
 # 3. Pack + install v1.0.0
 powershell -ExecutionPolicy Bypass -File neuuro_bridge\packaging\pack.ps1 -OutputDir C:\bridge-feed
 & C:\bridge-feed\NeuuroBridge-win-Setup.exe
 #    SmartScreen: "More info" → "Run anyway" (unsigned for now).
-#    → activation dialog appears → enter TEST-CODE-0001 → MainWindow opens.
+#    → activation dialog appears → enter TEST-C0DE-0001-MOCK → MainWindow opens.
 #    Config lands in %ProgramData%\NeuuroBridge\bridge.env (password/license DPAPI-encrypted).
 
 # 4. Pack v1.0.1 into the same feed, relaunch the installed app (Start menu → NeuuroBridge)

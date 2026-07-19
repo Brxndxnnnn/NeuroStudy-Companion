@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.Threading;
@@ -281,7 +281,7 @@ namespace NeuuroBridge
                     EnsureOpen();
                     // Placeholder rows live in their own transaction: per-clinic prod DB users
                     // have no INSERT on clinics/roles/clients/users (by design), so seeding is
-                    // skipped there — migration 010 pre-seeds the same rows server-side. Dev
+                    // skipped there — migration 011 pre-seeds the same rows server-side. Dev
                     // users keep the self-seeding behaviour for standalone runs.
                     try
                     {
@@ -289,7 +289,7 @@ namespace NeuuroBridge
                     }
                     catch (PostgresException ex) when (ex.SqlState == "42501")
                     {
-                        _log("Placeholder seeding skipped (no privilege — expecting server-side seed, migration 010).");
+                        _log("Placeholder seeding skipped (no privilege — expecting server-side seed, migration 011).");
                     }
                     using (var tx = _conn.BeginTransaction())
                     {
@@ -321,7 +321,7 @@ namespace NeuuroBridge
         /// <summary>
         /// Ensures the fixed placeholder clinic/role/client/user rows exist (idempotent).
         /// Requires INSERT on those tables — dev users have it, clinic prod users don't
-        /// (they rely on migration 010 having seeded the identical rows).
+        /// (they rely on migration 011 having seeded the identical rows).
         /// </summary>
         private void SeedPlaceholders()
         {
