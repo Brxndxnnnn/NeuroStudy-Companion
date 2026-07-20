@@ -69,10 +69,10 @@ export default function AffectQuadrantChart({
 
     return {
       animation: false,
-      grid: { left: 62, right: 26, top: 22, bottom: 56 },
+      grid: { left: 62, right: 26, top: 22, bottom: 80 },
       legend: {
         data: ["Predicted from EEG", "Actual (OASIS rating)"],
-        bottom: 0,
+        bottom: 6,
         icon: "circle",
         itemWidth: 8,
         itemHeight: 8,
@@ -84,7 +84,7 @@ export default function AffectQuadrantChart({
         max: SCALE_MAX,
         name: "Valence  ·  unpleasant → pleasant",
         nameLocation: "middle",
-        nameGap: 30,
+        nameGap: 24,
         nameTextStyle: { color: c.muted, fontSize: 11 },
         axisLine: { lineStyle: { color: c.border } },
         axisLabel: { color: c.muted, fontSize: 11 },

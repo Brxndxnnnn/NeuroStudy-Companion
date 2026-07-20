@@ -21,6 +21,14 @@ const NO_EVENTS = [];
  *   onEventClick(index)                               fired when an event band is clicked
  *   annotate(params) -> html|null                     extra tooltip line, appended below
  *                                                     the value rows; omit for none
+ *   linkPanels  when true, every panel shares one axis pointer and the tooltip
+ *               merges all panels' series into a single hover (default false —
+ *               each panel's tooltip shows only that panel's own series). Only
+ *               opt in when a caller's `annotate` genuinely needs another panel's
+ *               value at the same instant (e.g. valence+arousal → one quadrant);
+ *               for panels that are independent measures (per-channel amplitude,
+ *               heart rate vs SpO2, …) merging just floods the tooltip with
+ *               unrelated rows.
  *   height    px per panel (default 190)
  */
 export default function TimeSeriesChart({
@@ -30,6 +38,7 @@ export default function TimeSeriesChart({
   onVisibleRangeChange,
   onEventClick,
   annotate,
+  linkPanels = false,
   height = 190,
 }) {
   const elRef = useRef(null);
@@ -105,6 +114,13 @@ export default function TimeSeriesChart({
         right: rightPad,
         top: topPad + i * (height + gap),
         height,
+        // Multiple stacked panels each read 1–7 (or whatever scale) on their own
+        // axis — without a boxed boundary they visually run together into one
+        // tall chart instead of reading as separate measures.
+        show: n > 1,
+        borderColor: c.border,
+        borderWidth: 1,
+        backgroundColor: "transparent",
       });
       xAxes.push({
         type: "value",
@@ -190,7 +206,9 @@ export default function TimeSeriesChart({
       yAxis: yAxes,
       series,
       axisPointer: {
-        link: [{ xAxisIndex: "all" }],
+        // Linking is what makes the tooltip merge every panel's series into one
+        // hover — see the `linkPanels` doc above for why that's opt-in.
+        link: linkPanels ? [{ xAxisIndex: "all" }] : undefined,
         lineStyle: { color: c.muted, opacity: 0.5 },
         label: { show: false },
       },
@@ -285,7 +303,7 @@ export default function TimeSeriesChart({
       chart.dispose();
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [samples, panels, height, events]);
+  }, [samples, panels, height, events, linkPanels]);
 
   const showLegend = panels.some((p) => p.series.length > 1);
   const totalH =

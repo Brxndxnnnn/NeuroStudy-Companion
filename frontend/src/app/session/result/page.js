@@ -9,6 +9,7 @@ import {
   getSessionResultEvents,
   getSessionEllipticBandStats,
 } from "@/utils/api";
+import { buildEventWindows } from "@/utils/events";
 import { SessionTopBar } from "@/components/TopNav";
 import { Card, CardHeader, Button, Label, Pill, Alert, Spinner } from "@/components/ui";
 import EegStripChart from "@/components/EegStripChart";
@@ -220,29 +221,6 @@ function fmtDuration(sec) {
   const m = Math.floor(sec / 60);
   const s = Math.round(sec % 60);
   return m > 0 ? `${m}m ${s}s` : `${s}s`;
-}
-
-// Event rows → chart marker windows on the session's t_seconds axis. Handles both
-// the rich /results rows (url, prompt, per-event averages) and the slimmer
-// events_timing rows bundled with /results/filtered, which this falls back to.
-// Images and questions are numbered independently ("Image 3", "Question 2").
-function buildEventWindows(rows, startTime, durSec) {
-  const startMs = new Date(startTime).getTime();
-  const out = [];
-  let nImg = 0;
-  let nQ = 0;
-  for (const r of rows || []) {
-    const type = r.stimulus_type || (r.image_id != null ? "image" : "question");
-    const label = type === "image" ? `Image ${++nImg}` : `Question ${++nQ}`;
-    const from = (new Date(r.shown_at).getTime() - startMs) / 1000;
-    // hidden_at is coalesced server-side (next event / session end), but a still-
-    // open window would collapse the band to zero width — give it a visible span.
-    let to = r.hidden_at ? (new Date(r.hidden_at).getTime() - startMs) / 1000 : from + 1;
-    if (!(to > from)) to = from + 0.5;
-    if (Number.isNaN(from) || to <= 0 || from >= durSec) continue;
-    out.push({ ...r, type, label, from: Math.max(0, from), to: Math.min(durSec, to) });
-  }
-  return out;
 }
 
 export default function SessionResults() {
