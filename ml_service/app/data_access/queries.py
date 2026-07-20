@@ -202,6 +202,36 @@ def fetch_completed_session_ids(conn) -> list[str]:
     return [str(r["session_id"]) for r in rows]
 
 
+def fetch_client_session_ids(conn, client_id: str) -> list[str]:
+    """
+    One client's completed sessions — the candidate training set for their personal
+    model, and the list the technician picks from.
+
+    Same 'completed' gate and the same reasoning as fetch_completed_session_ids:
+    anything earlier risks training on a session the bridge is still flushing.
+    """
+    rows = conn.execute(text("""
+        SELECT session_id
+        FROM   sessions
+        WHERE  sync_status = 'completed' AND client_id = :cid
+        ORDER  BY start_time ASC
+    """), {"cid": client_id}).mappings().all()
+
+    return [str(r["session_id"]) for r in rows]
+
+
+def fetch_session_client(conn, session_id: str) -> str | None:
+    """
+    Which client a session belongs to, so inference can resolve whose model to
+    serve. NULL client_id is possible on old/unclaimed rows — the caller falls back
+    to the population model in that case.
+    """
+    row = conn.execute(text("""
+        SELECT client_id FROM sessions WHERE session_id = :sid
+    """), {"sid": session_id}).mappings().first()
+    return str(row["client_id"]) if row and row["client_id"] else None
+
+
 # ── eeg_readings (quality gating only) ────────────────────────────────────────
 
 def fetch_eeg_readings(conn, session_id: str) -> list[dict]:

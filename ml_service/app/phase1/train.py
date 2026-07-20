@@ -24,7 +24,7 @@ from app.phase1 import evaluate
 from app.phase1.config import DEFAULT, Phase1Config
 from app.phase1.dataset import build_dataset
 from app.phase1.features import feature_names
-from app.data_access import phase1_store
+from app.data_access import phase1_store, queries
 
 log = logging.getLogger(__name__)
 
@@ -63,9 +63,17 @@ def _has_new_data(current: dict | None, n_epochs: int, n_sessions: int) -> bool:
             or n_sessions > (current.get("n_sessions") or 0))
 
 
-def _should_promote(cv: dict, null: dict, current: dict | None) -> bool:
+def _should_promote(cv: dict, null: dict, current: dict | None,
+                    client_id: str | None = None) -> bool:
     """
     Decide whether a freshly trained model should become the one inference serves.
+
+    PERSONAL MODELS ALWAYS PROMOTE (client_id is not None). A technician asked for
+    this specific model over these specific sessions; quietly declining to serve it
+    would look broken, and the honest score is shown next to it either way. The gate
+    below exists to stop an UNATTENDED weekly retrain silently replacing a good
+    population model with a worse one — a risk a deliberate, attended action does
+    not carry.
 
     The gate exists to stop a routine retrain from silently REPLACING a good model
     with a worse one. The rules, in order:
@@ -81,6 +89,9 @@ def _should_promote(cv: dict, null: dict, current: dict | None) -> bool:
       • New model IS scored → it must clear the predict-the-mean null on BOTH targets
         and not score below a scored incumbent. Otherwise keep the incumbent.
     """
+    if client_id is not None:
+        return True
+
     if current is None:
         return True
 
@@ -100,14 +111,20 @@ def _should_promote(cv: dict, null: dict, current: dict | None) -> bool:
     return True
 
 
-def _prune_artifacts(conn, keep: int = KEEP_ARTIFACTS) -> int:
+def _prune_artifacts(conn, keep: int = KEEP_ARTIFACTS,
+                     client_id: str | None = None) -> int:
     """
     Delete old artifact files, keeping the newest `keep` versions plus whichever is
     current. ml_models rows are left intact (they carry the metric history); only the
     files are removed. File deletes are not transactional, but they only ever touch
     non-current, superseded artifacts, so a rollback after this is harmless.
+
+    ⚠ Pruning is SCOPED to the model's owner. An unscoped "keep the newest 5" would,
+    the moment a few clients had trained personal models, delete other clients'
+    artifacts while their ml_models rows still pointed at them — inference would then
+    fail to load a model the registry insists is current.
     """
-    rows = phase1_store.model_artifacts(conn)
+    rows = phase1_store.model_artifacts(conn, client_id=client_id, scoped=True)
     protected = {
         r["artifact_path"]
         for i, r in enumerate(rows)
@@ -134,35 +151,61 @@ def train_and_save(
     cfg: Phase1Config = DEFAULT,
     algo: str = DEFAULT_ALGO,
     force: bool = False,
+    client_id: str | None = None,
+    session_ids: list[str] | None = None,
 ) -> dict | None:
     """
     Train, persist, and register one model. Returns a summary dict, or None if the
     run was skipped (not enough data, or — for the automatic cron — no new data
     since the current model).
 
+    SCOPE:
+      client_id=None  → the POPULATION model, fitted across every client's sessions.
+                        This is the weekly cron, and what a new client is served.
+      client_id set   → that client's PERSONAL model. EEG is individualistic enough
+                        that a model fitted to one person's own recordings does not
+                        have to survive between-subject variation at all.
+
+      session_ids restricts the fit to an explicit list — the technician's chosen
+      sessions. Omitted, a personal train uses all of that client's completed
+      sessions. The chosen list is recorded against the model (migration 012) so a
+      hand-picked training set stays auditable.
+
+    ⚠ The honest sample size is the number of DISTINCT IMAGES, not sessions or
+    epochs. Repeat sessions over the same stimulus set add repeated measurements of
+    the same labels, not new ones, so a personal model is capped by how many
+    different images that client has ever been shown.
+
     `force` (set by the manual /train endpoint and the CLI) bypasses the no-new-data
-    guard so an operator can always retrain on demand; it does NOT override the
-    promotion gate — a manual retrain still only becomes current if it doesn't
-    regress the model in service.
+    guard so an operator can always retrain on demand. For a POPULATION model it does
+    not override the promotion gate; a personal model always promotes by design.
 
     Does not commit — the caller owns the transaction (so a failed file write or DB
     insert rolls back cleanly). The artifact file is written before the DB row; a
     rolled-back transaction can leave an unreferenced .joblib on disk, which is
     harmless and gets swept by the next successful train's pruning.
     """
-    X, y, groups, sessions, _ = build_dataset(conn, None, cfg, verbose=False)
+    if session_ids is None and client_id is not None:
+        session_ids = queries.fetch_client_session_ids(conn, client_id)
+        if not session_ids:
+            log.info("No completed sessions for client %s — nothing to train.", client_id)
+            return None
+
+    X, y, groups, sessions, _ = build_dataset(conn, session_ids, cfg, verbose=False)
     n_epochs = int(X.shape[0])
     n_images = int(len(np.unique(groups))) if n_epochs else 0
     n_sessions = int(len(np.unique(sessions))) if n_epochs else 0
 
     if n_epochs == 0 or n_images < MIN_IMAGES_TO_FIT:
         log.info(
-            "Phase 1 training skipped: %d epochs from %d distinct images "
-            "(need >= %d images).", n_epochs, n_images, MIN_IMAGES_TO_FIT,
+            "Phase 1 training skipped for %s: %d epochs from %d distinct images "
+            "(need >= %d images).",
+            f"client {client_id}" if client_id else "population",
+            n_epochs, n_images, MIN_IMAGES_TO_FIT,
         )
         return None
 
-    current = phase1_store.current_model(conn)
+    current = phase1_store.current_model(conn, client_id)
     if not force and not _has_new_data(current, n_epochs, n_sessions):
         log.info(
             "Phase 1 retrain skipped: no new data since model v%s "
@@ -211,19 +254,23 @@ def train_and_save(
     joblib.dump(bundle, path)
 
     # Promotion gate: only serve this model if it doesn't regress the one in service.
-    make_current = _should_promote(cv, null, current)
+    # A personal model bypasses this — see _should_promote.
+    make_current = _should_promote(cv, null, current, client_id)
 
     version = phase1_store.insert_model(
         conn, algo=algo, artifact_path=path,
         n_epochs=n_epochs, n_distinct_images=n_images, n_sessions=n_sessions,
         cv=cv, null=null, make_current=make_current,
+        client_id=client_id,
+        session_ids=[str(s) for s in np.unique(sessions)] if n_epochs else session_ids,
     )
 
-    # Housekeeping: drop superseded artifact files (keeps the current + newest few).
-    _prune_artifacts(conn)
+    # Housekeeping: drop superseded artifact files within this model's own scope.
+    _prune_artifacts(conn, client_id=client_id)
 
     log.info(
-        "Trained Phase 1 model v%d (%s) on %d epochs / %d images / %d sessions — %s.",
+        "Trained Phase 1 %s model v%d (%s) on %d epochs / %d images / %d sessions — %s.",
+        f"personal (client {client_id})" if client_id else "population",
         version, algo, n_epochs, n_images, n_sessions,
         "promoted to current" if make_current
         else f"kept as candidate (current v{current.get('model_version')} retained)",
@@ -231,6 +278,7 @@ def train_and_save(
     return {
         "model_version": version,
         "algo": algo,
+        "client_id": client_id,
         "n_epochs": n_epochs,
         "n_distinct_images": n_images,
         "n_sessions": n_sessions,

@@ -17,10 +17,12 @@ train endpoint as an operator tool (see docs/ml-phase1-plan.md).
 """
 
 from fastapi import APIRouter, HTTPException
+from pydantic import BaseModel
 
-from app.data_access import phase1_status, phase1_store
+from app.data_access import phase1_status, phase1_store, queries
 from app.database import engine
 from app.phase1 import train
+from app.workers import prediction_jobs
 
 router = APIRouter(prefix="/phase1", tags=["ml-phase1"])
 
@@ -110,47 +112,135 @@ def sessions_endpoint():
         return {"sessions": [], "error": str(e)}
 
 
+def _preferred_model(available: list[dict]) -> int | None:
+    """
+    Which model's predictions to show by default: the client's personal one when it
+    exists, otherwise the population model. session_prediction_models already sorts
+    personal first, so this is simply the head of the list.
+    """
+    return int(available[0]["model_version"]) if available else None
+
+
 @router.get("/predictions/{session_id}")
-def predictions_endpoint(session_id: str):
-    """One session's predicted valence/arousal trajectory."""
+def predictions_endpoint(session_id: str, model_version: int | None = None):
+    """
+    One session's predicted valence/arousal trajectory.
+
+    A session can hold predictions from both the population model and its client's
+    personal model. Exactly ONE model's rows are returned — interleaving them would
+    plot as a single impossible trajectory. Defaults to the personal model when one
+    has predictions here; pass ?model_version= to switch. `available_models` lists
+    what the tab can offer.
+    """
     try:
         with engine.connect() as conn:
-            rows = phase1_store.fetch_session_predictions(conn, session_id)
+            available = phase1_store.session_prediction_models(conn, session_id)
+            chosen = model_version if model_version is not None else _preferred_model(available)
+            rows = (phase1_store.fetch_session_predictions(conn, session_id, chosen)
+                    if chosen is not None else [])
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
-    return {"session_id": session_id, "predictions": rows, "count": len(rows)}
+    return {
+        "session_id": session_id,
+        "model_version": chosen,
+        "available_models": available,
+        "predictions": rows,
+        "count": len(rows),
+    }
+
+
+class TrainRequest(BaseModel):
+    """
+    Optional body for POST /phase1/train.
+
+    client_id   fit a PERSONAL model for one client. Omitted → the population model.
+    session_ids restrict the fit to these sessions (the technician's selection).
+                Omitted with a client_id → all of that client's completed sessions.
+    predict     run the new model over its training sessions immediately, so the
+                tab shows personal predictions without waiting for a background pass.
+    """
+    client_id: str | None = None
+    session_ids: list[str] | None = None
+    predict: bool = True
+
+
+@router.get("/clients/{client_id}/sessions")
+def client_sessions_endpoint(client_id: str):
+    """
+    One client's completed sessions — what the technician picks from when generating
+    that client's personal model.
+    """
+    try:
+        with engine.connect() as conn:
+            session_ids = queries.fetch_client_session_ids(conn, client_id)
+            model = phase1_store.current_model(conn, client_id)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+    return {"client_id": client_id, "session_ids": session_ids,
+            "personal_model": model}
 
 
 @router.post("/train")
-def train_endpoint():
+def train_endpoint(req: TrainRequest | None = None):
     """
-    Fit + register a model on all available labelled data. This is the manual
-    (operator) counterpart to the weekly training cron. Runs synchronously in a
-    worker thread; on the small datasets this project has, that is a few seconds.
+    Fit + register a model. The manual counterpart to the weekly training cron, and
+    the endpoint behind the technician's "generate this client's model" action. Runs
+    synchronously; on the datasets this project has, that is a few seconds.
 
-    NOTE: ml_service has no authentication — this is an operator tool and is not
-    linked from the technician UI. See docs/ml-phase1-plan.md.
+    A PERSONAL model (client_id set) is always promoted to serve that client — the
+    technician asked for it explicitly, and its honest score is returned alongside.
+    A POPULATION model still has to clear the promotion gate.
+
+    ⚠ NOTE: ml_service has no authentication of its own. Until this is fronted by an
+    authenticated backend route, treat it as an operator tool and do not link it from
+    the technician UI. See docs/ml-phase1-plan.md.
     """
+    req = req or TrainRequest()
     try:
         with engine.begin() as conn:
-            # force=True: an operator asked explicitly, so retrain even if no new
-            # data has arrived. The promotion gate still applies — a worse model is
-            # registered but not made current.
-            summary = train.train_and_save(conn, force=True)
+            # force=True: someone asked explicitly, so retrain even if no new data
+            # has arrived since the last model in this scope.
+            summary = train.train_and_save(
+                conn, force=True,
+                client_id=req.client_id, session_ids=req.session_ids,
+            )
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
     if summary is None:
         return {"trained": False,
-                "message": "Not enough data to fit a model yet "
-                           "(need at least 2 distinct labelled images)."}
+                "message": ("Not enough data to fit a model yet — this client needs "
+                            "at least 2 distinct labelled images across the selected "
+                            "sessions." if req.client_id else
+                            "Not enough data to fit a model yet "
+                            "(need at least 2 distinct labelled images).")}
+
+    inferred = None
+    if req.predict and summary.get("is_current"):
+        # Predict over the sessions the model was actually fitted on, so the tab has
+        # something to show immediately. Outside the training transaction: inference
+        # failing must not roll back a model that trained fine.
+        trained_on = req.session_ids
+        if trained_on is None:
+            with engine.connect() as conn:
+                trained_on = phase1_store.model_sessions(conn, summary["model_version"])
+        if trained_on:
+            inferred = prediction_jobs.predict_sessions_with_model(summary, trained_on)
+
     promoted = summary["is_current"]
+    if req.client_id:
+        message = ("Trained this client's personal model — it is now the one their "
+                   "Insights tab uses.")
+    elif promoted:
+        message = "Trained and promoted to the current model."
+    else:
+        message = ("Trained and registered, but kept as a candidate — it did not "
+                   "beat the model currently in service, which was retained.")
+
     return {
         "trained": True,
         "promoted": promoted,
-        "message": ("Trained and promoted to the current model."
-                    if promoted else
-                    "Trained and registered, but kept as a candidate — it did not "
-                    "beat the model currently in service, which was retained."),
+        "message": message,
         "model": summary,
+        "inference": inferred,
     }

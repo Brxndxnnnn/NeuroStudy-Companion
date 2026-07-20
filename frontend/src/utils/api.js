@@ -301,8 +301,26 @@ export async function getPhase1Sessions() {
   return res;
 }
 // One session's predicted valence/arousal trajectory.
-export async function getPhase1Predictions(sessionId) {
-  const res = await fetchWithAuth(`/ml/phase1/predictions/${sessionId}`);
+// A session can hold predictions from both the population model and its client's
+// personal model; the response carries ONE model's rows (personal by default) plus
+// `available_models` for the switch. Pass modelVersion to pick the other.
+export async function getPhase1Predictions(sessionId, modelVersion) {
+  const q = modelVersion != null ? `?model_version=${modelVersion}` : "";
+  const res = await fetchWithAuth(`/ml/phase1/predictions/${sessionId}${q}`);
+  return res;
+}
+// One client's completed sessions + their personal model, for the training picker.
+export async function getPhase1ClientSessions(clientId) {
+  const res = await fetchWithAuth(`/ml/phase1/clients/${clientId}/sessions`);
+  return res;
+}
+// Train a model. Goes through the BACKEND (not /ml/) because training writes —
+// ml_service has no auth of its own, so /api/ml/train is the authenticated door.
+export async function trainPhase1Model({ clientId, sessionIds } = {}) {
+  const res = await fetchWithAuth(`${BASE_URL}/ml/train`, {
+    method: "POST",
+    body: JSON.stringify({ client_id: clientId, session_ids: sessionIds }),
+  });
   return res;
 }
 

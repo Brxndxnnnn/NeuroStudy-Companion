@@ -8,6 +8,7 @@ import imagesRouter from './images.routes.js'
 import clientsRouter from './clients.routes.js'
 import questionsRouter from './questions.routes.js'
 import questionnairesRouter from './questionnaires.routes.js'
+import mlRouter from './ml.routes.js'
 import authenticate from '../middleware/authenticate.js'
 import dbContext from '../middleware/dbContext.js'
 import clinicController from '../controllers/clinic.controller.js'
@@ -54,5 +55,8 @@ router.use('/images', authenticate, dbContext, imagesRouter)
 router.use('/clients', authenticate, dbContext, clientsRouter)
 router.use('/questions', authenticate, dbContext, questionsRouter)
 router.use('/questionnaires', authenticate, dbContext, questionnairesRouter)
+// No dbContext: this only proxies to ml_service, which holds its own connection as
+// a BYPASSRLS role. Opening a tenant-scoped backend connection here would be dead weight.
+router.use('/ml', authenticate, mlRouter)
 
 export default router
