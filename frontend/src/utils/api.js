@@ -395,6 +395,12 @@ export async function revokeClinicDatabaseAccess(activationId) {
     method: "PATCH",
   });
 }
+export async function grantClinicDatabaseAccess(clinicId) {
+  return fetchWithAuth(`${BASE_URL}/clinics/${clinicId}/database-access`, {
+    method: "POST",
+    body: JSON.stringify({ clinic_id: clinicId }),
+  });
+}
 
 // CLINIC STIMULUS SETS
 // Technicians are automatically scoped to their own clinic by the API.
