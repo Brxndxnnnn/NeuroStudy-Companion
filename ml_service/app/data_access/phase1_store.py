@@ -204,21 +204,67 @@ def replace_session_predictions(conn, session_id: str, model_version: int,
     return len(rows)
 
 
-def fetch_session_predictions(conn, session_id: str) -> list[dict]:
+def fetch_session_predictions(conn, session_id: str,
+                              model_version: int | None = None) -> list[dict]:
     """
     A session's predictions ordered in time, with each row's seconds-from-start so
     the frontend can plot without re-deriving the origin (mirrors the results
     endpoints' t_seconds convention).
+
+    ⚠ ALWAYS pass model_version when the rows are going to be charted. A session can
+    now hold predictions from BOTH the population model and its client's personal
+    model, and those rows share the same window_start values — returning every model
+    at once yields two interleaved trajectories that plot as one impossible zig-zag.
+    Omitting it (every model's rows) is for callers that genuinely want the lot.
     """
+    if model_version is None:
+        rows = conn.execute(text("""
+            SELECT p.window_start, p.window_end, p.pred_valence, p.pred_arousal,
+                   p.actual_valence, p.actual_arousal,
+                   p.image_id, p.model_version,
+                   EXTRACT(EPOCH FROM (p.window_start - s.start_time)) AS t_seconds
+            FROM   session_predictions p
+            JOIN   sessions s ON s.session_id = p.session_id
+            WHERE  p.session_id = :sid
+            ORDER  BY p.model_version, p.window_start ASC
+        """), {"sid": session_id}).mappings().all()
+    else:
+        rows = conn.execute(text("""
+            SELECT p.window_start, p.window_end, p.pred_valence, p.pred_arousal,
+                   p.actual_valence, p.actual_arousal,
+                   p.image_id, p.model_version,
+                   EXTRACT(EPOCH FROM (p.window_start - s.start_time)) AS t_seconds
+            FROM   session_predictions p
+            JOIN   sessions s ON s.session_id = p.session_id
+            WHERE  p.session_id = :sid AND p.model_version = :ver
+            ORDER  BY p.window_start ASC
+        """), {"sid": session_id, "ver": model_version}).mappings().all()
+    return [dict(r) for r in rows]
+
+
+def session_prediction_models(conn, session_id: str) -> list[dict]:
+    """
+    Which models actually hold predictions for this session, personal first.
+
+    This is what drives the tab's global-vs-personal switch. It reads
+    session_predictions rather than sessions.predictions_model_version because the
+    rows ARE the truth: that column records only the automatic pass, while a
+    technician-generated personal model writes rows without touching it.
+    """
+    # Grouped on ml_models' primary key, so every other m.* column is functionally
+    # dependent and needs no repeating in the GROUP BY.
     rows = conn.execute(text("""
-        SELECT p.window_start, p.window_end, p.pred_valence, p.pred_arousal,
-               p.actual_valence, p.actual_arousal,
-               p.image_id, p.model_version,
-               EXTRACT(EPOCH FROM (p.window_start - s.start_time)) AS t_seconds
+        SELECT m.model_version,
+               count(*) AS n_predictions,
+               m.algo, m.client_id, m.trained_at, m.is_current,
+               m.n_distinct_images,
+               m.cv_r2_valence, m.cv_r2_arousal,
+               m.null_r2_valence, m.null_r2_arousal
         FROM   session_predictions p
-        JOIN   sessions s ON s.session_id = p.session_id
+        JOIN   ml_models m ON m.model_version = p.model_version
         WHERE  p.session_id = :sid
-        ORDER  BY p.window_start ASC
+        GROUP  BY m.model_version
+        ORDER  BY (m.client_id IS NULL), m.model_version DESC
     """), {"sid": session_id}).mappings().all()
     return [dict(r) for r in rows]
 

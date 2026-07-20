@@ -22,7 +22,7 @@ import os
 from sqlalchemy import text
 
 from app.database import engine
-from app.data_access import phase1_store
+from app.data_access import phase1_store, queries
 from app.phase1 import inference
 
 log = logging.getLogger(__name__)
@@ -113,25 +113,108 @@ def process_session(session_id: str, model: dict, bundle: dict) -> bool:
     return True
 
 
+def _load_cached(model: dict, cache: dict) -> dict | None:
+    """
+    Load a model's artifact, reusing it across sessions in the same tick.
+
+    Sessions in a batch usually resolve to the same model, and joblib.load pulls a
+    fitted estimator off disk each time — caching by version keeps one tick to one
+    read per distinct model instead of one per session.
+    """
+    version = int(model["model_version"])
+    if version not in cache:
+        try:
+            cache[version] = inference.load_bundle(model["artifact_path"])
+        except Exception:
+            log.exception(
+                "Cannot load model v%s artifact %s — is the MODEL_DIR volume "
+                "mounted?", version, model.get("artifact_path"),
+            )
+            cache[version] = None
+    return cache[version]
+
+
 def tick() -> int:
-    """One poll cycle. Does nothing until a model has been trained."""
-    with engine.begin() as conn:
-        model = phase1_store.current_model(conn)
-    if model is None:
-        return 0  # no model yet — leave sessions unclaimed for a later tick
+    """
+    One poll cycle. Does nothing until a model exists for a session to be run under.
 
-    try:
-        bundle = inference.load_bundle(model["artifact_path"])
-    except Exception:
-        log.exception("Cannot load current model artifact %s — is the MODEL_DIR "
-                      "volume mounted?", model.get("artifact_path"))
-        return 0
-
+    Each session is predicted with ITS OWN CLIENT'S model when that client has one,
+    falling back to the population model otherwise — so a client with a personal
+    model gets personal predictions automatically on their next recording, rather
+    than waiting for someone to regenerate them by hand.
+    """
     with engine.begin() as conn:
         reclaim_stale(conn)
         todo = pending_sessions(conn)
+        if not todo:
+            return 0
+        # Resolve the owning model per session up front, in one connection.
+        resolved = []
+        for sid in todo:
+            client_id = queries.fetch_session_client(conn, sid)
+            model = phase1_store.current_model_for(conn, client_id)
+            if model is not None:
+                resolved.append((sid, model))
 
-    return sum(1 for sid in todo if process_session(sid, model, bundle))
+    if not resolved:
+        return 0  # nothing trained yet — leave sessions unclaimed for a later tick
+
+    cache: dict = {}
+    done = 0
+    for sid, model in resolved:
+        bundle = _load_cached(model, cache)
+        if bundle is None:
+            continue  # artifact unreadable; leave unclaimed and retry next tick
+        if process_session(sid, model, bundle):
+            done += 1
+    return done
+
+
+def predict_sessions_with_model(model: dict, session_ids: list[str]) -> dict:
+    """
+    Run one specific model over specific sessions, on demand.
+
+    This is the technician-initiated path used straight after a personal model is
+    generated, so their Insights tab has personal predictions without waiting for a
+    background pass.
+
+    ⚠ Deliberately does NOT touch sessions.predictions_status /
+    predictions_model_version. Those columns describe the AUTOMATIC pass and are
+    owned by tick(); writing them here would make a session that never had automatic
+    predictions look already-processed, and the worker would skip it forever. The
+    prediction rows themselves are the shared truth — session_predictions is keyed
+    by (session_id, model_version, window_start), so these rows sit alongside the
+    automatic ones rather than replacing them.
+    """
+    version = int(model["model_version"])
+    try:
+        bundle = inference.load_bundle(model["artifact_path"])
+    except Exception as exc:
+        log.exception("Cannot load model v%d for on-demand inference.", version)
+        return {"model_version": version, "sessions": 0, "windows": 0,
+                "error": f"{type(exc).__name__}: {exc}"}
+
+    sessions_done = 0
+    windows = 0
+    failures: list[str] = []
+    for sid in session_ids:
+        try:
+            with engine.begin() as conn:
+                rows = inference.predict_session(conn, sid, bundle, version)
+                windows += phase1_store.replace_session_predictions(
+                    conn, sid, version, rows)
+            sessions_done += 1
+        except Exception as exc:
+            # One bad session must not lose the rest of the batch.
+            log.exception("On-demand inference failed for %s", sid)
+            failures.append(f"{sid}: {type(exc).__name__}: {exc}")
+
+    result = {"model_version": version, "sessions": sessions_done, "windows": windows}
+    if failures:
+        result["failures"] = failures
+    log.info("On-demand inference with model v%d: %d session(s), %d window(s).",
+             version, sessions_done, windows)
+    return result
 
 
 def requeue(conn, session_ids: list[str] | None = None) -> int:
