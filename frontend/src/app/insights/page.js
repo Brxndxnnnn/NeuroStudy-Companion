@@ -58,6 +58,68 @@ function PipelineStep({ done, children }) {
 const fmt = (n, d = 2) => (n == null || Number.isNaN(n) ? "—" : Number(n).toFixed(d));
 const shortId = (id) => (id ? id.slice(0, 8) : "");
 
+/* Collapsible explanation. Kept closed by default so the page stays scannable
+   for people who already know the vocabulary. */
+function Explainer({ title, children, defaultOpen = false }) {
+  return (
+    <details open={defaultOpen} className="group border-t border-border pt-4 first:border-t-0 first:pt-0">
+      <summary className="flex cursor-pointer select-none list-none items-center gap-2 text-[13px] font-semibold text-accent-strong hover:text-accent">
+        <span className="text-[10px] transition-transform group-open:rotate-90">▶</span>
+        {title}
+      </summary>
+      <div className="mt-3 space-y-2.5 text-[13px] leading-relaxed text-ink-2">{children}</div>
+    </details>
+  );
+}
+
+function Term({ term, children }) {
+  return (
+    <p>
+      <strong className="font-semibold text-ink">{term}</strong> — {children}
+    </p>
+  );
+}
+
+/* The 1–7 OASIS rating scale, drawn so the direction is obvious at a glance. */
+function ScaleRow({ label, low, high, color }) {
+  return (
+    <div>
+      <div className="flex items-baseline justify-between gap-3">
+        <span className="text-[13px] font-semibold text-ink">{label}</span>
+        <span className="font-mono text-[11px] text-muted">scale 1–7</span>
+      </div>
+      <div
+        className="mt-2 h-2 w-full rounded-full"
+        style={{ background: `linear-gradient(90deg, var(--inset), var(${color}))` }}
+      />
+      <div className="mt-1.5 flex justify-between text-[12px] text-muted">
+        <span>
+          <span className="font-mono tnum">1</span> · {low}
+        </span>
+        <span>
+          {high} · <span className="font-mono tnum">7</span>
+        </span>
+      </div>
+    </div>
+  );
+}
+
+/* Plain-English verdict on whether the model is actually doing anything useful,
+   derived from the same comparison the promotion gate uses (CV R² vs the
+   predict-the-mean baseline on both targets). */
+function modelVerdict(m) {
+  if (!m) return null;
+  const pairs = [
+    [m.cv_r2_valence, m.null_r2_valence],
+    [m.cv_r2_arousal, m.null_r2_arousal],
+  ];
+  if (pairs.some(([cv]) => cv == null)) return { tone: "neutral", text: "Not enough data to score this model yet — it is serving predictions, but its accuracy is unmeasured." };
+  const beaten = pairs.filter(([cv, nul]) => cv > (nul ?? -Infinity)).length;
+  if (beaten === 2) return { tone: "good", text: "This model predicts better than simply guessing the average rating, on both valence and arousal." };
+  if (beaten === 1) return { tone: "warn", text: "This model beats guess-the-average on one of the two measures only." };
+  return { tone: "warn", text: "This model does not yet predict better than simply guessing the average rating." };
+}
+
 export default function InsightsPage() {
   const router = useRouter();
   const [status, setStatus] = useState(null);
@@ -122,6 +184,7 @@ export default function InsightsPage() {
   const readiness = status?.readiness || {};
   const current = model?.current || null;
   const trained = !!current;
+  const verdict = modelVerdict(current);
 
   const predSamples = (predictions?.predictions || []).map((p) => ({
     t_seconds: Number(p.t_seconds),
@@ -155,6 +218,118 @@ export default function InsightsPage() {
             <Alert tone="crit" className="mt-6">{error}</Alert>
           ) : (
             <div className="mt-6 space-y-6">
+              {/* Plain-language primer — this tab is read by clinicians, not ML people */}
+              <Card>
+                <CardHeader
+                  title="What this page shows"
+                  subtitle="A plain-language guide to the model and the numbers below."
+                />
+                <div className="px-6 py-5">
+                  <p className="text-[13.5px] leading-relaxed text-ink-2">
+                    Every OASIS image used in a session comes with an{" "}
+                    <strong className="font-semibold text-ink">established emotional rating</strong>,
+                    averaged from hundreds of people who rated it in published research. We record
+                    the client&apos;s EEG while they look at that image, and train a model to work
+                    backwards: given only the brain activity, predict the rating the image is known
+                    to carry. The two things it predicts are:
+                  </p>
+
+                  <div className="mt-5 grid gap-5 sm:grid-cols-2">
+                    <ScaleRow
+                      label="Valence — how pleasant"
+                      low="unpleasant, distressing"
+                      high="pleasant, positive"
+                      color="--accent"
+                    />
+                    <ScaleRow
+                      label="Arousal — how intense"
+                      low="calm, relaxed"
+                      high="excited, activated"
+                      color="--warn"
+                    />
+                  </div>
+                  <p className="mt-3 text-[12.5px] leading-relaxed text-muted">
+                    The two are independent: a peaceful landscape is pleasant and calm, a horror
+                    image is unpleasant and intense, and a thrilling one can be pleasant
+                    <em> and</em> intense.
+                  </p>
+
+                  <div className="mt-6 space-y-4">
+                    <Explainer title="How the model works, step by step">
+                      <ol className="ml-4 list-decimal space-y-1.5">
+                        <li>
+                          While an image is on screen, the headset records EEG. That stretch is cut
+                          into overlapping <strong className="font-semibold text-ink">2-second
+                          windows</strong> (called <em>epochs</em>) — the unit the model learns from.
+                        </li>
+                        <li>
+                          Each window is reduced to 50 numbers summarising the brain rhythms present
+                          — the strength of the delta/theta/alpha/beta/gamma bands at each electrode,
+                          their ratios, and left-versus-right frontal balance (a long-established
+                          correlate of pleasant versus unpleasant feeling).
+                        </li>
+                        <li>
+                          Those numbers are re-scaled within each session, so the model can&apos;t
+                          cheat by recognising <em>which recording</em> it is looking at instead of
+                          learning the brain pattern.
+                        </li>
+                        <li>
+                          A regression model (ridge regression or a random forest — deliberately
+                          simple, because the dataset is small) learns the mapping from those numbers
+                          to the image&apos;s known valence and arousal.
+                        </li>
+                        <li>
+                          Afterwards, every completed session is run through the trained model
+                          automatically, producing the predicted trajectory shown below. Training
+                          happens separately, about once a week — new recordings do not change
+                          existing predictions.
+                        </li>
+                      </ol>
+                    </Explainer>
+
+                    <Explainer title="What the numbers mean (and which direction is good)">
+                      <Term term="R² — higher is better">
+                        How much of the real variation the model captures.{" "}
+                        <span className="font-mono tnum">1.00</span> is a perfect prediction,{" "}
+                        <span className="font-mono tnum">0.00</span> means it does no better than
+                        ignoring the EEG and always guessing the average rating, and{" "}
+                        <strong className="font-semibold text-ink">a negative value means it does
+                        worse than that guess</strong>. Negative scores are normal for a model
+                        trained on very little data.
+                      </Term>
+                      <Term term="Baseline (&ldquo;null&rdquo;) — the number to beat">
+                        The score you would get by always predicting the average rating, without
+                        looking at the brain at all. The model is only earning its keep when its R²
+                        is above this.
+                      </Term>
+                      <Term term="Typical error — lower is better">
+                        On average, how far off the prediction is, in points on the 1–7 scale. An
+                        error of <span className="font-mono tnum">0.5</span> means predictions land
+                        about half a point from the true rating.
+                      </Term>
+                      <Term term="Distinct images — the real sample size">
+                        A single image produces many 2-second windows, but they all share one correct
+                        answer, so they are not independent examples. Progress toward a trustworthy
+                        model is therefore counted in <em>different images recorded</em>, not hours of
+                        EEG — which is why the target below is measured that way.
+                      </Term>
+                    </Explainer>
+
+                    <Explainer title="How much should I trust it today?">
+                      <p>
+                        Treat it as a working pipeline, not a clinical measure. The full loop —
+                        record, train, predict, display — is built and running, but the model has
+                        seen only a small number of distinct images so far, which is far too few for
+                        its predictions to be reliable about any individual person or moment. The
+                        numbers on this page are there to show the system working and to track
+                        progress as more sessions are recorded. Accuracy improves as OASIS-based
+                        sessions accumulate.
+                      </p>
+                    </Explainer>
+                  </div>
+                </div>
+              </Card>
+
               {/* Model status */}
               <Card>
                 <CardHeader
@@ -171,23 +346,78 @@ export default function InsightsPage() {
                 <div className="px-6 py-5">
                   {trained ? (
                     <>
-                      <div className="grid grid-cols-2 gap-x-6 gap-y-4 sm:grid-cols-4">
-                        <Metric label="Algorithm" value={current.algo} />
-                        <Metric label="Trained on" value={`${current.n_epochs ?? "—"} epochs`} hint={`${current.n_distinct_images ?? "—"} images · ${current.n_sessions ?? "—"} sessions`} />
-                        <Metric label="Valence R²" value={fmt(current.cv_r2_valence)} hint={`null ${fmt(current.null_r2_valence)}`} />
-                        <Metric label="Arousal R²" value={fmt(current.cv_r2_arousal)} hint={`null ${fmt(current.null_r2_arousal)}`} />
+                      <div className="grid grid-cols-2 gap-x-6 gap-y-4 sm:grid-cols-3">
+                        <Metric
+                          label="Algorithm"
+                          value={current.algo === "ridge" ? "Ridge regression" : current.algo === "random_forest" ? "Random forest" : current.algo}
+                          hint="Chosen for small datasets"
+                        />
+                        <Metric
+                          label="Learned from"
+                          value={`${current.n_distinct_images ?? "—"} images`}
+                          hint={`${current.n_epochs ?? "—"} two-second windows · ${current.n_sessions ?? "—"} sessions`}
+                        />
+                        <Metric
+                          label="Trained"
+                          value={current.trained_at ? new Date(current.trained_at).toLocaleDateString() : "—"}
+                          hint={`Model version ${current.model_version}`}
+                        />
                       </div>
-                      {(current.cv_r2_valence != null && current.cv_r2_valence <= (current.null_r2_valence ?? -Infinity)) && (
-                        <Alert tone="warn" className="mt-5">
-                          This model does not beat the predict-the-mean baseline — expected
-                          with the current tiny dataset. The pipeline is proven; accuracy
-                          will follow once sessions are recorded over OASIS imagery.
-                        </Alert>
-                      )}
+
+                      <div className="mt-6 border-t border-border pt-5">
+                        <div className="flex items-baseline justify-between gap-3">
+                          <h3 className="text-[13px] font-semibold text-ink">How accurate is it?</h3>
+                          <span className="text-[12px] text-muted">
+                            Measured by hiding whole images from the model, then testing on them
+                          </span>
+                        </div>
+                        <div className="mt-4 grid grid-cols-2 gap-x-6 gap-y-4 sm:grid-cols-4">
+                          <Metric
+                            label="Valence R²"
+                            value={fmt(current.cv_r2_valence)}
+                            dir="higher"
+                            hint={`vs ${fmt(current.null_r2_valence)} for guessing the average`}
+                          />
+                          <Metric
+                            label="Arousal R²"
+                            value={fmt(current.cv_r2_arousal)}
+                            dir="higher"
+                            hint={`vs ${fmt(current.null_r2_arousal)} for guessing the average`}
+                          />
+                          <Metric
+                            label="Valence typical error"
+                            value={fmt(current.cv_mae_valence)}
+                            dir="lower"
+                            hint="Points off, on the 1–7 scale"
+                          />
+                          <Metric
+                            label="Arousal typical error"
+                            value={fmt(current.cv_mae_arousal)}
+                            dir="lower"
+                            hint="Points off, on the 1–7 scale"
+                          />
+                        </div>
+                        {verdict && (
+                          <Alert tone={verdict.tone === "good" ? "good" : verdict.tone === "warn" ? "warn" : "accent"} className="mt-5">
+                            <span className="block">{verdict.text}</span>
+                            {verdict.tone !== "good" && (
+                              <span className="mt-1 block font-normal">
+                                This is expected at the current data volume and does not mean
+                                anything is broken — the pipeline runs end to end, and accuracy
+                                improves as more sessions are recorded over OASIS images.
+                              </span>
+                            )}
+                          </Alert>
+                        )}
+                      </div>
                     </>
                   ) : (
                     <>
                       <p className="text-sm text-ink-2 leading-relaxed">{readiness.message}</p>
+                      <p className="mt-2 text-[13px] leading-relaxed text-muted">
+                        Nothing is wrong — a model can only be trained once enough sessions have
+                        been recorded over OASIS-labelled images. Progress toward that point:
+                      </p>
                       <div className="mt-5 max-w-md">
                         <ReadinessBar
                           value={data.distinct_labelled_images || 0}
@@ -231,64 +461,84 @@ export default function InsightsPage() {
                     </div>
                   ) : predSamples.length === 0 ? (
                     <p className="text-sm text-muted">
-                      No predictions for this session — its EEG yielded no usable epochs
-                      (dead electrodes or no bounded image windows).
+                      No predictions for this session. Its recording produced no usable 2-second
+                      windows — usually a dead or poorly seated electrode, or no image having been
+                      shown long enough to measure.
                     </p>
                   ) : (
-                    <TimeSeriesChart
-                      samples={predSamples}
-                      height={150}
-                      panels={[
-                        { label: "Valence · predicted vs actual", unit: "", min: 1, max: 7,
-                          series: [
-                            { key: "valence", label: "Predicted", color: "--accent" },
-                            { key: "actual_valence", label: "Actual (OASIS)", color: "--muted" },
-                          ] },
-                        { label: "Arousal · predicted vs actual", unit: "", min: 1, max: 7,
-                          series: [
-                            { key: "arousal", label: "Predicted", color: "--warn" },
-                            { key: "actual_arousal", label: "Actual (OASIS)", color: "--muted" },
-                          ] },
-                      ]}
-                    />
+                    <>
+                      <p className="mb-4 text-[13px] leading-relaxed text-ink-2">
+                        Each point is the model&apos;s guess from one 2-second window of EEG. The
+                        grey line is the image&apos;s established rating — the correct answer. The
+                        closer the coloured line tracks the grey one, the better the model did here.
+                        Gaps mean that stretch of EEG was unusable (a dropped Bluetooth connection
+                        or a flat electrode) and was excluded rather than guessed at.
+                      </p>
+                      <TimeSeriesChart
+                        samples={predSamples}
+                        height={150}
+                        panels={[
+                          { label: "Valence (pleasantness) · predicted vs actual", unit: "", min: 1, max: 7,
+                            series: [
+                              { key: "valence", label: "Predicted", color: "--accent" },
+                              { key: "actual_valence", label: "Actual (OASIS)", color: "--muted" },
+                            ] },
+                          { label: "Arousal (intensity) · predicted vs actual", unit: "", min: 1, max: 7,
+                            series: [
+                              { key: "arousal", label: "Predicted", color: "--warn" },
+                              { key: "actual_arousal", label: "Actual (OASIS)", color: "--muted" },
+                            ] },
+                        ]}
+                      />
+                    </>
                   )}
                 </div>
               </Card>
 
               {/* Data coverage */}
               <div>
-                <h2 className="mb-3 text-[13px] font-semibold text-ink">Training data collected</h2>
+                <h2 className="text-[13px] font-semibold text-ink">Training data collected</h2>
+                <p className="mb-3 mt-0.5 text-[12.5px] text-muted">
+                  How much material the model has to learn from. Only sessions recorded over
+                  rated images can teach it anything.
+                </p>
                 <div className="grid grid-cols-2 gap-4 sm:grid-cols-3 lg:grid-cols-5">
-                  <StatCard label="Completed sessions" value={data.sessions_completed ?? "—"} hint="Recorded & finalised" />
-                  <StatCard label="OASIS images labelled" value={data.oasis_images_labelled ?? "—"} hint="Have valence/arousal norms" />
-                  <StatCard label="Sessions with OASIS EEG" value={data.sessions_with_oasis_eeg ?? "—"} hint="EEG over labelled images" />
-                  <StatCard label="Distinct labelled images" value={data.distinct_labelled_images ?? "—"} hint="Seen in recorded EEG" />
-                  <StatCard label="Labelled image events" value={data.labelled_image_events ?? "—"} hint="Epoch source windows" />
+                  <StatCard label="Completed sessions" value={data.sessions_completed ?? "—"} hint="Recorded and finished" />
+                  <StatCard label="Rated images available" value={data.oasis_images_labelled ?? "—"} hint="Carry a known valence & arousal" />
+                  <StatCard label="Sessions using them" value={data.sessions_with_oasis_eeg ?? "—"} hint="Recorded over rated images" />
+                  <StatCard label="Different images seen" value={data.distinct_labelled_images ?? "—"} hint="The number that matters most" />
+                  <StatCard label="Image viewings" value={data.labelled_image_events ?? "—"} hint="Each one becomes EEG to learn from" />
                 </div>
               </div>
 
               {/* Path to a trained model */}
               <Card>
                 <CardHeader
-                  title="Path to a generalising model"
-                  subtitle="The flow runs end-to-end now; accuracy is gated on data collection."
+                  title="Path to a trustworthy model"
+                  subtitle="Everything runs end to end today. What is left is collecting enough data for the predictions to be reliable."
                 />
                 <ul className="space-y-3 px-6 py-5">
                   <PipelineStep done={(data.oasis_images_labelled || 0) > 0}>
-                    <strong className="font-semibold text-ink">OASIS labels loaded.</strong>{" "}
-                    Each image carries a population-normed valence & arousal rating — the training target.
+                    <strong className="font-semibold text-ink">Rated images loaded.</strong>{" "}
+                    Each OASIS image carries a valence &amp; arousal rating averaged over hundreds of
+                    people — these are the answers the model learns from.
                   </PipelineStep>
                   <PipelineStep done={(data.sessions_with_oasis_eeg || 0) > 0}>
-                    <strong className="font-semibold text-ink">Record sessions over OASIS images.</strong>{" "}
-                    Stimulus sets must be built from labelled OASIS images (not the placeholder set).
+                    <strong className="font-semibold text-ink">Record sessions using those images.</strong>{" "}
+                    A session only becomes training data if its image set is built from rated OASIS
+                    images. Sessions run on other images still work normally, they just teach the
+                    model nothing.
                   </PipelineStep>
                   <PipelineStep done={trained}>
                     <strong className="font-semibold text-ink">Train a model.</strong>{" "}
-                    Fits ridge / random-forest with GroupKFold-by-image against a predict-the-mean baseline.
+                    Happens automatically each week once there is data. A retrained model only
+                    replaces the one in use if it scores at least as well.
                   </PipelineStep>
                   <PipelineStep done={readiness.ready_to_train}>
-                    <strong className="font-semibold text-ink">Reach enough distinct images.</strong>{" "}
-                    Generalisation is scored by holding whole images out, so the sample size is distinct images, not epochs.
+                    <strong className="font-semibold text-ink">Reach enough different images.</strong>{" "}
+                    Accuracy is tested by hiding whole images from the model and checking its guesses
+                    on them, so what counts is the number of different images recorded — not the
+                    amount of EEG. This is the step that takes time.
                   </PipelineStep>
                 </ul>
               </Card>
@@ -300,11 +550,18 @@ export default function InsightsPage() {
   );
 }
 
-function Metric({ label, value, hint }) {
+function Metric({ label, value, hint, dir }) {
   return (
     <div>
       <div className="font-mono text-[10px] font-semibold tracking-[0.12em] uppercase text-muted">{label}</div>
-      <div className="mt-1 text-[19px] font-bold tracking-tight text-ink tnum">{value}</div>
+      <div className="mt-1 flex items-baseline gap-1.5">
+        <span className="text-[19px] font-bold tracking-tight text-ink tnum">{value}</span>
+        {dir && (
+          <span className="text-[11px] font-medium text-muted whitespace-nowrap">
+            {dir === "higher" ? "↑ better" : "↓ better"}
+          </span>
+        )}
+      </div>
       {hint && <div className="mt-0.5 text-[12px] text-muted">{hint}</div>}
     </div>
   );
