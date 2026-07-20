@@ -9,6 +9,14 @@ import {
 } from "@/utils/api";
 import TopNav from "@/components/TopNav";
 import TimeSeriesChart from "@/components/TimeSeriesChart";
+import AffectQuadrantChart from "@/components/AffectQuadrantChart";
+import {
+  MID,
+  WEAK_CONFIDENCE,
+  quadrantBreakdown,
+  quadrantConfidence,
+  quadrantOf,
+} from "@/components/affect";
 import {
   PageContainer,
   PageHeading,
@@ -72,6 +80,54 @@ function Explainer({ title, children, defaultOpen = false }) {
   );
 }
 
+/* Distribution of a session's predictions across the four quadrants. Reads as a
+   single stacked bar so the dominant region is obvious without counting dots. */
+function QuadrantSummary({ breakdown, weak }) {
+  if (!breakdown.length) return null;
+  const top = breakdown[0];
+  return (
+    <div>
+      <div className="flex h-2.5 w-full overflow-hidden rounded-full bg-inset">
+        {breakdown.map((q) => (
+          <div
+            key={q.key}
+            style={{ width: `${q.pct * 100}%`, background: `var(${q.color})` }}
+            title={`${q.label}: ${q.n} windows`}
+          />
+        ))}
+      </div>
+      <div className="mt-3 flex flex-wrap gap-x-5 gap-y-1.5">
+        {breakdown.map((q) => (
+          <span key={q.key} className="flex items-center gap-1.5 text-[12.5px] text-ink-2">
+            <span
+              className="h-2 w-2 shrink-0 rounded-full"
+              style={{ background: `var(${q.color})` }}
+            />
+            {q.label}
+            <span className="font-mono text-muted tnum">
+              {Math.round(q.pct * 100)}%
+            </span>
+          </span>
+        ))}
+      </div>
+      <p className="mt-3 text-[13px] leading-relaxed text-ink-2">
+        Most of this session&apos;s predictions fall in the{" "}
+        <strong className="font-semibold text-ink">{top.label}</strong> region (
+        {Math.round(top.pct * 100)}% of windows).
+        {weak > 0 && (
+          <>
+            {" "}
+            <span className="text-muted">
+              {weak} of {breakdown.reduce((a, q) => a + q.n, 0)} sit close enough to the
+              centre that their region is effectively a coin flip.
+            </span>
+          </>
+        )}
+      </p>
+    </div>
+  );
+}
+
 function Term({ term, children }) {
   return (
     <p>
@@ -131,6 +187,7 @@ export default function InsightsPage() {
   const [selectedSession, setSelectedSession] = useState("");
   const [predictions, setPredictions] = useState(null);
   const [predLoading, setPredLoading] = useState(false);
+  const [primerOpen, setPrimerOpen] = useState(false);
 
   const load = async () => {
     setLoading(true);
@@ -186,13 +243,62 @@ export default function InsightsPage() {
   const trained = !!current;
   const verdict = modelVerdict(current);
 
-  const predSamples = (predictions?.predictions || []).map((p) => ({
+  const predRows = predictions?.predictions || [];
+
+  const predSamples = predRows.map((p) => ({
     t_seconds: Number(p.t_seconds),
     valence: p.pred_valence,
     arousal: p.pred_arousal,
     actual_valence: p.actual_valence,
     actual_arousal: p.actual_arousal,
   }));
+
+  /* Points for the circumplex. Predictions are per 2 s window; the ground truth
+     is per IMAGE, so it is deduped — otherwise one image contributes ~17
+     identical diamonds and the truth cloud looks denser than it is. */
+  const quadPredicted = predSamples
+    .filter((p) => p.valence != null && p.arousal != null)
+    .map((p) => ({ valence: p.valence, arousal: p.arousal, t_seconds: p.t_seconds }));
+
+  const quadActual = (() => {
+    const seen = new Map();
+    for (const p of predRows) {
+      if (p.actual_valence == null || p.actual_arousal == null) continue;
+      const key = p.image_id || `${p.actual_valence}:${p.actual_arousal}`;
+      if (seen.has(key)) continue;
+      seen.set(key, {
+        valence: Number(p.actual_valence),
+        arousal: Number(p.actual_arousal),
+        label: "Established rating of one image shown",
+      });
+    }
+    return [...seen.values()];
+  })();
+
+  const breakdown = quadrantBreakdown(quadPredicted);
+  const weakCount = quadPredicted.filter(
+    (p) => quadrantConfidence(p.valence, p.arousal) < WEAK_CONFIDENCE
+  ).length;
+
+  /* Names the emotion region under the predicted trajectory's tooltip, so the
+     time chart and the circumplex tell the same story at the same instant. */
+  const annotateEmotion = (ps) => {
+    // Both panels carry a series called "Predicted" and share one axis pointer,
+    // so the hover yields two of them in panel order: valence first, arousal
+    // second. Order is the only thing distinguishing them.
+    const [valence, arousal] = ps
+      .filter((p) => p.seriesName === "Predicted")
+      .map((p) => p.value?.[1]);
+    const q = quadrantOf(valence, arousal);
+    if (!q) return null;
+    const weak = quadrantConfidence(valence, arousal) < WEAK_CONFIDENCE;
+    return (
+      `<div style="font-weight:600">${q.label}</div>` +
+      `<div style="font-size:11px;opacity:.75;margin-top:1px">` +
+      (weak ? "near the centre — region uncertain" : q.words) +
+      `</div>`
+    );
+  };
 
   return (
     <>
@@ -223,8 +329,13 @@ export default function InsightsPage() {
                 <CardHeader
                   title="What this page shows"
                   subtitle="A plain-language guide to the model and the numbers below."
+                  actions={
+                    <Button variant="ghost" onClick={() => setPrimerOpen((o) => !o)}>
+                      {primerOpen ? "Hide" : "Show"}
+                    </Button>
+                  }
                 />
-                <div className="px-6 py-5">
+                <div className={`px-6 py-5 ${primerOpen ? "" : "hidden"}`}>
                   <p className="text-[13.5px] leading-relaxed text-ink-2">
                     Every OASIS image used in a session comes with an{" "}
                     <strong className="font-semibold text-ink">established emotional rating</strong>,
@@ -477,6 +588,7 @@ export default function InsightsPage() {
                       <TimeSeriesChart
                         samples={predSamples}
                         height={150}
+                        annotate={annotateEmotion}
                         panels={[
                           { label: "Valence (pleasantness) · predicted vs actual", unit: "", min: 1, max: 7,
                             series: [
@@ -494,6 +606,46 @@ export default function InsightsPage() {
                   )}
                 </div>
               </Card>
+
+              {/* Emotional map — the circumplex */}
+              {trained && selectedSession && !predLoading && quadPredicted.length > 0 && (
+                <Card>
+                  <CardHeader
+                    title="Emotional map"
+                    subtitle="Where this session's predictions land on the valence–arousal plane."
+                  />
+                  <div className="px-6 py-5">
+                    <p className="mb-1 text-[13.5px] leading-relaxed text-ink-2">
+                      The same two measures as above, plotted against each other instead of
+                      against time. Combining them divides the space into four regions — the
+                      standard map of emotion used in psychology (Russell&apos;s circumplex).
+                      Each teal dot is one 2-second window of EEG; each hollow diamond is the
+                      established rating of an image that was actually shown.
+                    </p>
+                    <p className="mb-5 text-[12.5px] leading-relaxed text-muted">
+                      The distance between the two clouds is the model&apos;s error, shown as
+                      space rather than as a number. If the diamonds themselves cluster in one
+                      region, the image set does not yet cover the whole plane — a model cannot
+                      learn to recognise a feeling it has never been shown.
+                    </p>
+
+                    <AffectQuadrantChart predicted={quadPredicted} actual={quadActual} />
+
+                    <div className="mt-5 border-t border-border pt-5">
+                      <QuadrantSummary breakdown={breakdown} weak={weakCount} />
+                    </div>
+
+                    <Alert tone="warn" className="mt-5">
+                      Region names describe an area of the chart, not a clinical finding. The
+                      boundaries sit at the midpoint of each scale ({MID}.0), so a prediction of{" "}
+                      {MID}.05 and one of {(MID - 0.05).toFixed(2)} are named differently while
+                      being statistically indistinguishable — and at the current data volume the
+                      model&apos;s predictions vary far too little for the region to describe how
+                      anyone actually felt.
+                    </Alert>
+                  </div>
+                </Card>
+              )}
 
               {/* Data coverage */}
               <div>

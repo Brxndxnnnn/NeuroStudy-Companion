@@ -19,6 +19,8 @@ const NO_EVENTS = [];
  *   events    [{ from, to, label, type }]             stimulus windows (seconds); type "image"|"question"
  *   onVisibleRangeChange(startSec, endSec)            fired on zoom/pan
  *   onEventClick(index)                               fired when an event band is clicked
+ *   annotate(params) -> html|null                     extra tooltip line, appended below
+ *                                                     the value rows; omit for none
  *   height    px per panel (default 190)
  */
 export default function TimeSeriesChart({
@@ -27,15 +29,20 @@ export default function TimeSeriesChart({
   events = NO_EVENTS,
   onVisibleRangeChange,
   onEventClick,
+  annotate,
   height = 190,
 }) {
   const elRef = useRef(null);
   const rangeCbRef = useRef(onVisibleRangeChange);
   const eventCbRef = useRef(onEventClick);
+  // Held in a ref like the other callbacks so an inline arrow from the caller
+  // doesn't re-init the whole chart on every render.
+  const annotateRef = useRef(annotate);
   useEffect(() => {
     rangeCbRef.current = onVisibleRangeChange;
     eventCbRef.current = onEventClick;
-  }, [onVisibleRangeChange, onEventClick]);
+    annotateRef.current = annotate;
+  }, [onVisibleRangeChange, onEventClick, annotate]);
 
   const buildOption = () => {
     const s = getComputedStyle(document.documentElement);
@@ -210,7 +217,11 @@ export default function TimeSeriesChart({
               );
             })
             .join("");
-          return `<div style="font-family:monospace;font-size:11px;color:${c.muted};margin-bottom:4px">t = ${t.toFixed(1)} s</div>${rows}`;
+          const extra = annotateRef.current?.(ps);
+          const footer = extra
+            ? `<div style="margin-top:6px;padding-top:6px;border-top:1px solid ${c.border}">${extra}</div>`
+            : "";
+          return `<div style="font-family:monospace;font-size:11px;color:${c.muted};margin-bottom:4px">t = ${t.toFixed(1)} s</div>${rows}${footer}`;
         },
       },
       dataZoom: [
