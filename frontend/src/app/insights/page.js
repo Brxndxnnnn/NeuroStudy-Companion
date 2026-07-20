@@ -206,6 +206,173 @@ function modelVerdict(m) {
   return { tone: "warn", text: "This model does not yet predict better than simply guessing the average rating." };
 }
 
+/* The plain-language primer and the pipeline checklist, merged into one on-demand
+   dialog. Both are read once, by people orienting themselves — keeping them off
+   the default page keeps the page itself scannable for repeat visits. */
+function HowItWorksModal({ onClose, trained, readinessReady, dataOasisLabelled, dataSessionsWithOasis }) {
+  useEffect(() => {
+    const onKey = (e) => {
+      if (e.key === "Escape") onClose();
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [onClose]);
+
+  return (
+    <div
+      className="fixed inset-0 z-50 grid place-items-center p-4 sm:p-8 bg-black/50 anim-fade"
+      role="dialog"
+      aria-modal="true"
+      aria-label="How this page works"
+      onClick={onClose}
+    >
+      <div
+        className="w-full max-w-2xl max-h-[85vh] overflow-y-auto rounded-2xl border border-border bg-surface shadow-2xl"
+        onClick={(e) => e.stopPropagation()}
+      >
+        <div className="flex items-center justify-between gap-3 px-6 py-4 border-b border-border sticky top-0 bg-surface">
+          <span className="font-bold text-ink">How this page works</span>
+          <button
+            onClick={onClose}
+            aria-label="Close"
+            className="grid h-8 w-8 place-items-center rounded-lg text-muted hover:text-ink hover:bg-inset transition-colors"
+          >
+            ✕
+          </button>
+        </div>
+
+        <div className="px-6 py-5">
+          <p className="text-[13.5px] leading-relaxed text-ink-2">
+            Every OASIS image used in a session comes with an{" "}
+            <strong className="font-semibold text-ink">established emotional rating</strong>,
+            averaged from hundreds of people who rated it in published research. We record the
+            client&apos;s EEG while they look at that image, and train a model to work backwards:
+            given only the brain activity, predict the rating the image is known to carry. The
+            two things it predicts are:
+          </p>
+
+          <div className="mt-5 grid gap-5 sm:grid-cols-2">
+            <ScaleRow
+              label="Valence — how pleasant"
+              low="unpleasant, distressing"
+              high="pleasant, positive"
+              color="--accent"
+            />
+            <ScaleRow
+              label="Arousal — how intense"
+              low="calm, relaxed"
+              high="excited, activated"
+              color="--warn"
+            />
+          </div>
+          <p className="mt-3 text-[12.5px] leading-relaxed text-muted">
+            The two are independent: a peaceful landscape is pleasant and calm, a horror image is
+            unpleasant and intense, and a thrilling one can be pleasant<em> and</em> intense.
+          </p>
+
+          <div className="mt-6 space-y-4">
+            <Explainer title="How the model works, step by step" defaultOpen>
+              <ol className="ml-4 list-decimal space-y-1.5">
+                <li>
+                  While an image is on screen, the headset records EEG. That stretch is cut into
+                  overlapping <strong className="font-semibold text-ink">2-second windows</strong>{" "}
+                  (called <em>epochs</em>) — the unit the model learns from.
+                </li>
+                <li>
+                  Each window is reduced to 50 numbers summarising the brain rhythms present — the
+                  strength of the delta/theta/alpha/beta/gamma bands at each electrode, their
+                  ratios, and left-versus-right frontal balance (a long-established correlate of
+                  pleasant versus unpleasant feeling).
+                </li>
+                <li>
+                  Those numbers are re-scaled within each session, so the model can&apos;t cheat
+                  by recognising <em>which recording</em> it is looking at instead of learning the
+                  brain pattern.
+                </li>
+                <li>
+                  A regression model (ridge regression or a random forest — deliberately simple,
+                  because the dataset is small) learns the mapping from those numbers to the
+                  image&apos;s known valence and arousal.
+                </li>
+                <li>
+                  Afterwards, every completed session is run through the trained model
+                  automatically, producing the predicted trajectory shown on the page. Training
+                  happens separately, about once a week — new recordings do not change existing
+                  predictions.
+                </li>
+              </ol>
+            </Explainer>
+
+            <Explainer title="What the numbers mean (and which direction is good)">
+              <Term term="R² — higher is better">
+                How much of the real variation the model captures.{" "}
+                <span className="font-mono tnum">1.00</span> is a perfect prediction,{" "}
+                <span className="font-mono tnum">0.00</span> means it does no better than ignoring
+                the EEG and always guessing the average rating, and{" "}
+                <strong className="font-semibold text-ink">a negative value means it does worse
+                than that guess</strong>. Negative scores are normal for a model trained on very
+                little data.
+              </Term>
+              <Term term="Baseline (&ldquo;null&rdquo;) — the number to beat">
+                The score you would get by always predicting the average rating, without looking
+                at the brain at all. The model is only earning its keep when its R² is above this.
+              </Term>
+              <Term term="Typical error — lower is better">
+                On average, how far off the prediction is, in points on the 1–7 scale. An error of{" "}
+                <span className="font-mono tnum">0.5</span> means predictions land about half a
+                point from the true rating.
+              </Term>
+              <Term term="Distinct images — the real sample size">
+                A single image produces many 2-second windows, but they all share one correct
+                answer, so they are not independent examples. Progress toward a trustworthy model
+                is therefore counted in <em>different images recorded</em>, not hours of EEG.
+              </Term>
+            </Explainer>
+
+            <Explainer title="How much should I trust it today?">
+              <p>
+                Treat it as a working pipeline, not a clinical measure. The full loop — record,
+                train, predict, display — is built and running, but the model has seen only a
+                small number of distinct images so far, which is far too few for its predictions
+                to be reliable about any individual person or moment. The numbers on this page are
+                there to show the system working and to track progress as more sessions are
+                recorded. Accuracy improves as OASIS-based sessions accumulate.
+              </p>
+            </Explainer>
+
+            <Explainer title="Path to a trustworthy model">
+              <ul className="space-y-3">
+                <PipelineStep done={(dataOasisLabelled || 0) > 0}>
+                  <strong className="font-semibold text-ink">Rated images loaded.</strong> Each
+                  OASIS image carries a valence &amp; arousal rating averaged over hundreds of
+                  people — these are the answers the model learns from.
+                </PipelineStep>
+                <PipelineStep done={(dataSessionsWithOasis || 0) > 0}>
+                  <strong className="font-semibold text-ink">Record sessions using those
+                  images.</strong> A session only becomes training data if its image set is built
+                  from rated OASIS images. Sessions run on other images still work normally, they
+                  just teach the model nothing.
+                </PipelineStep>
+                <PipelineStep done={trained}>
+                  <strong className="font-semibold text-ink">Train a model.</strong> Happens
+                  automatically each week once there is data. A retrained model only replaces the
+                  one in use if it scores at least as well.
+                </PipelineStep>
+                <PipelineStep done={readinessReady}>
+                  <strong className="font-semibold text-ink">Reach enough different images.</strong>{" "}
+                  Accuracy is tested by hiding whole images from the model and checking its
+                  guesses on them, so what counts is the number of different images recorded — not
+                  the amount of EEG. This is the step that takes time.
+                </PipelineStep>
+              </ul>
+            </Explainer>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 export default function InsightsPage() {
   const router = useRouter();
   const [status, setStatus] = useState(null);
@@ -214,11 +381,11 @@ export default function InsightsPage() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
 
+  const [selectedClientId, setSelectedClientId] = useState("");
   const [selectedSession, setSelectedSession] = useState("");
   const [predictions, setPredictions] = useState(null);
   const [predLoading, setPredLoading] = useState(false);
-  const [primerOpen, setPrimerOpen] = useState(false);
-  const [pathOpen, setPathOpen] = useState(false);
+  const [howItWorksOpen, setHowItWorksOpen] = useState(false);
   const [trainPanelOpen, setTrainPanelOpen] = useState(false);
   const [clientSessions, setClientSessions] = useState(null);
   const [chosenSessions, setChosenSessions] = useState(new Set());
@@ -251,11 +418,7 @@ export default function InsightsPage() {
   const loadPredictions = async (sessionId, modelVersion) => {
     setSelectedSession(sessionId);
     setPredictions(null);
-    if (!sessionId) {
-      setTrainPanelOpen(false);
-      setTrainResult(null);
-      return;
-    }
+    if (!sessionId) return;
     setPredLoading(true);
     try {
       const res = await getPhase1Predictions(sessionId, modelVersion);
@@ -267,16 +430,27 @@ export default function InsightsPage() {
     }
   };
 
-  /* Open the training panel for the selected session's client, pre-selecting every
-     one of their sessions. Pre-selecting all is the honest default: excluding a
-     session should be a deliberate act with a reason, not the starting position. */
+  /* Client picked from the dropdown. Resets everything downstream of it — the
+     session list, any predictions on screen, and the training panel — since none
+     of those mean anything until a session within this client is chosen too. */
+  const selectClient = (clientId) => {
+    setSelectedClientId(clientId);
+    setSelectedSession("");
+    setPredictions(null);
+    setTrainPanelOpen(false);
+    setTrainResult(null);
+  };
+
+  /* Open the training panel for the selected client, pre-selecting every one of
+     their sessions. Pre-selecting all is the honest default: excluding a session
+     should be a deliberate act with a reason, not the starting position. */
   const openTrainPanel = async () => {
-    if (!selectedClient) return;
+    if (!selectedClientId) return;
     setTrainPanelOpen(true);
     setTrainResult(null);
     setClientSessions(null);
     try {
-      const res = await getPhase1ClientSessions(selectedClient.client_id);
+      const res = await getPhase1ClientSessions(selectedClientId);
       if (res.ok) {
         const data = await res.json();
         setClientSessions(data.session_ids || []);
@@ -288,12 +462,12 @@ export default function InsightsPage() {
   };
 
   const generateModel = async () => {
-    if (!selectedClient || chosenSessions.size === 0) return;
+    if (!selectedClientId || chosenSessions.size === 0) return;
     setTraining(true);
     setTrainResult(null);
     try {
       const res = await trainPhase1Model({
-        clientId: selectedClient.client_id,
+        clientId: selectedClientId,
         sessionIds: [...chosenSessions],
       });
       const data = await res.json().catch(() => ({}));
@@ -335,7 +509,32 @@ export default function InsightsPage() {
   const availableModels = predictions?.available_models || [];
   const shownModelVersion = predictions?.model_version ?? null;
   const shownModel = availableModels.find((m) => m.model_version === shownModelVersion) || null;
-  const selectedClient = sessions.find((s) => s.session_id === selectedSession) || null;
+
+  /* Clients worth picking from, derived from the flat session list rather than a
+     separate fetch — every session already carries its client's id, name and
+     personal-model flag, and each client appears once here regardless of how
+     many sessions they have. Ordered by their most recent session so the people
+     seen most recently float to the top of the dropdown. */
+  const clients = (() => {
+    const byId = new Map();
+    for (const s of sessions) {
+      if (!s.client_id) continue;
+      const existing = byId.get(s.client_id);
+      if (!existing || new Date(s.start_time) > new Date(existing.last_session_at)) {
+        byId.set(s.client_id, {
+          client_id: s.client_id,
+          client_name: s.client_name,
+          has_personal_model: s.has_personal_model,
+          last_session_at: s.start_time,
+        });
+      }
+    }
+    return [...byId.values()].sort(
+      (a, b) => new Date(b.last_session_at) - new Date(a.last_session_at)
+    );
+  })();
+  const selectedClient = clients.find((c) => c.client_id === selectedClientId) || null;
+  const clientSessionOptions = sessions.filter((s) => s.client_id === selectedClientId);
 
   const predSamples = predRows.map((p) => ({
     t_seconds: Number(p.t_seconds),
@@ -401,11 +600,26 @@ export default function InsightsPage() {
             title="Insights"
             subtitle="EEG → emotion model · Phase 1 (valence & arousal)"
             actions={
-              <Button variant="ghost" onClick={load} disabled={loading}>
-                {loading ? "Refreshing…" : "Refresh"}
-              </Button>
+              <>
+                <Button variant="ghost" onClick={() => setHowItWorksOpen(true)}>
+                  How it works?
+                </Button>
+                <Button variant="ghost" onClick={load} disabled={loading}>
+                  {loading ? "Refreshing…" : "Refresh"}
+                </Button>
+              </>
             }
           />
+
+          {howItWorksOpen && (
+            <HowItWorksModal
+              onClose={() => setHowItWorksOpen(false)}
+              trained={trained}
+              readinessReady={readiness.ready_to_train}
+              dataOasisLabelled={data.oasis_images_labelled}
+              dataSessionsWithOasis={data.sessions_with_oasis_eeg}
+            />
+          )}
 
           {loading && !status ? (
             <div className="mt-10 flex items-center gap-3 text-muted">
@@ -416,124 +630,8 @@ export default function InsightsPage() {
             <Alert tone="crit" className="mt-6">{error}</Alert>
           ) : (
             <div className="mt-6 space-y-6">
-              {/* Plain-language primer — this tab is read by clinicians, not ML people */}
-              <Card>
-                <CardHeader
-                  title="What this page shows"
-                  subtitle="A plain-language guide to the model and the numbers below."
-                  actions={
-                    <Button variant="ghost" onClick={() => setPrimerOpen((o) => !o)}>
-                      {primerOpen ? "Hide" : "Show"}
-                    </Button>
-                  }
-                />
-                <div className={`px-6 py-5 ${primerOpen ? "" : "hidden"}`}>
-                  <p className="text-[13.5px] leading-relaxed text-ink-2">
-                    Every OASIS image used in a session comes with an{" "}
-                    <strong className="font-semibold text-ink">established emotional rating</strong>,
-                    averaged from hundreds of people who rated it in published research. We record
-                    the client&apos;s EEG while they look at that image, and train a model to work
-                    backwards: given only the brain activity, predict the rating the image is known
-                    to carry. The two things it predicts are:
-                  </p>
-
-                  <div className="mt-5 grid gap-5 sm:grid-cols-2">
-                    <ScaleRow
-                      label="Valence — how pleasant"
-                      low="unpleasant, distressing"
-                      high="pleasant, positive"
-                      color="--accent"
-                    />
-                    <ScaleRow
-                      label="Arousal — how intense"
-                      low="calm, relaxed"
-                      high="excited, activated"
-                      color="--warn"
-                    />
-                  </div>
-                  <p className="mt-3 text-[12.5px] leading-relaxed text-muted">
-                    The two are independent: a peaceful landscape is pleasant and calm, a horror
-                    image is unpleasant and intense, and a thrilling one can be pleasant
-                    <em> and</em> intense.
-                  </p>
-
-                  <div className="mt-6 space-y-4">
-                    <Explainer title="How the model works, step by step">
-                      <ol className="ml-4 list-decimal space-y-1.5">
-                        <li>
-                          While an image is on screen, the headset records EEG. That stretch is cut
-                          into overlapping <strong className="font-semibold text-ink">2-second
-                          windows</strong> (called <em>epochs</em>) — the unit the model learns from.
-                        </li>
-                        <li>
-                          Each window is reduced to 50 numbers summarising the brain rhythms present
-                          — the strength of the delta/theta/alpha/beta/gamma bands at each electrode,
-                          their ratios, and left-versus-right frontal balance (a long-established
-                          correlate of pleasant versus unpleasant feeling).
-                        </li>
-                        <li>
-                          Those numbers are re-scaled within each session, so the model can&apos;t
-                          cheat by recognising <em>which recording</em> it is looking at instead of
-                          learning the brain pattern.
-                        </li>
-                        <li>
-                          A regression model (ridge regression or a random forest — deliberately
-                          simple, because the dataset is small) learns the mapping from those numbers
-                          to the image&apos;s known valence and arousal.
-                        </li>
-                        <li>
-                          Afterwards, every completed session is run through the trained model
-                          automatically, producing the predicted trajectory shown below. Training
-                          happens separately, about once a week — new recordings do not change
-                          existing predictions.
-                        </li>
-                      </ol>
-                    </Explainer>
-
-                    <Explainer title="What the numbers mean (and which direction is good)">
-                      <Term term="R² — higher is better">
-                        How much of the real variation the model captures.{" "}
-                        <span className="font-mono tnum">1.00</span> is a perfect prediction,{" "}
-                        <span className="font-mono tnum">0.00</span> means it does no better than
-                        ignoring the EEG and always guessing the average rating, and{" "}
-                        <strong className="font-semibold text-ink">a negative value means it does
-                        worse than that guess</strong>. Negative scores are normal for a model
-                        trained on very little data.
-                      </Term>
-                      <Term term="Baseline (&ldquo;null&rdquo;) — the number to beat">
-                        The score you would get by always predicting the average rating, without
-                        looking at the brain at all. The model is only earning its keep when its R²
-                        is above this.
-                      </Term>
-                      <Term term="Typical error — lower is better">
-                        On average, how far off the prediction is, in points on the 1–7 scale. An
-                        error of <span className="font-mono tnum">0.5</span> means predictions land
-                        about half a point from the true rating.
-                      </Term>
-                      <Term term="Distinct images — the real sample size">
-                        A single image produces many 2-second windows, but they all share one correct
-                        answer, so they are not independent examples. Progress toward a trustworthy
-                        model is therefore counted in <em>different images recorded</em>, not hours of
-                        EEG — which is why the target below is measured that way.
-                      </Term>
-                    </Explainer>
-
-                    <Explainer title="How much should I trust it today?">
-                      <p>
-                        Treat it as a working pipeline, not a clinical measure. The full loop —
-                        record, train, predict, display — is built and running, but the model has
-                        seen only a small number of distinct images so far, which is far too few for
-                        its predictions to be reliable about any individual person or moment. The
-                        numbers on this page are there to show the system working and to track
-                        progress as more sessions are recorded. Accuracy improves as OASIS-based
-                        sessions accumulate.
-                      </p>
-                    </Explainer>
-                  </div>
-                </div>
-              </Card>
-
-              {/* Model status */}
+              {/* Model status — the first thing on the page, so a clinician can see at a
+                  glance whether there is a working model at all before anything else. */}
               <Card>
                 <CardHeader
                   title="Model status"
@@ -613,118 +711,6 @@ export default function InsightsPage() {
                           </Alert>
                         )}
                       </div>
-
-                      {/* Personal model — only once a session (and so a client) is
-                          chosen, because there is no "this client" without one. */}
-                      {selectedClient?.client_id && (
-                        <div className="mt-6 border-t border-border pt-5">
-                          <div className="flex flex-wrap items-baseline justify-between gap-3">
-                            <h3 className="text-[13px] font-semibold text-ink">
-                              Personal model — {selectedClient.client_name || "this client"}
-                            </h3>
-                            {!trainPanelOpen && (
-                              <Button variant="ghost" onClick={openTrainPanel}>
-                                {selectedClient.has_personal_model ? "Retrain…" : "Train one…"}
-                              </Button>
-                            )}
-                          </div>
-                          <p className="mt-1.5 text-[13px] leading-relaxed text-ink-2">
-                            {selectedClient.has_personal_model
-                              ? "This client has their own model, trained only on their recordings. It is what their sessions are shown with."
-                              : "This client has no model of their own yet, so their sessions are shown using the all-clients model."}{" "}
-                            Brain activity differs enough between people that a model fitted to
-                            one person usually reads them better than a shared one.
-                          </p>
-
-                          {trainPanelOpen && (
-                            <div className="mt-4 rounded-md border border-border bg-inset/40 p-4">
-                              {clientSessions === null ? (
-                                <div className="flex items-center gap-2 text-muted">
-                                  <Spinner size={14} />
-                                  <span className="text-[13px]">Loading this client&apos;s sessions…</span>
-                                </div>
-                              ) : clientSessions.length === 0 ? (
-                                <p className="text-[13px] text-muted">
-                                  This client has no completed sessions to train from yet.
-                                </p>
-                              ) : (
-                                <>
-                                  <p className="text-[13px] font-semibold text-ink">
-                                    Train on which sessions?
-                                  </p>
-                                  <p className="mt-1 text-[12.5px] leading-relaxed text-muted">
-                                    All are included by default. Leave a recording out only if
-                                    you know it was bad — a dead electrode, say. Which sessions
-                                    you chose is recorded alongside the model.
-                                  </p>
-                                  <div className="mt-3 max-h-44 space-y-1.5 overflow-y-auto">
-                                    {clientSessions.map((sid) => {
-                                      const meta = sessions.find((s) => s.session_id === sid);
-                                      return (
-                                        <label
-                                          key={sid}
-                                          className="flex cursor-pointer items-center gap-2.5 text-[13px] text-ink-2"
-                                        >
-                                          <input
-                                            type="checkbox"
-                                            className="accent-[var(--accent)]"
-                                            checked={chosenSessions.has(sid)}
-                                            onChange={(e) => {
-                                              const next = new Set(chosenSessions);
-                                              if (e.target.checked) next.add(sid);
-                                              else next.delete(sid);
-                                              setChosenSessions(next);
-                                            }}
-                                          />
-                                          <span className="font-mono text-[12px]">{shortId(sid)}</span>
-                                          {meta && (
-                                            <span className="text-muted">
-                                              {new Date(meta.start_time).toLocaleDateString()}
-                                            </span>
-                                          )}
-                                        </label>
-                                      );
-                                    })}
-                                  </div>
-                                  <div className="mt-4 flex flex-wrap items-center gap-2">
-                                    <Button
-                                      onClick={generateModel}
-                                      disabled={training || chosenSessions.size === 0}
-                                    >
-                                      {training
-                                        ? "Training…"
-                                        : `Train on ${chosenSessions.size} session${chosenSessions.size === 1 ? "" : "s"}`}
-                                    </Button>
-                                    <Button
-                                      variant="ghost"
-                                      onClick={() => setTrainPanelOpen(false)}
-                                      disabled={training}
-                                    >
-                                      Cancel
-                                    </Button>
-                                  </div>
-                                </>
-                              )}
-
-                              {trainResult && (
-                                <Alert tone={trainResult.ok ? "good" : "warn"} className="mt-4">
-                                  <span className="block">{trainResult.message}</span>
-                                  {trainResult.model && (
-                                    <span className="mt-1 block font-normal">
-                                      Learned from{" "}
-                                      <strong className="font-semibold">
-                                        {trainResult.model.n_distinct_images} different images
-                                      </strong>{" "}
-                                      across {trainResult.model.n_sessions} session
-                                      {trainResult.model.n_sessions === 1 ? "" : "s"}.
-                                    </span>
-                                  )}
-                                </Alert>
-                              )}
-                            </div>
-                          )}
-                        </div>
-                      )}
                     </>
                   ) : (
                     <>
@@ -757,14 +743,29 @@ export default function InsightsPage() {
                         onChange={(v) => loadPredictions(selectedSession, v)}
                       />
                       <Select
-                        className="min-w-[240px]"
+                        className="min-w-[200px]"
+                        value={selectedClientId}
+                        onChange={(e) => selectClient(e.target.value)}
+                      >
+                        <option value="">Select a client…</option>
+                        {clients.map((c) => (
+                          <option key={c.client_id} value={c.client_id}>
+                            {c.client_name || "Unnamed client"}
+                            {c.has_personal_model ? " · has own model" : ""}
+                          </option>
+                        ))}
+                      </Select>
+                      <Select
+                        className="min-w-[220px]"
                         value={selectedSession}
                         onChange={(e) => loadPredictions(e.target.value)}
+                        disabled={!selectedClientId}
                       >
-                        <option value="">Select a session…</option>
-                        {sessions.map((s) => (
+                        <option value="">
+                          {selectedClientId ? "Select a session…" : "Pick a client first"}
+                        </option>
+                        {clientSessionOptions.map((s) => (
                           <option key={s.session_id} value={s.session_id}>
-                            {s.client_name ? `${s.client_name} · ` : ""}
                             {new Date(s.start_time).toLocaleDateString()} ·{" "}
                             {shortId(s.session_id)}
                             {s.n_predictions ? ` · ${s.n_predictions} pts` : " · no predictions"}
@@ -775,8 +776,122 @@ export default function InsightsPage() {
                   }
                 />
                 <div className="px-6 py-5">
+                  {/* Personal model — surfaces the instant a client is picked, since
+                      that is all it depends on; it needs no session selected. */}
+                  {selectedClient && (
+                    <div className="mb-6 border-b border-border pb-5">
+                      <div className="flex flex-wrap items-baseline justify-between gap-3">
+                        <h3 className="text-[13px] font-semibold text-ink">
+                          Personal model — {selectedClient.client_name || "this client"}
+                        </h3>
+                        {!trainPanelOpen && (
+                          <Button variant="ghost" onClick={openTrainPanel}>
+                            {selectedClient.has_personal_model ? "Retrain…" : "Train one…"}
+                          </Button>
+                        )}
+                      </div>
+                      <p className="mt-1.5 text-[13px] leading-relaxed text-ink-2">
+                        {selectedClient.has_personal_model
+                          ? "This client has their own model, trained only on their recordings. It is what their sessions are shown with."
+                          : "This client has no model of their own yet, so their sessions are shown using the all-clients model."}{" "}
+                        Brain activity differs enough between people that a model fitted to one
+                        person usually reads them better than a shared one.
+                      </p>
+
+                      {trainPanelOpen && (
+                        <div className="mt-4 rounded-md border border-border bg-inset/40 p-4">
+                          {clientSessions === null ? (
+                            <div className="flex items-center gap-2 text-muted">
+                              <Spinner size={14} />
+                              <span className="text-[13px]">Loading this client&apos;s sessions…</span>
+                            </div>
+                          ) : clientSessions.length === 0 ? (
+                            <p className="text-[13px] text-muted">
+                              This client has no completed sessions to train from yet.
+                            </p>
+                          ) : (
+                            <>
+                              <p className="text-[13px] font-semibold text-ink">
+                                Train on which sessions?
+                              </p>
+                              <p className="mt-1 text-[12.5px] leading-relaxed text-muted">
+                                All are included by default. Leave a recording out only if you
+                                know it was bad — a dead electrode, say. Which sessions you chose
+                                is recorded alongside the model.
+                              </p>
+                              <div className="mt-3 max-h-44 space-y-1.5 overflow-y-auto">
+                                {clientSessions.map((sid) => {
+                                  const meta = sessions.find((s) => s.session_id === sid);
+                                  return (
+                                    <label
+                                      key={sid}
+                                      className="flex cursor-pointer items-center gap-2.5 text-[13px] text-ink-2"
+                                    >
+                                      <input
+                                        type="checkbox"
+                                        className="accent-[var(--accent)]"
+                                        checked={chosenSessions.has(sid)}
+                                        onChange={(e) => {
+                                          const next = new Set(chosenSessions);
+                                          if (e.target.checked) next.add(sid);
+                                          else next.delete(sid);
+                                          setChosenSessions(next);
+                                        }}
+                                      />
+                                      <span className="font-mono text-[12px]">{shortId(sid)}</span>
+                                      {meta && (
+                                        <span className="text-muted">
+                                          {new Date(meta.start_time).toLocaleDateString()}
+                                        </span>
+                                      )}
+                                    </label>
+                                  );
+                                })}
+                              </div>
+                              <div className="mt-4 flex flex-wrap items-center gap-2">
+                                <Button
+                                  onClick={generateModel}
+                                  disabled={training || chosenSessions.size === 0}
+                                >
+                                  {training
+                                    ? "Training…"
+                                    : `Train on ${chosenSessions.size} session${chosenSessions.size === 1 ? "" : "s"}`}
+                                </Button>
+                                <Button
+                                  variant="ghost"
+                                  onClick={() => setTrainPanelOpen(false)}
+                                  disabled={training}
+                                >
+                                  Cancel
+                                </Button>
+                              </div>
+                            </>
+                          )}
+
+                          {trainResult && (
+                            <Alert tone={trainResult.ok ? "good" : "warn"} className="mt-4">
+                              <span className="block">{trainResult.message}</span>
+                              {trainResult.model && (
+                                <span className="mt-1 block font-normal">
+                                  Learned from{" "}
+                                  <strong className="font-semibold">
+                                    {trainResult.model.n_distinct_images} different images
+                                  </strong>{" "}
+                                  across {trainResult.model.n_sessions} session
+                                  {trainResult.model.n_sessions === 1 ? "" : "s"}.
+                                </span>
+                              )}
+                            </Alert>
+                          )}
+                        </div>
+                      )}
+                    </div>
+                  )}
+
                   {!trained ? (
                     <p className="text-sm text-muted">Train a model to generate predictions.</p>
+                  ) : !selectedClientId ? (
+                    <p className="text-sm text-muted">Pick a client to see their sessions.</p>
                   ) : !selectedSession ? (
                     <p className="text-sm text-muted">Pick a session to see its predicted valence & arousal over time.</p>
                   ) : predLoading ? (
@@ -890,42 +1005,6 @@ export default function InsightsPage() {
                 </div>
               </div>
 
-              {/* Path to a trained model */}
-              <Card>
-                <CardHeader
-                  title="Path to a trustworthy model"
-                  subtitle="Everything runs end to end today. What is left is collecting enough data for the predictions to be reliable."
-                  actions={
-                    <Button variant="ghost" onClick={() => setPathOpen((o) => !o)}>
-                      {pathOpen ? "Hide" : "Show"}
-                    </Button>
-                  }
-                />
-                <ul className={`space-y-3 px-6 py-5 ${pathOpen ? "" : "hidden"}`}>
-                  <PipelineStep done={(data.oasis_images_labelled || 0) > 0}>
-                    <strong className="font-semibold text-ink">Rated images loaded.</strong>{" "}
-                    Each OASIS image carries a valence &amp; arousal rating averaged over hundreds of
-                    people — these are the answers the model learns from.
-                  </PipelineStep>
-                  <PipelineStep done={(data.sessions_with_oasis_eeg || 0) > 0}>
-                    <strong className="font-semibold text-ink">Record sessions using those images.</strong>{" "}
-                    A session only becomes training data if its image set is built from rated OASIS
-                    images. Sessions run on other images still work normally, they just teach the
-                    model nothing.
-                  </PipelineStep>
-                  <PipelineStep done={trained}>
-                    <strong className="font-semibold text-ink">Train a model.</strong>{" "}
-                    Happens automatically each week once there is data. A retrained model only
-                    replaces the one in use if it scores at least as well.
-                  </PipelineStep>
-                  <PipelineStep done={readiness.ready_to_train}>
-                    <strong className="font-semibold text-ink">Reach enough different images.</strong>{" "}
-                    Accuracy is tested by hiding whole images from the model and checking its guesses
-                    on them, so what counts is the number of different images recorded — not the
-                    amount of EEG. This is the step that takes time.
-                  </PipelineStep>
-                </ul>
-              </Card>
             </div>
           )}
         </PageContainer>
