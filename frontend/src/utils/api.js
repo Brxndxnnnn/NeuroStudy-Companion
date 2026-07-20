@@ -387,6 +387,14 @@ export async function getClinic(clinicId) {
   const res = await fetchWithAuth(`${BASE_URL}/clinics/${clinicId}`);
   return res;
 }
+export async function getClinicsDatabaseAccessOverview() {
+  return fetchWithAuth(`${BASE_URL}/clinics/database-access`);
+}
+export async function revokeClinicDatabaseAccess(activationId) {
+  return fetchWithAuth(`${BASE_URL}/clinics/activation-codes/${activationId}/revoke`, {
+    method: "PATCH",
+  });
+}
 
 // CLINIC STIMULUS SETS
 // Technicians are automatically scoped to their own clinic by the API.

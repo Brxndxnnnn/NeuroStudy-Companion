@@ -370,4 +370,190 @@ const redeemDatabaseAccess = async ({ activationCodeHash, databasePassword }, cl
     return rows[0] ?? null
 }
 
-export default { findAll, findById, create, update, getClinicStimulusSets, getClinicStimulusSetById, updateClinicStimulusSet, createDatabaseAccess, redeemDatabaseAccess }
+const getDatabaseAccessOverview = async (client = pool) => {
+    const { rows } = await query(client, `
+        WITH role_data AS(
+            SELECT
+                cdr.clinic_id,
+                cdr.database_role::text AS database_role,
+                COALESCE(pr.rolcanlogin,false) AS can_login,
+                COALESCE(pr.rolconnlimit,-1) AS connection_limit,
+                COUNT(cac.activation_id)::integer AS activation_code_count,
+                COALESCE(
+                    jsonb_agg(
+                        jsonb_build_object(
+                            'activation_id',cac.activation_id,
+                            'expires_at',cac.expires_at,
+                            'max_uses',cac.max_uses,
+                            'use_count',cac.use_count,
+                            'revoked_at',cac.revoked_at,
+                            'created_at',cac.created_at,
+                            'last_used_at',cac.last_used_at,
+                            'status',
+                                CASE
+                                    WHEN cac.revoked_at IS NOT NULL
+                                        THEN 'revoked'
+                                    WHEN cac.use_count>=cac.max_uses
+                                        THEN 'used'
+                                    WHEN cac.expires_at<=now()
+                                        THEN 'expired'
+                                    ELSE 'available'
+                                END
+                        )
+                        ORDER BY cac.created_at DESC
+                    ) FILTER(
+                        WHERE cac.activation_id IS NOT NULL
+                    ),
+                    '[]'::jsonb
+                ) AS activation_codes
+            FROM public.clinic_database_roles cdr
+            LEFT JOIN pg_catalog.pg_roles pr
+                ON pr.rolname=cdr.database_role::text
+            LEFT JOIN public.clinic_activation_codes cac
+                ON cac.database_role=cdr.database_role
+            GROUP BY
+                cdr.clinic_id,
+                cdr.database_role,
+                pr.rolcanlogin,
+                pr.rolconnlimit
+        )
+        SELECT
+            c.clinic_id,
+            c.name,
+            c.address,
+            c.created_at,
+            COUNT(rd.database_role)::integer AS database_role_count,
+            COALESCE(
+                SUM(rd.activation_code_count),
+                0
+            )::integer AS activation_code_count,
+            COALESCE(
+                jsonb_agg(
+                    jsonb_build_object(
+                        'database_role',rd.database_role,
+                        'can_login',rd.can_login,
+                        'connection_limit',rd.connection_limit,
+                        'activation_code_count',
+                            rd.activation_code_count,
+                        'activation_codes',
+                            rd.activation_codes
+                    )
+                    ORDER BY rd.database_role
+                ) FILTER(
+                    WHERE rd.database_role IS NOT NULL
+                ),
+                '[]'::jsonb
+            ) AS database_roles
+        FROM public.clinics c
+        LEFT JOIN role_data rd
+            ON rd.clinic_id=c.clinic_id
+        GROUP BY
+            c.clinic_id,
+            c.name,
+            c.address,
+            c.created_at
+        ORDER BY
+            c.created_at DESC,
+            c.name ASC
+    `)
+
+    return rows
+}
+
+const revokeActivationCode = async (activationId, client = pool) => {
+    await query(client, 'BEGIN')
+
+    try {
+        const { rows } = await query(client, `
+            SELECT
+                activation_id,
+                clinic_id,
+                database_role,
+                expires_at,
+                max_uses,
+                use_count,
+                revoked_at,
+                created_at,
+                last_used_at,
+                expires_at<=now() AS is_expired
+            FROM public.clinic_activation_codes
+            WHERE activation_id=$1::uuid
+            FOR UPDATE
+        `, [activationId])
+
+        const activationCode = rows[0]
+
+        if (!activationCode) {
+            await query(client, 'ROLLBACK')
+
+            return {
+                outcome: 'not_found',
+                activationCode: null
+            }
+        }
+
+        if (activationCode.use_count >= activationCode.max_uses) {
+            await query(client, 'ROLLBACK')
+
+            return {
+                outcome: 'used',
+                activationCode
+            }
+        }
+
+        if (activationCode.is_expired) {
+            await query(client, 'ROLLBACK')
+
+            return {
+                outcome: 'expired',
+                activationCode
+            }
+        }
+
+        if (activationCode.revoked_at) {
+            await query(client, 'COMMIT')
+
+            return {
+                outcome: 'already_revoked',
+                activationCode: {
+                    ...activationCode,
+                    status: 'revoked'
+                }
+            }
+        }
+
+        const result = await query(client, `
+            UPDATE public.clinic_activation_codes
+            SET revoked_at=now()
+            WHERE activation_id=$1::uuid
+            RETURNING
+                activation_id,
+                clinic_id,
+                database_role,
+                expires_at,
+                max_uses,
+                use_count,
+                revoked_at,
+                created_at,
+                last_used_at
+        `, [activationId])
+
+        await query(client, 'COMMIT')
+
+        return {
+            outcome: 'revoked',
+            activationCode: {
+                ...result.rows[0],
+                status: 'revoked'
+            }
+        }
+    } catch (err) {
+        await query(client, 'ROLLBACK').catch(() => { })
+        throw err
+    }
+}
+
+export default { 
+    findAll, findById, create, update, getClinicStimulusSets, getClinicStimulusSetById, updateClinicStimulusSet, 
+    createDatabaseAccess, redeemDatabaseAccess, getDatabaseAccessOverview, revokeActivationCode 
+}
