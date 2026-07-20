@@ -2,7 +2,7 @@
 import { useState, useEffect } from "react";
 import { useRouter } from "next/navigation";
 import TopNav from "@/components/TopNav";
-import { createUser, deleteUser, getUsers, updateUser, getClinics } from "@/utils/api";
+import { createUser, deleteUser, getUsers, updateUser, getClinicsDatabaseAccessOverview, revokeClinicDatabaseAccess } from "@/utils/api";
 import {
   PageContainer,
   PageHeading,
