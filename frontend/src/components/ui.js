@@ -147,9 +147,26 @@ export function Input({ className = "", ...props }) {
 
 export function Select({ className = "", children, ...props }) {
   return (
-    <select className={`${INPUT} appearance-none cursor-pointer ${className}`} {...props}>
-      {children}
-    </select>
+    <div className="relative">
+      <select
+        className={`${INPUT} peer appearance-none cursor-pointer pr-9 ${className}`}
+        {...props}
+      >
+        {children}
+      </select>
+      {/* Native <select> arrows are dropped (appearance-none, for consistent
+          cross-browser styling) — this replaces the affordance that it's a
+          dropdown, since without it nothing distinguishes a select from a
+          plain text field. */}
+      <svg
+        aria-hidden="true"
+        viewBox="0 0 20 20"
+        fill="none"
+        className="pointer-events-none absolute right-3.5 top-1/2 h-4 w-4 -translate-y-1/2 text-muted peer-disabled:opacity-50"
+      >
+        <path d="M5.5 7.5 10 12l4.5-4.5" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" />
+      </svg>
+    </div>
   );
 }
 
