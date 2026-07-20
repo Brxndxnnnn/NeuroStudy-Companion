@@ -272,13 +272,22 @@ def session_prediction_models(conn, session_id: str) -> list[dict]:
 def sessions_with_predictions(conn) -> list[dict]:
     """
     Completed sessions and their prediction status, for the tab's session picker.
+
+    Carries client_id and client_name so the tab can say whose recording it is and
+    offer to train that person's model without a second round trip. has_personal_model
+    lets it show, per session, whether a personal model already exists to serve it.
     """
     rows = conn.execute(text("""
         SELECT s.session_id, s.start_time, s.predictions_status,
                s.predictions_model_version,
+               s.client_id, c.name AS client_name,
                (SELECT count(*) FROM session_predictions p
-                WHERE p.session_id = s.session_id) AS n_predictions
+                WHERE p.session_id = s.session_id) AS n_predictions,
+               EXISTS (SELECT 1 FROM ml_models m
+                       WHERE m.client_id = s.client_id AND m.is_current)
+                   AS has_personal_model
         FROM   sessions s
+        LEFT   JOIN clients c ON c.client_id = s.client_id
         WHERE  s.sync_status = 'completed'
         ORDER  BY s.start_time DESC
     """)).mappings().all()
