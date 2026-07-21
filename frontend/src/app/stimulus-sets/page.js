@@ -85,7 +85,6 @@ export default function StimulusSetsPage() {
       try {
         const res = await getImageCategories();
         const body = await res.json();
-        console.log("Image categories response:", body);
         if (!res.ok)
           throw new Error(
             responseMessage(body, "Could not load image categories.")

@@ -6,18 +6,15 @@ import {
   getImages,
   getClinicStimulusSet,
   getQuestions,
-  getQuestionnaires,
-  getQuestionnaireQuestions,
   startSession,
   getSession,
   endSession,
   createEvent,
   hideEvent,
-  submitQuestionnaireAnswers,
 } from "@/utils/api";
 import { SessionTopBar } from "@/components/TopNav";
 import { Card, Button, Label, Pill, Alert, Spinner, Field, Input } from "@/components/ui";
-import LikertSurvey, { allAnswered as allSurveyAnswered } from "@/components/LikertSurvey";
+import PostSessionSurvey from "@/components/PostSessionSurvey";
 
 // How long each stimulus image stays on screen (ms).
 const IMAGE_DISPLAY_MS = 3000;
@@ -77,18 +74,11 @@ export default function ActiveSessionMockup() {
   const [images, setImages] = useState([]);
   const [questions, setQuestions] = useState([]);
 
-  const [surveyQuestions, setSurveyQuestions] = useState([]);
-  const [isLoadingData, setIsLoadingData] = useState(false);
-  const [currentSurveyIndex, setCurrentSurveyIndex] = useState(0);
-  const [surveyComplete, setSurveyComplete] = useState(false);
-  const [selectedLanguage, setSelectedLanguage] = useState("en");
-  const [questionnaires, setQuestionnaires] = useState([]);
-  const [selectedQuestionnaireId, setSelectedQuestionnaireId] = useState("");
-  const [surveyAnswers, setSurveyAnswers] = useState({});
   const [currentImageIndex, setCurrentImageIndex] = useState(0);
   const currentEventIdRef = useRef(null);
   const [currentMathIndex, setCurrentMathIndex] = useState(0);
   const [mathAnswers, setMathAnswers] = useState({});
+  const [mathError, setMathError] = useState("");
   const [mathInputEnabled, setMathInputEnabled] = useState(false);
   const currentMathEventIdRef = useRef(null);
   const [patientName, setPatientName] = useState("");
@@ -180,55 +170,6 @@ export default function ActiveSessionMockup() {
       return () => clearTimeout(timer);
     }
   }, [currentStep, currentMathIndex, questions]);
-
-  // 4. FETCH SURVEY DATA (questionnaires & questions)
-  useEffect(() => {
-    if (currentStep === "survey" && !isLoadingData) {
-      const fetchSurveyData = async () => {
-        setIsLoadingData(true);
-        try {
-          const qRes = await getQuestionnaires();
-          if (!qRes.ok) throw new Error("Failed to fetch questionnaires");
-          const qData = await qRes.json();
-          setQuestionnaires(qData);
-
-          if (qData.length > 0) {
-            const firstId = qData[0].questionnaire_id || qData[0].id;
-            setSelectedQuestionnaireId(firstId);
-            await fetchQuestionsForSurvey(firstId, selectedLanguage);
-          }
-        } catch (err) {
-          console.error("Error loading survey:", err);
-        } finally {
-          setIsLoadingData(false);
-        }
-      };
-      fetchSurveyData();
-    }
-  }, [currentStep]);
-
-  const fetchQuestionsForSurvey = async (questionnaireId, language) => {
-    try {
-      const res = await getQuestionnaireQuestions(questionnaireId, language);
-      if (res.ok) {
-        const data = await res.json();
-        setSurveyQuestions(data);
-        setSurveyAnswers({});
-      } else {
-        console.error("Failed to fetch survey questions");
-        setSurveyQuestions([]);
-      }
-    } catch (err) {
-      console.error("Error fetching survey questions:", err);
-    }
-  };
-
-  const handleLanguageChange = (lang) => {
-    setSelectedLanguage(lang);
-    if (selectedQuestionnaireId) {
-      fetchQuestionsForSurvey(selectedQuestionnaireId, lang);
-    }
-  };
 
   // EVENT LOGGING HELPERS
   //
@@ -344,14 +285,16 @@ export default function ActiveSessionMockup() {
   // 7. MATH NAVIGATION
   const handleMathAnswerChange = (value) => {
     if (!mathInputEnabled) return;
+    setMathError("");
     setMathAnswers((prev) => ({ ...prev, [currentMathIndex]: value }));
   };
 
   const handleNextMath = async () => {
     if (!mathAnswers[currentMathIndex]?.trim()) {
-      alert("Please provide an answer before proceeding.");
+      setMathError("Please provide an answer before proceeding.");
       return;
     }
+    setMathError("");
     if (currentMathIndex < questions.length - 1) {
       // No hide: the next question's create auto-closes this event server-side.
       const nextIdx = currentMathIndex + 1;
@@ -375,35 +318,6 @@ export default function ActiveSessionMockup() {
     } catch (err) {
       console.error("Error ending session:", err);
       setCurrentStep("survey");
-    }
-  };
-
-  // 9. SURVEY NAVIGATION
-  const handleSubmitSurvey = async () => {
-    if (!allSurveyAnswered(surveyQuestions, surveyAnswers)) {
-      alert("Please answer all questions.");
-      return;
-    }
-
-    try {
-      const sessionId = localStorage.getItem("currentSessionId");
-      const answers = surveyQuestions.map((q, idx) => ({
-        question_id: q.question_id,
-        answer_value: Number(surveyAnswers[idx]),
-      }));
-
-      const res = await submitQuestionnaireAnswers(sessionId, selectedQuestionnaireId, answers);
-      if (!res.ok) {
-        console.error("Failed to submit survey", await res.text());
-        alert("Failed to submit survey. Please try again.");
-        return;
-      }
-
-      setSurveyComplete(true);
-      setCurrentStep("complete");
-    } catch (err) {
-      console.error("Error submitting survey:", err);
-      alert("Network error. Please try again.");
     }
   };
 
@@ -514,10 +428,11 @@ export default function ActiveSessionMockup() {
             inputMode="numeric"
             placeholder="Type your answer…"
             value={answer}
-            onChange={(e) => handleMathAnswerChange(e.target.value)}
+            onChange={(e) => handleMathAnswerChange(e.target.value.replace(/[^0-9.-]/g, ""))}
             disabled={!mathInputEnabled}
           />
         </Field>
+        {mathError && <Alert tone="warn" className="mt-4">{mathError}</Alert>}
         <div className="flex justify-end mt-6">
           <Button onClick={handleNextMath} disabled={!mathInputEnabled || !answer.trim()}>
             {currentMathIndex < questions.length - 1 ? "Next question" : "Finish & end session"}
@@ -527,67 +442,14 @@ export default function ActiveSessionMockup() {
     );
   };
 
-  const renderSurvey = () => {
-    if (isLoadingData) {
-      return (
-        <Card className="max-w-4xl mx-auto p-10 text-center">
-          <Spinner size={20} className="mr-2 align-[-3px] text-accent" />
-          <span className="text-muted">Loading survey…</span>
-        </Card>
-      );
-    }
-    if (surveyComplete) {
-      return (
-        <Card className="max-w-4xl mx-auto p-10 text-center">
-          <h2 className="text-2xl font-bold text-ink">Survey submitted</h2>
-          <p className="text-muted mt-2">Redirecting to completion…</p>
-        </Card>
-      );
-    }
-    if (surveyQuestions.length === 0) {
-      return (
-        <Card className="max-w-4xl mx-auto p-10 text-center">
-          <p className="text-muted">No survey questions available.</p>
-        </Card>
-      );
-    }
-
-    const ready = allSurveyAnswered(surveyQuestions, surveyAnswers);
-
-    return (
-      <Card className="max-w-4xl mx-auto p-8">
-        <div className="flex justify-between items-center mb-6 pb-4 border-b border-border">
-          <h2 className="text-xl font-bold tracking-tight text-ink">Post-session survey</h2>
-          <div className="flex gap-1.5">
-            {["en", "ms", "zh"].map((lang) => (
-              <button
-                key={lang}
-                onClick={() => handleLanguageChange(lang)}
-                className={`px-3 py-1 text-[11px] font-bold rounded-full transition-colors ${
-                  selectedLanguage === lang ? "bg-accent text-on-accent" : "bg-inset text-ink-2 hover:bg-border/60"
-                }`}
-              >
-                {lang.toUpperCase()}
-              </button>
-            ))}
-          </div>
-        </div>
-
-        <LikertSurvey
-          questions={surveyQuestions}
-          answers={surveyAnswers}
-          language={selectedLanguage}
-          onChange={(idx, value) => setSurveyAnswers((prev) => ({ ...prev, [idx]: value }))}
-        />
-
-        <div className="flex justify-end pt-5 mt-6 border-t border-border">
-          <Button onClick={handleSubmitSurvey} disabled={!ready}>
-            Finish survey
-          </Button>
-        </div>
-      </Card>
-    );
-  };
+  const renderSurvey = () => (
+    <Card className="max-w-4xl mx-auto p-8">
+      <PostSessionSurvey
+        sessionId={localStorage.getItem("currentSessionId")}
+        onSubmitted={() => setCurrentStep("complete")}
+      />
+    </Card>
+  );
 
   const recording = currentStep === "images" || currentStep === "math";
 

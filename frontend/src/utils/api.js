@@ -366,6 +366,10 @@ export async function getUsers() {
   const res = await fetchWithAuth(`${BASE_URL}/users`);
   return res;
 }
+export async function getRoles() {
+  const res = await fetchWithAuth(`${BASE_URL}/users/roles`);
+  return res;
+}
 export async function createUser(userData) {
   const res = await fetchWithAuth(`${BASE_URL}/users`, {
     method: "POST",

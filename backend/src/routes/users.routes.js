@@ -58,6 +58,24 @@ router.get(
 
 /**
  * @openapi
+ * /api/users/roles:
+ *   get:
+ *     summary: List roles assignable to a user (admin only)
+ *     tags: [Users]
+ *     security:
+ *       - bearerAuth: []
+ *     responses:
+ *       200:
+ *         description: Array of roles
+ */
+router.get(
+  '/roles',
+  requirePermission(PERMS.USERS_READ_ALL),
+  userController.listRoles
+)
+
+/**
+ * @openapi
  * /api/users/{id}:
  *   get:
  *     summary: Get a single user

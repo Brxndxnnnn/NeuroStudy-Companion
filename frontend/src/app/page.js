@@ -1,38 +1,28 @@
 "use client";
-import { useState, useEffect } from "react";
+import { useEffect } from "react";
+import { useRouter } from "next/navigation";
+import { BrandMark, Spinner } from "@/components/ui";
 
+// The root route is never a destination in its own right — it just routes the
+// visitor to wherever they belong based on stored auth state.
 export default function Home() {
-  // 1. We create a memory space to hold the backend's response
-  const [serverStatus, setServerStatus] = useState("Trying to connect...");
+  const router = useRouter();
 
-  // 2. useEffect runs this connection code the moment the page loads
   useEffect(() => {
-    
-    // 3. THIS IS THE CONNECTION: We 'fetch' data from Eugene's API endpoint
-    fetch("http://localhost:5000/api/health")
-      .then((response) => {
-        if (!response.ok) throw new Error("Network response was not ok");
-        return response.json(); // Convert the response into readable data
-      })
-      .then((data) => {
-        // 4. We save the successful data into our memory space
-        setServerStatus(`Success! The backend says: ${data.status}`);
-      })
-      .catch((error) => {
-        // 5. If it fails, we show an error
-        setServerStatus("Failed to connect. Is the backend running on port 5000?");
-      });
-      
-  }, []); // The empty brackets mean "only run this connection test once"
+    const token = localStorage.getItem("token");
+    if (!token) {
+      router.replace("/login");
+      return;
+    }
+    const role = localStorage.getItem("userRole");
+    router.replace(role === "admin" || role === "superadmin" ? "/admin" : "/history");
+  }, [router]);
 
   return (
-    <main style={{ padding: "50px", fontFamily: "sans-serif", textAlign: "center" }}>
-      <h1>NeuroStudy Connection Test</h1>
-      
-      <div style={{ marginTop: "20px", padding: "20px", background: "#e0f2fe", borderRadius: "8px", display: "inline-block" }}>
-        <p style={{ fontSize: "18px", fontWeight: "bold", color: "#0369a1" }}>
-          {serverStatus}
-        </p>
+    <main className="min-h-screen flex items-center justify-center bg-ground">
+      <div className="flex flex-col items-center gap-4">
+        <BrandMark size={40} />
+        <Spinner size={20} className="text-accent" />
       </div>
     </main>
   );

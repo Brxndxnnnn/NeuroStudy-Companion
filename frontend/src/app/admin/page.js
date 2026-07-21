@@ -2,7 +2,7 @@
 import { useState, useEffect } from "react";
 import { useRouter } from "next/navigation";
 import TopNav from "@/components/TopNav";
-import { createUser, deleteUser, getUsers, updateUser, getClinics } from "@/utils/api";
+import { createUser, deleteUser, getUsers, updateUser, getClinics, getRoles } from "@/utils/api";
 import {
   PageContainer,
   PageHeading,
@@ -10,6 +10,7 @@ import {
   Button,
   Field,
   Input,
+  Select,
   Label,
   StatCard,
   Pill,
@@ -26,6 +27,9 @@ export default function AdminDashboard() {
   const [errorMessage, setErrorMessage] = useState("");
   const [successMessage, setSuccessMessage] = useState("");
 
+  const [clinics, setClinics] = useState([]);
+  const [roles, setRoles] = useState([]);
+
   const [isModalOpen, setIsModalOpen] = useState(false);
   const [modalMode, setModalMode] = useState("create");
   const [selectedUserId, setSelectedUserId] = useState(null);
@@ -35,6 +39,8 @@ export default function AdminDashboard() {
   const [displayName, setDisplayName] = useState("");
   const [clinicId, setClinicId] = useState("");
   const [roleId, setRoleId] = useState("");
+
+  const [deleteTarget, setDeleteTarget] = useState(null); // { id, name } | null
 
   const fetchUsers = async () => {
     setLoading(true);
@@ -57,12 +63,38 @@ export default function AdminDashboard() {
   };
   
 
+  const fetchClinics = async () => {
+    try {
+      const response = await getClinics();
+      if (response.ok) {
+        const data = await response.json();
+        setClinics(Array.isArray(data) ? data : data.clinics || data.data || []);
+      }
+    } catch (error) {
+      // Non-fatal: the clinic picker just falls back to an empty list.
+    }
+  };
+
+  const fetchRoles = async () => {
+    try {
+      const response = await getRoles();
+      if (response.ok) {
+        const data = await response.json();
+        setRoles(Array.isArray(data) ? data : data.roles || data.data || []);
+      }
+    } catch (error) {
+      // Non-fatal: the role picker just falls back to an empty list.
+    }
+  };
+
   useEffect(() => {
     const token = localStorage.getItem("token");
     if (!token) {
       router.push("/login");
     } else {
       fetchUsers();
+      fetchClinics();
+      fetchRoles();
     }
   }, [router]);
 
@@ -93,10 +125,19 @@ export default function AdminDashboard() {
 
     try {
       if (modalMode === "create") {
-        const payload = { email: email.trim(), password };
+        if (!roleId) {
+          setErrorMessage("Choose a role for this account.");
+          return;
+        }
+        const chosenRole = roles.find((r) => r.role_id === roleId);
+        if (chosenRole?.requires_clinic && !clinicId) {
+          setErrorMessage(`The ${chosenRole.name} role requires a clinic — pick one above.`);
+          return;
+        }
+
+        const payload = { email: email.trim(), password, role_id: roleId };
         if (displayName.trim()) payload.display_name = displayName.trim();
         if (clinicId.trim()) payload.clinic_id = clinicId.trim();
-        if (roleId.trim()) payload.role_id = roleId.trim();
 
         const response = await createUser(payload);
         if (response.ok) {
@@ -127,12 +168,12 @@ export default function AdminDashboard() {
     }
   };
 
-  const handleDeleteUser = async (userId, name) => {
-    if (!confirm(`Revoke account access for ${name}?`)) return;
+  const handleDeleteUser = async () => {
+    if (!deleteTarget) return;
     setErrorMessage("");
     setSuccessMessage("");
     try {
-      const response = await deleteUser(userId);
+      const response = await deleteUser(deleteTarget.id);
       if (response.ok) {
         setSuccessMessage("Account access revoked.");
         fetchUsers();
@@ -141,6 +182,8 @@ export default function AdminDashboard() {
       }
     } catch (error) {
       setErrorMessage("Network error while revoking access.");
+    } finally {
+      setDeleteTarget(null);
     }
   };
 
@@ -218,7 +261,7 @@ export default function AdminDashboard() {
               ) : users.length === 0 ? (
                 <div className="p-12 text-center text-muted">No active system accounts found.</div>
               ) : (
-                <UserTable users={users} onEdit={openEditModal} onDelete={handleDeleteUser} />
+                <UserTable users={users} onEdit={openEditModal} onDelete={(id, name) => setDeleteTarget({ id, name })} />
               )}
             </Card>
           </div>
@@ -251,14 +294,34 @@ export default function AdminDashboard() {
                   <Field label="Password" htmlFor="u-pw" hint="Minimum 8 characters.">
                     <Input id="u-pw" type="password" required minLength="8" placeholder="••••••••" value={password} onChange={(e) => setPassword(e.target.value)} />
                   </Field>
-                  <Field label="Role ID (UUID)" htmlFor="u-role">
-                    <Input id="u-role" type="text" className="font-mono text-xs" placeholder="Optional — valid role UUID" value={roleId} onChange={(e) => setRoleId(e.target.value)} />
+                  <Field label="Role" required htmlFor="u-role">
+                    <Select id="u-role" value={roleId} onChange={(e) => setRoleId(e.target.value)}>
+                      <option value="">Select a role…</option>
+                      {roles.map((r) => (
+                        <option key={r.role_id} value={r.role_id}>
+                          {r.name}{r.requires_clinic ? " (requires a clinic)" : ""}
+                        </option>
+                      ))}
+                    </Select>
                   </Field>
                 </>
               )}
 
-              <Field label="Clinic ID (UUID)" htmlFor="u-clinic" hint="Leave empty for admin/global accounts.">
-                <Input id="u-clinic" type="text" className="font-mono text-xs" placeholder="Optional" value={clinicId} onChange={(e) => setClinicId(e.target.value)} />
+              <Field
+                label="Clinic"
+                htmlFor="u-clinic"
+                hint={
+                  roles.find((r) => r.role_id === roleId)?.requires_clinic
+                    ? "This role requires a clinic."
+                    : "Leave unset for admin/global accounts."
+                }
+              >
+                <Select id="u-clinic" value={clinicId} onChange={(e) => setClinicId(e.target.value)}>
+                  <option value="">No clinic (admin/global)</option>
+                  {clinics.map((c) => (
+                    <option key={c.clinic_id} value={c.clinic_id}>{c.name || c.clinic_id}</option>
+                  ))}
+                </Select>
               </Field>
 
               <div className="flex justify-end gap-3 pt-4 border-t border-border">
@@ -266,6 +329,27 @@ export default function AdminDashboard() {
                 <Button type="submit">{modalMode === "create" ? "Create account" : "Save changes"}</Button>
               </div>
             </form>
+          </Card>
+        </div>
+      )}
+
+      {/* DELETE CONFIRMATION */}
+      {deleteTarget && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-ink/40 backdrop-blur-sm anim-fade">
+          <Card className="w-full max-w-sm overflow-hidden anim-pop">
+            <div className="px-6 py-5 border-b border-border">
+              <h2 className="text-lg font-bold tracking-tight text-ink">Revoke account access?</h2>
+            </div>
+            <div className="px-6 py-5">
+              <p className="text-sm text-ink-2">
+                This revokes access for <span className="font-semibold text-ink">{deleteTarget.name}</span>.
+                This action cannot be undone from here.
+              </p>
+            </div>
+            <div className="flex justify-end gap-3 px-6 py-4 border-t border-border">
+              <Button variant="ghost" onClick={() => setDeleteTarget(null)}>Cancel</Button>
+              <Button variant="danger" onClick={handleDeleteUser}>Revoke access</Button>
+            </div>
           </Card>
         </div>
       )}

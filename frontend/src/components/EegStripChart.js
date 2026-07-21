@@ -1,6 +1,7 @@
 "use client";
 import { useEffect, useRef } from "react";
 import * as echarts from "echarts";
+import { attachTapDismiss } from "@/utils/chartTouch";
 
 // Stable default so omitting the prop doesn't re-init the chart every render.
 const NO_EVENTS = [];
@@ -168,6 +169,7 @@ export default function EegStripChart({
         axisPointer: { lineStyle: { color: c.muted, opacity: 0.5 }, label: { show: false } },
         tooltip: {
           trigger: "axis",
+          confine: true,
           backgroundColor: c.surface,
           borderColor: c.border,
           borderWidth: 1,
@@ -284,6 +286,7 @@ export default function EegStripChart({
       },
       tooltip: {
         trigger: "axis",
+        confine: true,
         backgroundColor: c.surface,
         borderColor: c.border,
         borderWidth: 1,
@@ -353,10 +356,13 @@ export default function EegStripChart({
     const mq = window.matchMedia("(prefers-color-scheme: dark)");
     mq.addEventListener?.("change", recolor);
 
+    const detachTapDismiss = attachTapDismiss(chart, elRef.current);
+
     return () => {
       ro.disconnect();
       mo.disconnect();
       mq.removeEventListener?.("change", recolor);
+      detachTapDismiss();
       chart.dispose();
       chartRef.current = null;
     };

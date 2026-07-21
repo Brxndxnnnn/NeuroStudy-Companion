@@ -11,7 +11,7 @@ import {
 } from "@/utils/api";
 import { buildEventWindows } from "@/utils/events";
 import { SessionTopBar } from "@/components/TopNav";
-import { Card, CardHeader, Button, Label, Pill, Alert, Spinner } from "@/components/ui";
+import { Card, CardHeader, Button, Label, Pill, Alert, Spinner, Select } from "@/components/ui";
 import EegStripChart from "@/components/EegStripChart";
 import TimeSeriesChart from "@/components/TimeSeriesChart";
 import BandProfileChart from "@/components/BandProfileChart";
@@ -215,6 +215,28 @@ function MarkerToggle({ on, onToggle }) {
     </button>
   );
 }
+
+// Labeled wrapper for one header control (a select or a button group). The
+// label sits above the control so a header with several of these reads as
+// "View: ___  Channel: ___  Markers: ___" instead of an unlabeled row of
+// controls the technician has to hover each one to identify.
+function ControlGroup({ label, children }) {
+  return (
+    <div className="flex flex-col gap-1">
+      <span className="px-0.5 font-mono text-[9px] font-semibold uppercase tracking-[0.08em] text-muted">
+        {label}
+      </span>
+      {children}
+    </div>
+  );
+}
+
+// Sizing override for the shared <Select> when it's used in a card-header
+// toolbar instead of a form — same colors/border/chevron, tighter padding and
+// type size so it sits at the same height as the segmented-button groups next
+// to it. Width is controlled by the wrapping div at each call site rather than
+// here, since overriding Select's own w-full via className is unreliable.
+const TOOLBAR_SELECT = "py-1.5 pl-2.5 text-[12px] font-semibold";
 
 function fmtDuration(sec) {
   if (!sec || sec < 0) return "—";
@@ -844,29 +866,23 @@ export default function SessionResults() {
                     : "µV. Drag to zoom, scroll to pan — the stats update to the visible window."
                 }
                 actions={
-                  <div className="flex flex-wrap items-center gap-2">
-                    <div
-                      role="group"
-                      aria-label="EEG view"
-                      className="inline-flex rounded-lg border border-border bg-inset/60 p-0.5"
-                    >
-                      {[
-                        { id: "stacked", label: "Stacked" },
-                        { id: "overlay", label: "Overlay" },
-                        ...CHANNELS.map((ch) => ({ id: ch.prefix, label: ch.label })),
-                      ].map((v) => (
-                        <button
-                          key={v.id}
-                          onClick={() => setEegView(v.id)}
-                          aria-pressed={eegView === v.id}
-                          className={`px-2.5 py-1.5 rounded-md text-[12px] font-semibold transition-colors ${
-                            eegView === v.id ? "bg-surface text-ink shadow-sm" : "text-muted hover:text-ink"
-                          }`}
+                  <div className="flex flex-wrap items-end gap-3">
+                    <ControlGroup label="View">
+                      <div className="w-28">
+                        <Select
+                          aria-label="EEG view"
+                          value={eegView}
+                          onChange={(e) => setEegView(e.target.value)}
+                          className={TOOLBAR_SELECT}
                         >
-                          {v.label}
-                        </button>
-                      ))}
-                    </div>
+                          <option value="stacked">Stacked</option>
+                          <option value="overlay">Overlay</option>
+                          {CHANNELS.map((ch) => (
+                            <option key={ch.prefix} value={ch.prefix}>{ch.label}</option>
+                          ))}
+                        </Select>
+                      </div>
+                    </ControlGroup>
                     {events.length > 0 && (
                       <MarkerToggle on={markers.eeg} onToggle={() => toggleMarkers("eeg")} />
                     )}
@@ -937,27 +953,22 @@ export default function SessionResults() {
                     title="Frequency bands"
                     subtitle="Band power (µV²) computed by FFT on the filtered EEG. Stacked gives a panel per channel; pick a channel for a single timeline."
                     actions={
-                      <div className="flex flex-wrap items-center gap-2">
-                        <div
-                          role="group"
-                          aria-label="Channel"
-                          className="inline-flex rounded-lg border border-border bg-inset/60 p-0.5"
-                        >
-                          {[{ prefix: "stacked", label: "Stacked" }, ...CHANNELS].map((ch) => (
-                            <button
-                              key={ch.prefix}
-                              onClick={() => setChannel(ch.prefix)}
-                              aria-pressed={channel === ch.prefix}
-                              className={`px-2.5 py-1.5 rounded-md font-mono text-[12px] font-semibold transition-colors ${
-                                channel === ch.prefix
-                                  ? "bg-surface text-ink shadow-sm"
-                                  : "text-muted hover:text-ink"
-                              }`}
+                      <div className="flex flex-wrap items-end gap-3">
+                        <ControlGroup label="Channel">
+                          <div className="w-28">
+                            <Select
+                              aria-label="Channel"
+                              value={channel}
+                              onChange={(e) => setChannel(e.target.value)}
+                              className={`font-mono ${TOOLBAR_SELECT}`}
                             >
-                              {ch.label}
-                            </button>
-                          ))}
-                        </div>
+                              <option value="stacked">Stacked</option>
+                              {CHANNELS.map((ch) => (
+                                <option key={ch.prefix} value={ch.prefix}>{ch.label}</option>
+                              ))}
+                            </Select>
+                          </div>
+                        </ControlGroup>
                         {events.length > 0 && (
                           <MarkerToggle on={markers.bands} onToggle={() => toggleMarkers("bands")} />
                         )}
@@ -1073,26 +1084,33 @@ export default function SessionResults() {
                     }
                     actions={
                       ellipticRows.length ? (
-                        <div className="flex flex-wrap gap-2">
-                          <div className="flex items-center gap-1 rounded-lg bg-inset p-1">
-                            {[
-                              { key: "window", label: "By window" },
-                              { key: "timeline", label: "Timeline" },
-                            ].map((v) => (
-                              <button
-                                key={v.key}
-                                onClick={() => setEllipticView(v.key)}
-                                aria-pressed={ellipticView === v.key}
-                                className={`px-3 py-1.5 rounded-md text-[12px] font-semibold transition-colors ${
-                                  ellipticView === v.key
-                                    ? "bg-surface text-ink shadow-sm"
-                                    : "text-muted hover:text-ink"
-                                }`}
-                              >
-                                {v.label}
-                              </button>
-                            ))}
-                          </div>
+                        <div className="flex flex-wrap items-end gap-3">
+                          <ControlGroup label="View">
+                            <div
+                              role="group"
+                              aria-label="Elliptic view"
+                              className="inline-flex rounded-lg border border-border bg-inset/60 p-0.5"
+                            >
+                              {[
+                                { key: "window", label: "By window" },
+                                { key: "timeline", label: "Timeline" },
+                              ].map((v) => (
+                                <button
+                                  key={v.key}
+                                  onClick={() => setEllipticView(v.key)}
+                                  aria-pressed={ellipticView === v.key}
+                                  className={`px-2.5 py-1.5 rounded-md text-[12px] font-semibold transition-colors ${
+                                    ellipticView === v.key
+                                      ? "bg-surface text-ink shadow-sm"
+                                      : "text-muted hover:text-ink"
+                                  }`}
+                                >
+                                  {v.label}
+                                </button>
+                              ))}
+                            </div>
+                          </ControlGroup>
+
                           {/* The statistic picker is TIMELINE-only. A line chart can
                               draw one statistic at a time, so there it is a real
                               choice. The window view has room to show SD, peak and
@@ -1100,24 +1118,37 @@ export default function SessionResults() {
                               you toggle between them there would only hide two thirds
                               of a snapshot that fits on screen. */}
                           {ellipticView === "timeline" && (
-                            <div className="flex items-center gap-1 rounded-lg bg-inset p-1">
-                              {ELLIPTIC_STATS.map((s) => (
-                                <button
-                                  key={s.key}
-                                  onClick={() => setEllipticStat(s.key)}
-                                  aria-pressed={ellipticStat === s.key}
-                                  title={s.hint}
-                                  className={`px-3 py-1.5 rounded-md text-[12px] font-semibold transition-colors ${
-                                    ellipticStat === s.key
-                                      ? "bg-surface text-ink shadow-sm"
-                                      : "text-muted hover:text-ink"
-                                  }`}
+                            <ControlGroup label="Statistic">
+                              <div className="w-24">
+                                <Select
+                                  aria-label="Elliptic statistic"
+                                  value={ellipticStat}
+                                  onChange={(e) => setEllipticStat(e.target.value)}
+                                  className={TOOLBAR_SELECT}
                                 >
-                                  {s.label}
-                                </button>
-                              ))}
-                            </div>
+                                  {ELLIPTIC_STATS.map((s) => (
+                                    <option key={s.key} value={s.key}>{s.label}</option>
+                                  ))}
+                                </Select>
+                              </div>
+                            </ControlGroup>
                           )}
+
+                          <ControlGroup label="Channel">
+                            <div className="w-24">
+                              <Select
+                                aria-label="Elliptic channel"
+                                value={ellipticChannel}
+                                onChange={(e) => setEllipticChannel(e.target.value)}
+                                className={`font-mono ${TOOLBAR_SELECT}`}
+                              >
+                                <option value="all">All</option>
+                                {CHANNELS.map((ch) => (
+                                  <option key={ch.prefix} value={ch.prefix}>{ch.label}</option>
+                                ))}
+                              </Select>
+                            </div>
+                          </ControlGroup>
 
                           {/* Markers need a time axis, so they are timeline-only too.
                               The window view names the stimulus in prose instead. */}
@@ -1127,23 +1158,6 @@ export default function SessionResults() {
                               onToggle={() => toggleMarkers("elliptic")}
                             />
                           )}
-
-                          <div className="flex items-center gap-1 rounded-lg bg-inset p-1">
-                            {[{ prefix: "all", label: "All" }, ...CHANNELS].map((ch) => (
-                              <button
-                                key={ch.prefix}
-                                onClick={() => setEllipticChannel(ch.prefix)}
-                                aria-pressed={ellipticChannel === ch.prefix}
-                                className={`px-3 py-1.5 rounded-md font-mono text-[12px] font-semibold transition-colors ${
-                                  ellipticChannel === ch.prefix
-                                    ? "bg-surface text-ink shadow-sm"
-                                    : "text-muted hover:text-ink"
-                                }`}
-                              >
-                                {ch.label}
-                              </button>
-                            ))}
-                          </div>
                         </div>
                       ) : null
                     }
@@ -1176,7 +1190,7 @@ export default function SessionResults() {
                         running. It is safe to keep waiting — this only stops the page
                         from polling forever.
                       </p>
-                      <Button variant="secondary" onClick={() => window.location.reload()}>
+                      <Button variant="subtle" onClick={() => window.location.reload()}>
                         Check again
                       </Button>
                     </div>
@@ -1203,7 +1217,7 @@ export default function SessionResults() {
                               window can't shift the whole inspector by one. */}
                           <div className="flex flex-wrap items-center gap-3">
                             <Button
-                              variant="secondary"
+                              variant="subtle"
                               onClick={() => setEllipticIdx((i) => Math.max(0, i - 1))}
                               disabled={ellipticIdx === 0}
                             >
@@ -1224,7 +1238,7 @@ export default function SessionResults() {
                               </div>
                             </div>
                             <Button
-                              variant="secondary"
+                              variant="subtle"
                               onClick={() =>
                                 setEllipticIdx((i) => Math.min(ellipticRows.length - 1, i + 1))
                               }

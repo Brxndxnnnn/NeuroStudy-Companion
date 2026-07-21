@@ -88,4 +88,17 @@ const findRoleByName = async (name, client = pool) => {
     return rows[0] ?? null
 }
 
-export default { findByEmail, findById, findAll, create, update, removeRole, updateRole, findRoleByName }
+// List roles assignable through the admin UI. Excludes bridge_placeholder, which
+// exists only to satisfy the bridge system user's role_id FK and is never a real
+// account's role.
+const findAllRoles = async (client = pool) => {
+    const { rows } = await query(client,
+        `SELECT role_id, name, requires_clinic, description
+         FROM roles
+         WHERE name <> 'bridge_placeholder'
+         ORDER BY name`
+    )
+    return rows
+}
+
+export default { findByEmail, findById, findAll, create, update, removeRole, updateRole, findRoleByName, findAllRoles }

@@ -1,6 +1,7 @@
 "use client";
 import { useEffect, useRef } from "react";
 import * as echarts from "echarts";
+import { attachTapDismiss } from "@/utils/chartTouch";
 
 /**
  * Mean band power per channel over the visible window — a grouped column chart
@@ -37,6 +38,7 @@ export default function BandProfileChart({ groups, bands }) {
       grid: { left: 52, right: 16, top: 38, bottom: 28 },
       tooltip: {
         trigger: "item",
+        confine: true,
         backgroundColor: c.surface,
         borderColor: c.border,
         borderWidth: 1,
@@ -94,10 +96,13 @@ export default function BandProfileChart({ groups, bands }) {
     const mq = window.matchMedia("(prefers-color-scheme: dark)");
     mq.addEventListener?.("change", recolor);
 
+    const detachTapDismiss = attachTapDismiss(chart, elRef.current);
+
     return () => {
       ro.disconnect();
       mo.disconnect();
       mq.removeEventListener?.("change", recolor);
+      detachTapDismiss();
       chart.dispose();
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps

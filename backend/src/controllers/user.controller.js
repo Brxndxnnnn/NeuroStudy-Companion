@@ -32,6 +32,12 @@ const listUsers = catchAsync(async (req, res) => {
     return res.json(users)
 })
 
+// ── GET /api/users/roles ─────────────────────────────────────────────────────
+const listRoles = catchAsync(async (req, res) => {
+    const roles = await userModel.findAllRoles(req.dbClient)
+    return res.json(roles)
+})
+
 // ── GET /api/users/:id ───────────────────────────────────────────────────────
 const getUser = catchAsync(async (req, res) => {
     const { id } = req.params
@@ -89,4 +95,4 @@ const assignRole = catchAsync(async (req, res) => {
     return res.json({ message: 'Role assigned', ...result, role_name })
 })
 
-export default { createUser, listUsers, getUser, updateUser, deactivateUser, assignRole }
+export default { createUser, listUsers, listRoles, getUser, updateUser, deactivateUser, assignRole }

@@ -1,6 +1,7 @@
 "use client";
 import { useEffect, useRef } from "react";
 import * as echarts from "echarts";
+import { attachTapDismiss } from "@/utils/chartTouch";
 
 // Stable default so omitting the prop doesn't re-init the chart every render.
 const NO_EVENTS = [];
@@ -214,6 +215,7 @@ export default function TimeSeriesChart({
       },
       tooltip: {
         trigger: "axis",
+        confine: true,
         backgroundColor: c.surface,
         borderColor: c.border,
         borderWidth: 1,
@@ -296,10 +298,13 @@ export default function TimeSeriesChart({
     const mq = window.matchMedia("(prefers-color-scheme: dark)");
     mq.addEventListener?.("change", recolor);
 
+    const detachTapDismiss = attachTapDismiss(chart, elRef.current);
+
     return () => {
       ro.disconnect();
       mo.disconnect();
       mq.removeEventListener?.("change", recolor);
+      detachTapDismiss();
       chart.dispose();
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
