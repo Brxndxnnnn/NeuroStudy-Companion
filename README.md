@@ -170,7 +170,7 @@ git fetch origin && git reset --hard origin/main
 docker compose -f compose.yaml -f compose.prod.yaml up -d
 ```
 
-DB migrations (`db/migrations/*.sql`) are applied manually — numbered, in order.
+DB migrations (`db/migrations/*.sql`) are tracked in a `schema_migrations` table and applied automatically by `db/migrate.sh` as part of the deploy pipeline — see `docs/deploy.md`. For local dev, run `./db/migrate.sh` by hand after pulling new migration files.
 
 ---
 
