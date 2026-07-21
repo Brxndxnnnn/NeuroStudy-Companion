@@ -1,43 +1,78 @@
-import { describe, test, expect, beforeEach, vi } from "vitest";
-import { render, screen } from "@testing-library/react";
+import { beforeEach, describe, expect, test, vi } from "vitest"
+import { render, screen } from "@testing-library/react"
+
+const mockUseAuth = vi.fn()
 
 vi.mock("next/navigation", () => ({
-  usePathname: () => "/history",
-}));
-vi.mock("@/utils/api", () => ({
-  logout: vi.fn(),
-}));
+  usePathname: () => "/history"
+}))
 
-import TopNav from "./TopNav";
+vi.mock("@/context/AuthContext", () => ({
+  useAuth: () => mockUseAuth()
+}))
+
+import TopNav from "./TopNav"
+
+function renderTopNav(role = null) {
+  mockUseAuth.mockReturnValue({
+    user: role
+      ? {
+        role,
+        display_name: "Test User"
+      }
+      : null,
+    signOut: vi.fn()
+  })
+
+  return render(<TopNav />)
+}
 
 beforeEach(() => {
-  localStorage.clear();
-});
+  vi.clearAllMocks()
+})
 
 describe("TopNav role-based navigation", () => {
-  test("admin role sees the Admin link", async () => {
-    localStorage.setItem("userRole", "admin");
-    render(<TopNav />);
-    expect(await screen.findByRole("link", { name: "Admin" })).toBeInTheDocument();
-  });
+  test("admin role sees the Admin link", () => {
+    renderTopNav("admin")
 
-  test("superadmin role sees the Admin link", async () => {
-    localStorage.setItem("userRole", "superadmin");
-    render(<TopNav />);
-    expect(await screen.findByRole("link", { name: "Admin" })).toBeInTheDocument();
-  });
+    expect(
+      screen.getByRole("link", { name: "Admin" })
+    ).toBeInTheDocument()
+  })
 
-  test("technician role does NOT see the Admin link, sees clinician-only links instead", async () => {
-    localStorage.setItem("userRole", "technician");
-    render(<TopNav />);
-    // Wait for the role-driven effect to settle before asserting absence.
-    await screen.findByRole("link", { name: "Insights" });
-    expect(screen.queryByRole("link", { name: "Admin" })).not.toBeInTheDocument();
-  });
+  test("superadmin role sees the Admin link", () => {
+    renderTopNav("superadmin")
 
-  test("no stored role defaults to clinician links, not admin", async () => {
-    render(<TopNav />);
-    await screen.findByRole("link", { name: "Insights" });
-    expect(screen.queryByRole("link", { name: "Admin" })).not.toBeInTheDocument();
-  });
-});
+    expect(
+      screen.getByRole("link", { name: "Admin" })
+    ).toBeInTheDocument()
+  })
+
+  test("technician role does not see Admin and sees clinician links", () => {
+    renderTopNav("technician")
+
+    expect(
+      screen.queryByRole("link", { name: "Admin" })
+    ).not.toBeInTheDocument()
+
+    expect(
+      screen.getByRole("link", { name: "Insights" })
+    ).toBeInTheDocument()
+
+    expect(
+      screen.getByRole("link", { name: "Stimulus set" })
+    ).toBeInTheDocument()
+  })
+
+  test("no authenticated user defaults to clinician links", () => {
+    renderTopNav()
+
+    expect(
+      screen.queryByRole("link", { name: "Admin" })
+    ).not.toBeInTheDocument()
+
+    expect(
+      screen.getByRole("link", { name: "Insights" })
+    ).toBeInTheDocument()
+  })
+})
