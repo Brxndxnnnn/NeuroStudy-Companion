@@ -2,7 +2,8 @@ name: Deploy to production
 
 on:
   # Manual-trigger only: merging to main does NOT auto-deploy. Go to the
-  # Actions tab and run this workflow when you're ready to push to prod.
+  # Actions tab and run this workflow when you're ready to push to prod — or,
+  # for a rollback, run it with a previous v* tag as the ref.
   # (Required-reviewer environment protection needs a paid GitHub plan for
   # private repos, so this is the zero-cost equivalent approval gate.)
   workflow_dispatch: {}
@@ -24,15 +25,21 @@ jobs:
           host: ${{ secrets.DROPLET_HOST }}
           username: ${{ secrets.DROPLET_USER }}
           key: ${{ secrets.DROPLET_SSH_KEY }}
+          envs: TARGET_SHA
           script: |
             set -e
             cd /opt/NeuroStudy-Companion
-            git fetch origin
-            git reset --hard origin/main
+            git fetch --all --tags
+            # Deploys whatever ref/tag actually triggered this run, not always
+            # main's tip — a rollback run (ref = an older v* tag) must land the
+            # OLD commit, not silently redeploy current main.
+            git reset --hard "$TARGET_SHA"
             docker compose -f compose.yaml -f compose.prod.yaml up -d --build
             # nginx can keep a stale upstream IP after backend/ml containers get
             # recreated by the rebuild above — restart it explicitly every time.
             docker compose -f compose.yaml -f compose.prod.yaml restart nginx
+        env:
+          TARGET_SHA: ${{ github.sha }}
 
       - name: Health check
         run: |
@@ -51,10 +58,17 @@ jobs:
           fi
 
       - name: Tag release
+        # Skipped, not failed, when re-deploying a commit that's already
+        # tagged (redeploys, and rollbacks to an existing tag, are expected
+        # to hit this — the deploy itself still succeeded).
         if: success()
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
           TAG="v$(date +%Y.%m.%d)-${GITHUB_SHA::7}"
-          git tag "$TAG"
-          git push origin "$TAG"
+          if git ls-remote --exit-code --tags origin "refs/tags/$TAG" >/dev/null 2>&1; then
+            echo "Tag $TAG already exists, skipping."
+          else
+            git tag "$TAG"
+            git push origin "$TAG"
+          fi
