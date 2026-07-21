@@ -43,7 +43,6 @@ function fmtUv(v) {
  * Props:
  *   samples   [{ t_seconds, <channel keys...> }]  ascending in t_seconds
  *   channels  [{ key, label, color }]             one strip each, top→bottom
- *   overlay   draw every channel on one shared µV axis instead of stacked strips
  *   events    [{ from, to, label, type }]         stimulus windows (seconds); type "image"|"question"
  *   onVisibleRangeChange(startSec, endSec)         fired on zoom/pan (throttled by ECharts)
  *   onEventClick(index)                            fired when an event band is clicked
@@ -51,7 +50,6 @@ function fmtUv(v) {
 export default function EegStripChart({
   samples,
   channels,
-  overlay = false,
   events = NO_EVENTS,
   onVisibleRangeChange,
   onEventClick,
@@ -112,94 +110,6 @@ export default function EegStripChart({
         ]),
       };
     };
-
-    // Overlay: every channel on one shared µV axis, so amplitudes can be compared
-    // directly (and identical traces would sit exactly on top of one another).
-    if (overlay) {
-      return {
-        animation: false,
-        backgroundColor: "transparent",
-        textStyle: { fontFamily: "inherit" },
-        legend: {
-          top: 0,
-          left: 68,
-          itemWidth: 14,
-          itemHeight: 3,
-          itemGap: 16,
-          textStyle: { color: c.ink, fontSize: 12 },
-          inactiveColor: c.muted,
-        },
-        // Extra headroom when event bands exist: their hover label prints at the
-        // top of the band and would otherwise be clipped by the canvas edge.
-        grid: [{ left: 68, right: 18, top: events.length ? 50 : 34, bottom: 56 }],
-        xAxis: [{
-          type: "value",
-          min: "dataMin",
-          max: "dataMax",
-          axisLine: { lineStyle: { color: c.border } },
-          axisLabel: { color: c.muted, fontSize: 11, formatter: (v) => `${v.toFixed(0)}s` },
-          splitLine: { show: false },
-        }],
-        yAxis: [{
-          type: "value",
-          name: "µV",
-          nameLocation: "middle",
-          nameGap: 46,
-          nameTextStyle: { color: c.muted, fontSize: 11, fontWeight: 600 },
-          scale: true,
-          axisLine: { show: false },
-          axisTick: { show: false },
-          axisLabel: { color: c.muted, fontSize: 10 },
-          splitLine: { lineStyle: { color: c.border, opacity: 0.5 } },
-        }],
-        series: channels.map((ch, i) => ({
-          name: ch.label,
-          type: "line",
-          showSymbol: false,
-          sampling: "lttb",
-          large: true,
-          lineStyle: { width: 1, color: chColor(ch), opacity: 0.85 },
-          itemStyle: { color: chColor(ch) },
-          emphasis: { focus: "series" },
-          // One grid — bands attach to the first series only, or the translucent
-          // fills would stack up once per channel.
-          markArea: i === 0 ? buildMarkArea() : undefined,
-          data: samples.map((s) => [s.t_seconds, s[ch.key]]),
-        })),
-        axisPointer: { lineStyle: { color: c.muted, opacity: 0.5 }, label: { show: false } },
-        tooltip: {
-          trigger: "axis",
-          confine: true,
-          backgroundColor: c.surface,
-          borderColor: c.border,
-          borderWidth: 1,
-          textStyle: { color: c.ink, fontSize: 12 },
-          formatter: (ps) => {
-            if (!ps || !ps.length) return "";
-            const t = ps[0].value[0];
-            const rows = ps
-              .map((p) => `<div style="display:flex;justify-content:space-between;gap:16px"><span style="color:${p.color}">${p.seriesName}</span><b>${fmtUv(p.value[1])} µV</b></div>`)
-              .join("");
-            return `<div style="font-family:monospace;font-size:11px;color:${c.muted};margin-bottom:4px">t = ${t.toFixed(2)} s</div>${rows}`;
-          },
-        },
-        dataZoom: [
-          { type: "inside", xAxisIndex: [0], filterMode: "none" },
-          {
-            type: "slider",
-            xAxisIndex: [0],
-            height: 20,
-            bottom: 6,
-            borderColor: c.border,
-            fillerColor: c.accentSoft,
-            handleStyle: { color: c.muted },
-            dataBackground: { lineStyle: { color: c.muted, opacity: 0.4 }, areaStyle: { color: c.inset } },
-            textStyle: { color: c.muted, fontSize: 10 },
-            labelFormatter: (v) => `${v.toFixed(0)}s`,
-          },
-        ],
-      };
-    }
 
     // Stacked small-multiples: equal strips with small gaps, room for the slider.
     // Event bands print their hover label at the top of the first strip, so give
@@ -367,8 +277,8 @@ export default function EegStripChart({
       chartRef.current = null;
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [samples, channels, overlay, events]);
+  }, [samples, channels, events]);
 
-  const height = overlay ? 360 : Math.max(280, channels.length * 96 + 48);
+  const height = Math.max(280, channels.length * 96 + 48);
   return <div ref={elRef} className="w-full" style={{ height: `${height}px` }} />;
 }

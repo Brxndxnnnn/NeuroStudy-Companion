@@ -301,8 +301,8 @@ export default function SessionResults() {
   const [mentalRange, setMentalRange] = useState({ from: 0, to: 0 });
   const [vitalsRange, setVitalsRange] = useState({ from: 0, to: 0 });
   const [channel, setChannel] = useState(CHANNELS[0].prefix);
-  // "stacked" = one strip per channel, "overlay" = all four on a shared µV axis,
-  // or a single channel prefix to isolate one trace.
+  // "stacked" = one strip per channel, or a single channel prefix to isolate
+  // one trace.
   const [eegView, setEegView] = useState("stacked");
 
   useEffect(() => {
@@ -515,7 +515,7 @@ export default function SessionResults() {
   // Which traces the EEG chart draws. Memoised because EegStripChart re-inits the
   // canvas whenever this array identity changes.
   const eegChannels = useMemo(() => {
-    if (eegView === "stacked" || eegView === "overlay") return CHANNELS;
+    if (eegView === "stacked") return CHANNELS;
     return CHANNELS.filter((ch) => ch.prefix === eegView);
   }, [eegView]);
 
@@ -875,7 +875,6 @@ export default function SessionResults() {
                           size="sm"
                         >
                           <option value="stacked">Stacked</option>
-                          <option value="overlay">Overlay</option>
                           {CHANNELS.map((ch) => (
                             <option key={ch.prefix} value={ch.prefix}>{ch.label}</option>
                           ))}
@@ -892,7 +891,6 @@ export default function SessionResults() {
                 <EegStripChart
                   samples={samples}
                   channels={eegChannels}
-                  overlay={eegView === "overlay"}
                   events={chartEvents("eeg")}
                   onEventClick={setSelectedEvent}
                   onVisibleRangeChange={onEegRange}
