@@ -11,11 +11,11 @@ function roleLabel(role) {
   return map[role] || role.charAt(0).toUpperCase() + role.slice(1);
 }
 
-function DetailRow({ label, children, mono }) {
+function DetailRow({ label, children }) {
   return (
     <div className="flex items-center justify-between gap-4 px-6 py-4 border-b border-border last:border-0">
       <Label>{label}</Label>
-      <span className={`text-sm text-ink text-right ${mono ? "font-mono text-[12.5px] break-all" : "font-medium"}`}>
+      <span className="text-sm text-ink text-right font-medium">
         {children || <span className="text-muted font-normal">—</span>}
       </span>
     </div>
@@ -110,8 +110,6 @@ export default function ProfilePage() {
               <DetailRow label="Full name">{user?.display_name}</DetailRow>
               <DetailRow label="Email">{user?.email}</DetailRow>
               <DetailRow label="Role">{roleLabel(user?.role)}</DetailRow>
-              <DetailRow label="Clinic ID" mono>{user?.clinic_id}</DetailRow>
-              <DetailRow label="User ID" mono>{user?.user_id}</DetailRow>
             </Card>
 
             <div className="flex items-center justify-between gap-4">

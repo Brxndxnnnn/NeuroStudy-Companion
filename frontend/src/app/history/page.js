@@ -145,10 +145,9 @@ export default function ClinicalDashboard() {
           subtitle="Select a patient to begin a session, or register a new one."
         />
 
-        <div className="grid grid-cols-2 sm:grid-cols-3 gap-4">
+        <div className="grid grid-cols-2 gap-4">
           <StatCard label="Registered patients" value={isLoading ? "—" : clients.length} />
           <StatCard label="Matching filters" value={isLoading ? "—" : filteredClients.length} hint={hasFilters ? "filtered view" : "all patients"} />
-          <StatCard label="Database" value="Cloud" hint="live instance" className="hidden sm:block" />
         </div>
 
         {/* Directory */}

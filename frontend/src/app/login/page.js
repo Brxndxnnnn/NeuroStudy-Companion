@@ -2,7 +2,7 @@
 import { useState } from "react";
 import { useRouter } from "next/navigation";
 import { login } from "@/utils/api";
-import { BrandMark, Button, Field, Input, Label, Alert } from "@/components/ui";
+import { BrandMark, Button, Field, Input, Alert } from "@/components/ui";
 import ThemeToggle from "@/components/ThemeToggle";
 
 export default function LoginPage() {
@@ -117,10 +117,6 @@ export default function LoginPage() {
             </Button>
           </form>
         </div>
-
-        <p className="text-center text-[12px] text-muted mt-6">
-          <Label>Secure clinical access</Label>
-        </p>
       </div>
     </main>
   );
