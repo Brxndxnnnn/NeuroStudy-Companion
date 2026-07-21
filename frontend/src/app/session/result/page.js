@@ -948,7 +948,7 @@ export default function SessionResults() {
                 <Card className="overflow-hidden">
                   <CardHeader
                     title="Frequency bands"
-                    subtitle="How much energy is in each brainwave band (delta, theta, alpha, beta, gamma) over time. Stacked shows all four channels; pick one channel for a closer look."
+                    subtitle="How much energy is in each brainwave band (delta, theta, alpha, beta, gamma) over time. Stacked shows all four channels; pick one channel for a closer look. A second way of measuring these same bands — filtered amplitude instead of energy — is in Band strength below."
                     actions={
                       <div className="flex flex-wrap items-end gap-3">
                         <ControlGroup label="Channel">
@@ -1079,6 +1079,7 @@ export default function SessionResults() {
                         ? `How strong each brainwave band's signal is, in µV, measured every ` +
                           `${ellipticMeta.step_s}s in ${ellipticMeta.window_size_s}s windows (${ellipticMeta.windows} in total).`
                         : "How strong each brainwave band's signal is, in µV. Ready shortly after the session ends.") +
+                      " A second way of measuring these same bands — energy instead of filtered amplitude — is in Frequency bands above." +
                       (ellipticRows.length && ellipticStatMatters && currentEllipticStat
                         ? ` Showing ${currentEllipticStat.label} — ${currentEllipticStat.hint}.`
                         : "")
