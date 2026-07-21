@@ -1,0 +1,37 @@
+name: Sync hotfix to develop
+
+# When a hotfix/* branch merges into main, opens a PR bringing that same fix
+# into develop — otherwise it gets silently dropped the next time develop
+# releases to main (develop's history would overwrite main's, undoing the
+# hotfix on the next release).
+
+on:
+  pull_request:
+    types: [closed]
+    branches: [main]
+
+permissions:
+  contents: read
+  pull-requests: write
+
+jobs:
+  sync:
+    if: github.event.pull_request.merged == true && startsWith(github.event.pull_request.head.ref, 'hotfix/')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Open PR into develop
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          SOURCE_PR: ${{ github.event.pull_request.number }}
+          SOURCE_TITLE: ${{ github.event.pull_request.title }}
+        run: |
+          gh pr create \
+            --base develop \
+            --head main \
+            --title "Sync hotfix into develop: $SOURCE_TITLE" \
+            --body "Auto-opened after hotfix PR #$SOURCE_PR merged into main, so the fix isn't lost on the next develop -> main release." \
+          || echo "No PR opened — one may already be open from an earlier unsynced hotfix, or main and develop are already even. Check manually: https://github.com/${{ github.repository }}/compare/develop...main"
