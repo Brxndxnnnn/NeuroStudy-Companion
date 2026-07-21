@@ -271,11 +271,6 @@ export default function SessionResults() {
   // window, so it is displayed but never used to index).
   const [ellipticIdx, setEllipticIdx] = useState(0);
   const [ellipticView, setEllipticView] = useState("window"); // "window" | "timeline"
-  // Which statistic the cross-channel profile draws under "All". Only one can be
-  // drawn: the three do not share a scale (peak runs an order of magnitude above
-  // SD, mean sits at zero), so putting them on a single axis to compare four
-  // channels would be meaningless. SD is the amplitude, hence the default.
-  const [ellipticAllStat, setEllipticAllStat] = useState("std");
   const [events, setEvents] = useState([]);
   const [selectedEvent, setSelectedEvent] = useState(null);
   // One per chart, so a chart can drop its markers without the others losing theirs.
@@ -583,6 +578,11 @@ export default function SessionResults() {
   // ── Elliptic band statistics (ml_service) ─────────────────────────────────
   // `ellipticChannel` is either a channel prefix or "all".
   const ellipticAll = ellipticChannel === "all";
+  const currentEllipticStat = ELLIPTIC_STATS.find((s) => s.key === ellipticStat);
+  // Statistic only matters where more than one could plausibly be on screen —
+  // see the header control's own comment for why. Used both to show/hide that
+  // control and to name the current one in the subtitle below it.
+  const ellipticStatMatters = ellipticView === "timeline" || ellipticAll;
   const ellipticShownChannels = useMemo(
     () => (ellipticAll ? CHANNELS : CHANNELS.filter((c) => c.prefix === ellipticChannel)),
     [ellipticAll, ellipticChannel]
@@ -715,7 +715,7 @@ export default function SessionResults() {
       return CHANNELS.map((ch) => ({
         label: ch.label,
         values: Object.fromEntries(
-          BANDS.map((b) => [b.key, ellipticWindow[`${ch.prefix}_${b.key}_${ellipticAllStat}`] ?? null])
+          BANDS.map((b) => [b.key, ellipticWindow[`${ch.prefix}_${b.key}_${ellipticStat}`] ?? null])
         ),
       }));
     }
@@ -725,7 +725,7 @@ export default function SessionResults() {
         BANDS.map((b) => [b.key, ellipticWindow[`${ellipticChannel}_${b.key}_${s.key}`] ?? null])
       ),
     }));
-  }, [ellipticWindow, ellipticAll, ellipticAllStat, ellipticChannel]);
+  }, [ellipticWindow, ellipticAll, ellipticStat, ellipticChannel]);
 
   // Which stimulus was on screen during this window. A window straddling two
   // stimuli belongs cleanly to neither, so match on its midpoint and say when it
@@ -1077,10 +1077,13 @@ export default function SessionResults() {
                   <CardHeader
                     title="Spectral amplitude · elliptic filter"
                     subtitle={
-                      ellipticMeta
+                      (ellipticMeta
                         ? `Per-band amplitude in µV over a ${ellipticMeta.window_size_s}s window ` +
                           `stepped every ${ellipticMeta.step_s}s · ${ellipticMeta.windows} windows.`
-                        : "Per-band amplitude in µV, computed after the session ends."
+                        : "Per-band amplitude in µV, computed after the session ends.") +
+                      (ellipticRows.length && ellipticStatMatters && currentEllipticStat
+                        ? ` Showing ${currentEllipticStat.label} — ${currentEllipticStat.hint}.`
+                        : "")
                     }
                     actions={
                       ellipticRows.length ? (
@@ -1111,13 +1114,18 @@ export default function SessionResults() {
                             </div>
                           </ControlGroup>
 
-                          {/* The statistic picker is TIMELINE-only. A line chart can
-                              draw one statistic at a time, so there it is a real
-                              choice. The window view has room to show SD, peak and
-                              mean side by side for the selected channel, so making
-                              you toggle between them there would only hide two thirds
-                              of a snapshot that fits on screen. */}
-                          {ellipticView === "timeline" && (
+                          {/* The statistic picker only matters where more than one
+                              statistic could plausibly be on screen at once: the
+                              timeline (a line chart draws one at a time) and the
+                              window view's "All channels" cross-channel comparison
+                              (four channels' worth of three non-comparable scales
+                              has to pick one). Single-channel window view shows SD,
+                              peak and mean side by side instead, so there is no
+                              choice to make and the control would be a no-op. One
+                              piece of state drives it everywhere it appears, so
+                              switching between window and timeline never silently
+                              shows a different statistic than the one just picked. */}
+                          {ellipticStatMatters && (
                             <ControlGroup label="Statistic">
                               <div className="w-24">
                                 <Select
@@ -1280,37 +1288,20 @@ export default function SessionResults() {
                           </div>
 
                           <div>
-                            <div className="mb-1 flex flex-wrap items-center justify-between gap-2 px-2">
+                            <div className="mb-1 px-2">
+                              {/* Confirms what the card-header "Statistic" control
+                                  above is currently set to — the actual control
+                                  lives there (one piece of state, shown consistently
+                                  whether you're in this view or the timeline) rather
+                                  than a second picker duplicated next to every chart
+                                  that depends on it. */}
                               <Label>
                                 {ellipticAll
-                                  ? `${
-                                      ELLIPTIC_STATS.find((s) => s.key === ellipticAllStat)?.label
-                                    } amplitude by channel · this window only (µV)`
+                                  ? `${currentEllipticStat?.label} amplitude by channel · this window only (µV)`
                                   : `${
                                       CHANNELS.find((c) => c.prefix === ellipticChannel)?.label
                                     } · SD, peak and mean · this window only (µV)`}
                               </Label>
-
-                              {/* Comparing four channels needs ONE statistic on the
-                                  axis — the three do not share a scale. So under
-                                  "All" the statistic is a choice rather than being
-                                  pinned to SD. */}
-                              {ellipticAll && (
-                                <label className="flex items-center gap-2 text-[11px] text-muted">
-                                  <span className="sr-only">Statistic</span>
-                                  <select
-                                    value={ellipticAllStat}
-                                    onChange={(e) => setEllipticAllStat(e.target.value)}
-                                    className="rounded-md border border-border bg-surface px-2 py-1 text-[12px] font-semibold text-ink"
-                                  >
-                                    {ELLIPTIC_STATS.map((s) => (
-                                      <option key={s.key} value={s.key}>
-                                        {s.label}
-                                      </option>
-                                    ))}
-                                  </select>
-                                </label>
-                              )}
                             </div>
 
                             <BandProfileChart groups={ellipticWindowProfile} bands={BANDS} />
@@ -1322,7 +1313,7 @@ export default function SessionResults() {
                                 statistic is taken. Read each group against itself.
                               </p>
                             )}
-                            {ellipticAll && ellipticAllStat === "mean" && (
+                            {ellipticAll && ellipticStat === "mean" && (
                               <p className="px-2 pt-1 text-[11px] leading-snug text-muted">
                                 Mean sits near zero for every band and channel by construction — the
                                 signal is bandpassed before the statistic is taken, so it has no DC
@@ -1347,7 +1338,7 @@ export default function SessionResults() {
                                 <thead>
                                   <tr className="text-muted">
                                     <th className="text-left font-semibold py-2 pr-4">
-                                      {ELLIPTIC_STATS.find((s) => s.key === ellipticAllStat)?.label}{" "}
+                                      {currentEllipticStat?.label}{" "}
                                       µV · channel
                                     </th>
                                     {BANDS.map((b) => (
@@ -1379,7 +1370,7 @@ export default function SessionResults() {
                                         >
                                           {fmtUv(
                                             ellipticWindow?.[
-                                              `${ch.prefix}_${b.key}_${ellipticAllStat}`
+                                              `${ch.prefix}_${b.key}_${ellipticStat}`
                                             ]
                                           )}
                                         </td>
