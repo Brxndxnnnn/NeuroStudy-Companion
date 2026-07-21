@@ -305,13 +305,11 @@ export default function AdminDashboard() {
         {/* OVERVIEW */}
         {activeTab === "overview" && (
           <div className="anim-fade space-y-6">
-            <div className="grid grid-cols-2 sm:grid-cols-3 gap-4">
+            <div className="grid grid-cols-2 gap-4">
               <StatCard label="Registered users" value={loading ? "—" : users.length} />
-              <StatCard label="Database" value="Cloud" hint="live instance" />
               <StatCard
                 label="Global admins"
                 value={loading ? "—" : users.filter((u) => !u.clinic_id).length}
-                className="hidden sm:block"
               />
             </div>
 
