@@ -1,0 +1,60 @@
+name: Deploy to production
+
+on:
+  # Manual-trigger only: merging to main does NOT auto-deploy. Go to the
+  # Actions tab and run this workflow when you're ready to push to prod.
+  # (Required-reviewer environment protection needs a paid GitHub plan for
+  # private repos, so this is the zero-cost equivalent approval gate.)
+  workflow_dispatch: {}
+
+permissions:
+  contents: write
+
+jobs:
+  deploy:
+    name: Deploy to droplet
+    runs-on: ubuntu-latest
+    environment: production
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Deploy over SSH
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host: ${{ secrets.DROPLET_HOST }}
+          username: ${{ secrets.DROPLET_USER }}
+          key: ${{ secrets.DROPLET_SSH_KEY }}
+          script: |
+            set -e
+            cd /opt/NeuroStudy-Companion
+            git fetch origin
+            git reset --hard origin/main
+            docker compose -f compose.yaml -f compose.prod.yaml up -d --build
+            # nginx can keep a stale upstream IP after backend/ml containers get
+            # recreated by the rebuild above — restart it explicitly every time.
+            docker compose -f compose.yaml -f compose.prod.yaml restart nginx
+
+      - name: Health check
+        run: |
+          sleep 5
+          fail=0
+          for path in /api/health /login /admin /profile /history; do
+            code=$(curl -sk -o /dev/null -w '%{http_code}' "https://${{ secrets.DROPLET_HOST }}$path")
+            echo "$path -> $code"
+            if [ "$code" != "200" ]; then
+              fail=1
+            fi
+          done
+          if [ "$fail" != "0" ]; then
+            echo "One or more health checks failed."
+            exit 1
+          fi
+
+      - name: Tag release
+        if: success()
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          TAG="v$(date +%Y.%m.%d)-${GITHUB_SHA::7}"
+          git tag "$TAG"
+          git push origin "$TAG"
