@@ -48,10 +48,8 @@ jobs:
 
       - run: npm ci
       - run: npm run lint
+      - run: npm test
 
-      # No test suite exists for the backend yet — that's separate, larger
-      # follow-up work (choosing a framework, deciding what to cover), not
-      # something to bundle into CI setup.
       - name: Docker build check
         run: docker build -f Dockerfile -t ci-backend .
 
