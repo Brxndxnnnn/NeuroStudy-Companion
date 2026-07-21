@@ -83,6 +83,52 @@ export default function ActiveSessionMockup() {
   const currentMathEventIdRef = useRef(null);
   const [patientName, setPatientName] = useState("");
 
+  // EVENT LOGGING HELPERS
+  //
+  // Mid-sequence transitions send ONE create per stimulus: the backend closes the
+  // previous open event and stamps the new one in the same request, so consecutive
+  // windows are contiguous by construction — a client-side hide + create pair can
+  // arrive out of order under latency spikes and record overlapping windows.
+  // Explicit hides are only for phase exits (last image, last question), and must
+  // be AWAITED there: setHiddenAt overwrites unconditionally, so a slow hide PATCH
+  // landing after the next phase's create would push hidden_at past that event's
+  // shown_at. The refs hold the create-request PROMISE, not the resolved id, so a
+  // hide can never miss its event just because the create response was slow.
+  const logStimulusShown = (ref, payload, what) => {
+    const sessionId = localStorage.getItem("currentSessionId");
+    ref.current = createEvent(sessionId, payload)
+      .then(async (res) => {
+        if (!res.ok) throw new Error(await res.text());
+        const data = await res.json();
+        return data.event_id || data.id || null;
+      })
+      .catch((err) => {
+        console.error(`${what} event start failed`, err);
+        return null;
+      });
+  };
+
+  // Claims the pending event synchronously (no double-hide race) and hides it
+  // once its id is known. Returns a promise so session teardown can await the
+  // final stamp; mid-sequence callers just fire and forget.
+  const logStimulusHidden = (ref, what) => {
+    const pending = ref.current;
+    ref.current = null;
+    if (!pending) return Promise.resolve();
+    return Promise.resolve(pending)
+      .then((eventId) => (eventId ? hideEvent(eventId) : null))
+      .catch((err) => console.error(`${what} event hide failed`, err));
+  };
+
+  const logImageShown = (imageId) => {
+    if (imageId) logStimulusShown(currentEventIdRef, { image_id: imageId }, "Image");
+  };
+  const logImageHidden = () => logStimulusHidden(currentEventIdRef, "Image");
+  const logQuestionShown = (questionId) => {
+    if (questionId) logStimulusShown(currentMathEventIdRef, { question_id: questionId }, "Question");
+  };
+  const logQuestionHidden = () => logStimulusHidden(currentMathEventIdRef, "Question");
+
   useEffect(() => {
     setPatientName(localStorage.getItem("currentClientName") || "");
   }, []);
@@ -170,52 +216,6 @@ export default function ActiveSessionMockup() {
       return () => clearTimeout(timer);
     }
   }, [currentStep, currentMathIndex, questions]);
-
-  // EVENT LOGGING HELPERS
-  //
-  // Mid-sequence transitions send ONE create per stimulus: the backend closes the
-  // previous open event and stamps the new one in the same request, so consecutive
-  // windows are contiguous by construction — a client-side hide + create pair can
-  // arrive out of order under latency spikes and record overlapping windows.
-  // Explicit hides are only for phase exits (last image, last question), and must
-  // be AWAITED there: setHiddenAt overwrites unconditionally, so a slow hide PATCH
-  // landing after the next phase's create would push hidden_at past that event's
-  // shown_at. The refs hold the create-request PROMISE, not the resolved id, so a
-  // hide can never miss its event just because the create response was slow.
-  const logStimulusShown = (ref, payload, what) => {
-    const sessionId = localStorage.getItem("currentSessionId");
-    ref.current = createEvent(sessionId, payload)
-      .then(async (res) => {
-        if (!res.ok) throw new Error(await res.text());
-        const data = await res.json();
-        return data.event_id || data.id || null;
-      })
-      .catch((err) => {
-        console.error(`${what} event start failed`, err);
-        return null;
-      });
-  };
-
-  // Claims the pending event synchronously (no double-hide race) and hides it
-  // once its id is known. Returns a promise so session teardown can await the
-  // final stamp; mid-sequence callers just fire and forget.
-  const logStimulusHidden = (ref, what) => {
-    const pending = ref.current;
-    ref.current = null;
-    if (!pending) return Promise.resolve();
-    return Promise.resolve(pending)
-      .then((eventId) => (eventId ? hideEvent(eventId) : null))
-      .catch((err) => console.error(`${what} event hide failed`, err));
-  };
-
-  const logImageShown = (imageId) => {
-    if (imageId) logStimulusShown(currentEventIdRef, { image_id: imageId }, "Image");
-  };
-  const logImageHidden = () => logStimulusHidden(currentEventIdRef, "Image");
-  const logQuestionShown = (questionId) => {
-    if (questionId) logStimulusShown(currentMathEventIdRef, { question_id: questionId }, "Question");
-  };
-  const logQuestionHidden = () => logStimulusHidden(currentMathEventIdRef, "Question");
 
   // 5. IMAGES: AUTO-ADVANCE. Mid-sequence there is no hide call — the next
   // image's create closes the previous event server-side, atomically. Leaving

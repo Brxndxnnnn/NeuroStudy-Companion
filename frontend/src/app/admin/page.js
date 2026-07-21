@@ -28,6 +28,19 @@ import {
   Spinner,
 } from "@/components/ui";
 
+function TabButton({ id, activeTab, onSelect, children }) {
+  return (
+    <button
+      onClick={() => onSelect(id)}
+      className={`pb-3 -mb-px text-sm font-semibold transition-colors border-b-2 ${
+        activeTab === id ? "border-accent text-accent-strong" : "border-transparent text-muted hover:text-ink"
+      }`}
+    >
+      {children}
+    </button>
+  );
+}
+
 export default function AdminDashboard() {
   const router = useRouter();
 
@@ -267,17 +280,6 @@ export default function AdminDashboard() {
     }
   };
 
-  const TabButton = ({ id, children }) => (
-    <button
-      onClick={() => setActiveTab(id)}
-      className={`pb-3 -mb-px text-sm font-semibold transition-colors border-b-2 ${
-        activeTab === id ? "border-accent text-accent-strong" : "border-transparent text-muted hover:text-ink"
-      }`}
-    >
-      {children}
-    </button>
-  );
-
   return (
     <main className="min-h-screen bg-ground">
       <TopNav />
@@ -297,9 +299,9 @@ export default function AdminDashboard() {
         {errorMessage && <Alert tone="crit">{errorMessage}</Alert>}
 
         <div className="flex gap-7 border-b border-border">
-          <TabButton id="overview">Overview</TabButton>
-          <TabButton id="manage">Manage users &amp; access</TabButton>
-          <TabButton id="database">Manage Database Access</TabButton>
+          <TabButton id="overview" activeTab={activeTab} onSelect={setActiveTab}>Overview</TabButton>
+          <TabButton id="manage" activeTab={activeTab} onSelect={setActiveTab}>Manage users &amp; access</TabButton>
+          <TabButton id="database" activeTab={activeTab} onSelect={setActiveTab}>Manage Database Access</TabButton>
         </div>
 
         {/* OVERVIEW */}

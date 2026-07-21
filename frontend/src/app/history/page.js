@@ -23,6 +23,9 @@ const RACE_OPTIONS = ["Chinese", "Malay", "Indian", "Caucasian", "Eurasian", "Ot
 
 export default function ClinicalDashboard() {
   const router = useRouter();
+  // Captured once instead of read fresh (Date.now()) inside calculateAge, which
+  // is called during render — reading the wall clock there is an impure call.
+  const [now] = useState(() => Date.now());
   const [clients, setClients] = useState([]);
   const [isLoading, setIsLoading] = useState(true);
 
@@ -111,7 +114,7 @@ export default function ClinicalDashboard() {
   const calculateAge = (dobString) => {
     if (!dobString) return "N/A";
     const dob = new Date(dobString);
-    const ageDate = new Date(Date.now() - dob.getTime());
+    const ageDate = new Date(now - dob.getTime());
     return Math.abs(ageDate.getUTCFullYear() - 1970);
   };
 
