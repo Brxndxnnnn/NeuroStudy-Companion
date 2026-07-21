@@ -231,12 +231,6 @@ function ControlGroup({ label, children }) {
   );
 }
 
-// Sizing override for the shared <Select> when it's used in a card-header
-// toolbar instead of a form — same colors/border/chevron, tighter padding and
-// type size so it sits at the same height as the segmented-button groups next
-// to it. Width is controlled by the wrapping div at each call site rather than
-// here, since overriding Select's own w-full via className is unreliable.
-const TOOLBAR_SELECT = "py-1.5 pl-2.5 text-[12px] font-semibold";
 
 function fmtDuration(sec) {
   if (!sec || sec < 0) return "—";
@@ -873,7 +867,7 @@ export default function SessionResults() {
                           aria-label="EEG view"
                           value={eegView}
                           onChange={(e) => setEegView(e.target.value)}
-                          className={TOOLBAR_SELECT}
+                          size="sm"
                         >
                           <option value="stacked">Stacked</option>
                           <option value="overlay">Overlay</option>
@@ -960,7 +954,8 @@ export default function SessionResults() {
                               aria-label="Channel"
                               value={channel}
                               onChange={(e) => setChannel(e.target.value)}
-                              className={`font-mono ${TOOLBAR_SELECT}`}
+                              size="sm"
+                              className="font-mono"
                             >
                               <option value="stacked">Stacked</option>
                               {CHANNELS.map((ch) => (
@@ -1124,7 +1119,7 @@ export default function SessionResults() {
                                   aria-label="Elliptic statistic"
                                   value={ellipticStat}
                                   onChange={(e) => setEllipticStat(e.target.value)}
-                                  className={TOOLBAR_SELECT}
+                                  size="sm"
                                 >
                                   {ELLIPTIC_STATS.map((s) => (
                                     <option key={s.key} value={s.key}>{s.label}</option>
@@ -1140,7 +1135,8 @@ export default function SessionResults() {
                                 aria-label="Elliptic channel"
                                 value={ellipticChannel}
                                 onChange={(e) => setEllipticChannel(e.target.value)}
-                                className={`font-mono ${TOOLBAR_SELECT}`}
+                                size="sm"
+                                className="font-mono"
                               >
                                 <option value="all">All</option>
                                 {CHANNELS.map((ch) => (

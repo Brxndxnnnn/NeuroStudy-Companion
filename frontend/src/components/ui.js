@@ -121,10 +121,18 @@ export function Label({ children, className = "" }) {
 }
 
 /* ── Form field + inputs ──────────────────────────────────────── */
-const INPUT =
-  "w-full rounded-xl border border-border-strong bg-inset px-3.5 py-3 text-[15px] text-ink " +
+// Split into "chrome" (color/border/focus, size-independent) and per-size
+// padding/type, so a compact Select can swap in different sizing without
+// fighting the default padding/text-size classes for the same properties —
+// two Tailwind classes that both set e.g. padding-y have no reliable winner
+// based on source order, only one based on Tailwind's own internal stylesheet
+// order, so a compact variant needs its own complete class string rather than
+// an override appended after the default one.
+const INPUT_CHROME =
+  "w-full border border-border-strong bg-inset text-ink " +
   "placeholder:text-muted transition-all focus:outline-none focus:border-accent focus:bg-surface " +
   "focus:ring-[3px] focus:ring-accent/20 disabled:opacity-60 disabled:cursor-not-allowed";
+const INPUT = `${INPUT_CHROME} rounded-xl px-3.5 py-3 text-[15px]`;
 
 export function Field({ label, required, hint, htmlFor, children, className = "" }) {
   return (
@@ -145,13 +153,20 @@ export function Input({ className = "", ...props }) {
   return <input className={`${INPUT} ${className}`} {...props} />;
 }
 
-export function Select({ className = "", children, ...props }) {
+// "md" is the standard form-field size (unchanged from before). "sm" is for a
+// select sitting in a toolbar next to compact buttons — e.g. a segmented
+// button group or a "Markers on" toggle — where the full form-field size reads
+// as noticeably oversized next to them.
+const SELECT_SIZES = {
+  md: `${INPUT} peer appearance-none cursor-pointer pr-9`,
+  sm: `${INPUT_CHROME} rounded-lg px-2.5 py-1.5 text-[12px] font-semibold peer appearance-none cursor-pointer pr-7`,
+};
+
+export function Select({ className = "", size = "md", children, ...props }) {
+  const small = size === "sm";
   return (
     <div className="relative">
-      <select
-        className={`${INPUT} peer appearance-none cursor-pointer pr-9 ${className}`}
-        {...props}
-      >
+      <select className={`${SELECT_SIZES[size]} ${className}`} {...props}>
         {children}
       </select>
       {/* Native <select> arrows are dropped (appearance-none, for consistent
@@ -162,7 +177,9 @@ export function Select({ className = "", children, ...props }) {
         aria-hidden="true"
         viewBox="0 0 20 20"
         fill="none"
-        className="pointer-events-none absolute right-3.5 top-1/2 h-4 w-4 -translate-y-1/2 text-muted peer-disabled:opacity-50"
+        className={`pointer-events-none absolute top-1/2 -translate-y-1/2 text-muted peer-disabled:opacity-50 ${
+          small ? "right-2.5 h-3.5 w-3.5" : "right-3.5 h-4 w-4"
+        }`}
       >
         <path d="M5.5 7.5 10 12l4.5-4.5" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" />
       </svg>

@@ -1009,12 +1009,12 @@ export default function InsightsPage() {
                         linkPanels
                         events={sessionEvents}
                         panels={[
-                          { label: "Valence (pleasantness) · predicted vs actual", unit: "", min: 1, max: 7,
+                          { label: "Valence", title: "Valence (pleasantness) · predicted vs actual", unit: "", min: 1, max: 7,
                             series: [
                               { key: "valence", label: "Predicted", color: "--accent" },
                               { key: "actual_valence", label: "Actual (OASIS)", color: "--muted" },
                             ] },
-                          { label: "Arousal (intensity) · predicted vs actual", unit: "", min: 1, max: 7,
+                          { label: "Arousal", title: "Arousal (intensity) · predicted vs actual", unit: "", min: 1, max: 7,
                             series: [
                               { key: "arousal", label: "Predicted", color: "--warn" },
                               { key: "actual_arousal", label: "Actual (OASIS)", color: "--muted" },
