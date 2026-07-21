@@ -1114,18 +1114,17 @@ export default function SessionResults() {
                             </div>
                           </ControlGroup>
 
-                          {/* The statistic picker only matters where more than one
-                              statistic could plausibly be on screen at once: the
-                              timeline (a line chart draws one at a time) and the
-                              window view's "All channels" cross-channel comparison
-                              (four channels' worth of three non-comparable scales
-                              has to pick one). Single-channel window view shows SD,
-                              peak and mean side by side instead, so there is no
-                              choice to make and the control would be a no-op. One
-                              piece of state drives it everywhere it appears, so
-                              switching between window and timeline never silently
-                              shows a different statistic than the one just picked. */}
-                          {ellipticStatMatters && (
+                          {/* Timeline-only here: a line chart draws one statistic at
+                              a time, so this is the only place a chart is on screen
+                              that this control could apply to. The window view's own
+                              "All channels" equivalent sits inline next to the label
+                              it controls, further down — right beside what changes
+                              when you touch it, rather than up in the header where the
+                              actual profile chart it affects isn't even in view yet.
+                              Same ellipticStat state either way, so switching between
+                              window and timeline never silently shows a different
+                              statistic than the one just picked. */}
+                          {ellipticView === "timeline" && (
                             <ControlGroup label="Statistic">
                               <div className="w-24">
                                 <Select
@@ -1288,20 +1287,37 @@ export default function SessionResults() {
                           </div>
 
                           <div>
-                            <div className="mb-1 px-2">
-                              {/* Confirms what the card-header "Statistic" control
-                                  above is currently set to — the actual control
-                                  lives there (one piece of state, shown consistently
-                                  whether you're in this view or the timeline) rather
-                                  than a second picker duplicated next to every chart
-                                  that depends on it. */}
-                              <Label>
-                                {ellipticAll
-                                  ? `${currentEllipticStat?.label} amplitude by channel · this window only (µV)`
-                                  : `${
-                                      CHANNELS.find((c) => c.prefix === ellipticChannel)?.label
-                                    } · SD, peak and mean · this window only (µV)`}
-                              </Label>
+                            <div className="mb-1 flex flex-wrap items-center gap-2 px-2">
+                              {ellipticAll ? (
+                                <>
+                                  {/* The picker sits right in the sentence it
+                                      controls — "[SD ▾] amplitude by channel…" —
+                                      rather than up in the card header, out of
+                                      sight of the chart it actually changes. Same
+                                      ellipticStat as the timeline's own header
+                                      control, so picking one here and switching
+                                      views doesn't silently show a different
+                                      statistic there. */}
+                                  <div className="w-20">
+                                    <Select
+                                      aria-label="Statistic"
+                                      value={ellipticStat}
+                                      onChange={(e) => setEllipticStat(e.target.value)}
+                                      size="sm"
+                                    >
+                                      {ELLIPTIC_STATS.map((s) => (
+                                        <option key={s.key} value={s.key}>{s.label}</option>
+                                      ))}
+                                    </Select>
+                                  </div>
+                                  <Label>amplitude by channel · this window only (µV)</Label>
+                                </>
+                              ) : (
+                                <Label>
+                                  {CHANNELS.find((c) => c.prefix === ellipticChannel)?.label} · SD, peak and
+                                  mean · this window only (µV)
+                                </Label>
+                              )}
                             </div>
 
                             <BandProfileChart groups={ellipticWindowProfile} bands={BANDS} />
