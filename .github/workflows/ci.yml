@@ -18,12 +18,13 @@ jobs:
 
       - uses: actions/setup-node@v4
         with:
-          node-version: "20"
+          node-version: "22"
           cache: "npm"
           cache-dependency-path: frontend/package-lock.json
 
       - run: npm ci
       - run: npm run lint
+      - run: npm test
       - run: npm run build
 
       # Builds the actual production image so a broken Dockerfile / build step
@@ -48,10 +49,8 @@ jobs:
 
       - run: npm ci
       - run: npm run lint
+      - run: npm test
 
-      # No test suite exists for the backend yet — that's separate, larger
-      # follow-up work (choosing a framework, deciding what to cover), not
-      # something to bundle into CI setup.
       - name: Docker build check
         run: docker build -f Dockerfile -t ci-backend .
 
@@ -72,9 +71,25 @@ jobs:
 
       - run: pip install -r requirements.txt
 
-      # app/tests/ are integration tests that need a live, seeded database
-      # (see app/tests/conftest.py) and are not runnable in CI as written, so
-      # they are intentionally not invoked here — only dependency install and
-      # the image build are verified.
+      # test_features.py and test_preprocessing.py are excluded on purpose:
+      # they assert against one specific already-recorded clinical session's
+      # real EEG data (conftest.py's db_conn/session_id fixtures), not
+      # synthetic input. That's real patient data — it isn't fabricated as a
+      # CI fixture, and CI isn't pointed at any database that has it. Every
+      # other test file uses synthetic signals or mocks and runs for real
+      # here. Dummy DB_* values are only needed because app.core.config
+      # raises at import time if they're unset — nothing here connects.
+      - name: Run tests
+        env:
+          DB_USER: ci_dummy
+          DB_PASSWORD: ci_dummy
+          DB_HOST: localhost
+          DB_PORT: "5432"
+          DB_NAME: ci_dummy
+          # Matches the Dockerfile's own PYTHONPATH=/app — "from app.x import
+          # y" only resolves with the ml_service root on the path.
+          PYTHONPATH: "."
+        run: pytest app/tests/ --ignore=app/tests/test_features.py --ignore=app/tests/test_preprocessing.py -v
+
       - name: Docker build check
         run: docker build -f Dockerfile -t ci-ml .

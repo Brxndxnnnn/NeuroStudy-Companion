@@ -34,6 +34,14 @@ jobs:
             # main's tip — a rollback run (ref = an older v* tag) must land the
             # OLD commit, not silently redeploy current main.
             git reset --hard "$TARGET_SHA"
+
+            # Schema changes land before the app code that depends on them
+            # starts. migrate.sh only ever applies forward and skips anything
+            # already recorded, so this is a no-op on a rollback to an older
+            # commit with fewer migration files.
+            docker compose -f compose.yaml -f compose.prod.yaml up -d --wait db
+            COMPOSE_FILES="-f compose.yaml -f compose.prod.yaml" ./db/migrate.sh
+
             docker compose -f compose.yaml -f compose.prod.yaml up -d --build
             # nginx can keep a stale upstream IP after backend/ml containers get
             # recreated by the rebuild above — restart it explicitly every time.
