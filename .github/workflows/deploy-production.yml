@@ -1,8 +1,11 @@
 name: Deploy to production
 
 on:
-  push:
-    branches: [main]
+  # Manual-trigger only: merging to main does NOT auto-deploy. Go to the
+  # Actions tab and run this workflow when you're ready to push to prod.
+  # (Required-reviewer environment protection needs a paid GitHub plan for
+  # private repos, so this is the zero-cost equivalent approval gate.)
+  workflow_dispatch: {}
 
 permissions:
   contents: write
