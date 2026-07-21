@@ -157,9 +157,18 @@ export function Input({ className = "", ...props }) {
 // select sitting in a toolbar next to compact buttons — e.g. a segmented
 // button group or a "Markers on" toggle — where the full form-field size reads
 // as noticeably oversized next to them.
+//
+// py-2 (not py-1.5, which is what the segmented buttons themselves use) is
+// deliberate: a segmented group's actual height is its border (1px) + its
+// OWN p-0.5 wrapper padding (2px) + a button's py-1.5 (6px) per side, i.e. 2px
+// more per side than the button padding alone. Select has no such wrapper —
+// it's just a bordered box — so its py has to absorb that difference itself
+// (py-1.5 + 2px = py-2) or it sits a few px shorter than a segmented group
+// placed next to it in the same toolbar row, which throws off both controls'
+// vertical centering AND their labels above (ControlGroup bottom-aligns).
 const SELECT_SIZES = {
   md: `${INPUT} peer appearance-none cursor-pointer pr-9`,
-  sm: `${INPUT_CHROME} rounded-lg px-2.5 py-1.5 text-[12px] font-semibold peer appearance-none cursor-pointer pr-7`,
+  sm: `${INPUT_CHROME} rounded-lg px-2.5 py-2 text-[12px] font-semibold peer appearance-none cursor-pointer pr-7`,
 };
 
 export function Select({ className = "", size = "md", children, ...props }) {

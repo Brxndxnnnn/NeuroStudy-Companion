@@ -205,7 +205,11 @@ function MarkerToggle({ on, onToggle }) {
       onClick={onToggle}
       aria-pressed={on}
       title={on ? "Hide stimulus markers" : "Show stimulus markers"}
-      className={`px-3 py-1.5 rounded-lg text-[12px] font-semibold transition-colors border ${
+      // py-2, not py-1.5: matches the toolbar Select's sm size and a segmented
+      // button group's effective height (its own py-1.5 plus its wrapper's
+      // p-0.5), so this sits flush with whichever of those it's next to in a
+      // card's actions row instead of reading a couple px shorter.
+      className={`px-3 py-2 rounded-lg text-[12px] font-semibold transition-colors border ${
         on
           ? "bg-inset text-ink border-border"
           : "bg-transparent text-muted border-border hover:text-ink"
