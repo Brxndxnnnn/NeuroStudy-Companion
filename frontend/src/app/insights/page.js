@@ -58,7 +58,7 @@ function PipelineStep({ done, children }) {
     <li className="flex items-start gap-3">
       <span
         className={`mt-0.5 flex h-5 w-5 shrink-0 items-center justify-center rounded-full text-[11px] font-bold ${
-          done ? "bg-good-soft text-good" : "bg-inset text-muted"
+          done ? "bg-good-soft text-good-strong" : "bg-inset text-muted"
         }`}
       >
         {done ? "✓" : "•"}

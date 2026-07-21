@@ -204,8 +204,13 @@ export default function EegStripChart({
         formatter: (ps) => {
           if (!ps || !ps.length) return "";
           const t = ps[0].value[0];
+          // A swatch carries the channel color; the name stays the default text
+          // color. Two of the four channel colors don't clear 4.5:1 as small
+          // text on their own (they're tuned for CVD-separation as lines, not
+          // for text-on-surface contrast) — matches how TimeSeriesChart's
+          // tooltip already does this.
           const rows = ps
-            .map((p) => `<div style="display:flex;justify-content:space-between;gap:16px"><span style="color:${p.color}">${p.seriesName}</span><b>${fmtUv(p.value[1])} µV</b></div>`)
+            .map((p) => `<div style="display:flex;justify-content:space-between;gap:16px"><span><span style="display:inline-block;width:8px;height:8px;border-radius:2px;background:${p.color};margin-right:6px"></span>${p.seriesName}</span><b>${fmtUv(p.value[1])} µV</b></div>`)
             .join("");
           return `<div style="font-family:monospace;font-size:11px;color:${c.muted};margin-bottom:4px">t = ${t.toFixed(2)} s</div>${rows}`;
         },

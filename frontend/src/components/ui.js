@@ -41,10 +41,15 @@ const BTN_BASE =
   "focus-visible:outline-offset-2 focus-visible:outline-accent select-none";
 
 const BTN_VARIANTS = {
-  primary: "bg-accent text-on-accent shadow-sm hover:bg-accent-strong",
+  // accent-strong at rest, not accent: white text on plain accent only hits
+  // ~3.8:1 in light mode, under the 4.5:1 text minimum. accent-strong clears
+  // it with room. Hover goes the other way (to the brighter accent) rather
+  // than darker still — a transient hover state gets more contrast leeway
+  // than what's on screen at rest.
+  primary: "bg-accent-strong text-on-accent shadow-sm hover:bg-accent",
   ghost: "bg-surface text-ink-2 border border-border hover:border-border-strong hover:text-ink",
   subtle: "bg-inset text-ink-2 hover:bg-border/60 hover:text-ink",
-  danger: "bg-crit-soft text-crit hover:bg-crit hover:text-white",
+  danger: "bg-crit-soft text-crit-strong hover:bg-crit hover:text-white",
   quiet: "bg-transparent text-muted hover:text-ink hover:bg-inset",
 };
 
@@ -140,7 +145,7 @@ export function Field({ label, required, hint, htmlFor, children, className = ""
       {label && (
         <label htmlFor={htmlFor} className="mb-2 flex items-center gap-1">
           <Label>{label}</Label>
-          {required && <span className="text-crit text-xs leading-none">*</span>}
+          {required && <span className="text-crit-strong text-xs leading-none">*</span>}
         </label>
       )}
       {children}
@@ -201,12 +206,17 @@ export function Textarea({ className = "", ...props }) {
 }
 
 /* ── Pill / status badge ──────────────────────────────────────── */
+// good/warn/crit text on their own -soft background hit only ~2.8-3.3:1 in
+// light mode — the -strong variants exist for exactly this (text on a soft
+// tint), same pattern accent already used before this file had good/warn/crit
+// equivalents. The dot below stays the plain tone: a small swatch is a
+// graphical object (3:1 floor), not text, so it doesn't need the same fix.
 const PILL_TONES = {
   neutral: "bg-inset text-ink-2",
   accent: "bg-accent-soft text-accent-strong",
-  good: "bg-good-soft text-good",
-  warn: "bg-warn-soft text-warn",
-  crit: "bg-crit-soft text-crit",
+  good: "bg-good-soft text-good-strong",
+  warn: "bg-warn-soft text-warn-strong",
+  crit: "bg-crit-soft text-crit-strong",
 };
 
 export function Pill({ tone = "neutral", dot = false, live = false, className = "", children }) {
@@ -240,9 +250,9 @@ export function StatCard({ label, value, unit, hint, className = "" }) {
 
 /* ── Alert (inline feedback) ──────────────────────────────────── */
 const ALERT_TONES = {
-  good: "bg-good-soft text-good border-good/25",
-  crit: "bg-crit-soft text-crit border-crit/25",
-  warn: "bg-warn-soft text-warn border-warn/25",
+  good: "bg-good-soft text-good-strong border-good/25",
+  crit: "bg-crit-soft text-crit-strong border-crit/25",
+  warn: "bg-warn-soft text-warn-strong border-warn/25",
   accent: "bg-accent-soft text-accent-strong border-accent/25",
 };
 

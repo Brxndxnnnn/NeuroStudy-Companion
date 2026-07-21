@@ -16,7 +16,7 @@ export default function QuestionnairePage() {
         <Card className="w-full max-w-3xl p-8 anim-rise">
           {surveyComplete ? (
             <div className="py-8 text-center">
-              <div className="mx-auto mb-5 grid h-14 w-14 place-items-center rounded-full bg-good-soft text-good text-2xl">✓</div>
+              <div className="mx-auto mb-5 grid h-14 w-14 place-items-center rounded-full bg-good-soft text-good-strong text-2xl">✓</div>
               <h2 className="text-xl font-bold text-ink">Survey submitted</h2>
               <p className="text-muted mt-2 mb-6">Thank you — your responses have been saved.</p>
               <div className="flex flex-col sm:flex-row gap-3 justify-center">

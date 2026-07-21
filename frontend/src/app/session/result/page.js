@@ -1273,7 +1273,7 @@ export default function SessionResults() {
                                 onClick={() =>
                                   setSelectedEvent(events.indexOf(ellipticWindowEvent))
                                 }
-                                className="text-[12px] font-semibold text-accent hover:underline"
+                                className="text-[12px] font-semibold text-accent-strong hover:underline"
                               >
                                 Showing: {ellipticWindowEvent.label} →
                               </button>

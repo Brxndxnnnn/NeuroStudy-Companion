@@ -85,7 +85,7 @@ export default function ProfilePage() {
         ) : (
           <>
             {error && (
-              <Card className="px-4 py-3 bg-warn-soft border-warn/25 text-warn text-sm font-medium">{error}</Card>
+              <Card className="px-4 py-3 bg-warn-soft border-warn/25 text-warn-strong text-sm font-medium">{error}</Card>
             )}
 
             {/* Identity header */}

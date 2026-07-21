@@ -191,7 +191,7 @@ export default function AdminDashboard() {
     <button
       onClick={() => setActiveTab(id)}
       className={`pb-3 -mb-px text-sm font-semibold transition-colors border-b-2 ${
-        activeTab === id ? "border-accent text-accent" : "border-transparent text-muted hover:text-ink"
+        activeTab === id ? "border-accent text-accent-strong" : "border-transparent text-muted hover:text-ink"
       }`}
     >
       {children}

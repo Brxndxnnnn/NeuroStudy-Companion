@@ -553,7 +553,7 @@ function SelectedImage({ image, index, onMove, onRemove }) {
         </span>
         <button
           onClick={() => onRemove(image.image_id)}
-          className="text-xs font-semibold text-crit hover:underline"
+          className="text-xs font-semibold text-crit-strong hover:underline"
         >
           Remove
         </button>
@@ -600,7 +600,7 @@ function LibraryImage({ image, selected, disabled, onSelect }) {
           {image.filename || "Unnamed image"}
         </span>
         {selected && (
-          <span className="text-[11px] font-semibold text-good">Added</span>
+          <span className="text-[11px] font-semibold text-good-strong">Added</span>
         )}
       </div>
       {image.category && (

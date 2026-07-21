@@ -324,7 +324,7 @@ export default function ActiveSessionMockup() {
   // ── UI RENDER FUNCTIONS ──────────────────────────────────────
   const renderReadyState = () => (
     <Card className="max-w-2xl mx-auto p-10 text-center anim-pop">
-      <div className="mx-auto mb-6 grid h-16 w-16 place-items-center rounded-full bg-good-soft text-good text-3xl">✓</div>
+      <div className="mx-auto mb-6 grid h-16 w-16 place-items-center rounded-full bg-good-soft text-good-strong text-3xl">✓</div>
       <h2 className="text-2xl font-bold tracking-tight text-ink mb-2">Session claimed</h2>
       <p className="text-muted mb-8">The headset is paired. Start the session to begin recording.</p>
       <Button size="lg" fullWidth onClick={handleStartRecording}>
@@ -483,7 +483,7 @@ export default function ActiveSessionMockup() {
           {currentStep === "survey" && renderSurvey()}
           {currentStep === "complete" && (
             <div className="max-w-2xl mx-auto text-center anim-pop">
-              <div className="mx-auto mb-6 grid h-16 w-16 place-items-center rounded-full bg-good-soft text-good text-3xl">✓</div>
+              <div className="mx-auto mb-6 grid h-16 w-16 place-items-center rounded-full bg-good-soft text-good-strong text-3xl">✓</div>
               <h2 className="text-2xl font-bold tracking-tight text-ink mb-2">Session completed &amp; saved</h2>
               <p className="text-muted mb-8">All data has been recorded to the database.</p>
               <div className="flex flex-col sm:flex-row gap-3 justify-center">
