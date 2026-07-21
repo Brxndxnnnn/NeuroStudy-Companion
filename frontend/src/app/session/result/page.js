@@ -49,9 +49,9 @@ const MENTAL = [
 // hiding a column invites someone to "fix" its absence, but it is labelled for
 // what it is.
 const ELLIPTIC_STATS = [
-  { key: "std", label: "SD", hint: "RMS amplitude — the meaningful one" },
-  { key: "peak", label: "Peak", hint: "Largest excursion in the window" },
-  { key: "mean", label: "Mean", hint: "≈0 by construction: the signal is bandpassed first" },
+  { key: "std", label: "SD", hint: "How strong the signal typically is — the number that matters here" },
+  { key: "peak", label: "Peak", hint: "The single biggest spike in this time window" },
+  { key: "mean", label: "Mean", hint: "Almost always close to zero here — not a useful reading for this chart" },
 ];
 
 // Peak carries electrode-pop artefacts orders of magnitude above the signal (this
@@ -861,8 +861,8 @@ export default function SessionResults() {
                 title="Filtered EEG"
                 subtitle={
                   events.length
-                    ? "µV. Drag to zoom, scroll to pan — the stats update to the visible window. Shaded bands mark stimuli (teal = image, amber = question); click one to see what was shown."
-                    : "µV. Drag to zoom, scroll to pan — the stats update to the visible window."
+                    ? "The raw signal in µV. Drag to zoom, scroll to pan — the numbers below update to match what's on screen. Shaded bands mark when an image (teal) or question (amber) was shown; click one to see it."
+                    : "The raw signal in µV. Drag to zoom, scroll to pan — the numbers below update to match what's on screen."
                 }
                 actions={
                   <div className="flex flex-wrap items-end gap-3">
@@ -921,13 +921,13 @@ export default function SessionResults() {
                       </div>
                       {ch.flat ? (
                         <p className="text-[11px] leading-snug text-muted">
-                          Flat line ({fmtUv(ch.pkpk)} µV peak-to-peak) — this electrode recorded
-                          nothing. Reseat it before the next session.
+                          This electrode isn&apos;t picking up a signal — the line is flat (barely any
+                          change: {fmtUv(ch.pkpk)} µV). Reseat it before the next session.
                         </p>
                       ) : (
                         <dl className="space-y-1">
                           <StatLine label="Mean" value={`${fmtUv(ch.mean)} µV`} />
-                          <StatLine label="Peak |µV|" value={fmtUv(ch.peak)} />
+                          <StatLine label="Peak (µV)" value={fmtUv(ch.peak)} />
                           <StatLine label="SD" value={fmtUv(ch.sd)} />
                         </dl>
                       )}
@@ -950,7 +950,7 @@ export default function SessionResults() {
                 <Card className="overflow-hidden">
                   <CardHeader
                     title="Frequency bands"
-                    subtitle="Band power (µV²) computed by FFT on the filtered EEG. Stacked gives a panel per channel; pick a channel for a single timeline."
+                    subtitle="How much energy is in each brainwave band (delta, theta, alpha, beta, gamma) over time. Stacked shows all four channels; pick one channel for a closer look."
                     actions={
                       <div className="flex flex-wrap items-end gap-3">
                         <ControlGroup label="Channel">
@@ -1075,12 +1075,12 @@ export default function SessionResults() {
                     and are never mixed with it. */}
                 <Card className="overflow-hidden">
                   <CardHeader
-                    title="Spectral amplitude · elliptic filter"
+                    title="Band strength"
                     subtitle={
                       (ellipticMeta
-                        ? `Per-band amplitude in µV over a ${ellipticMeta.window_size_s}s window ` +
-                          `stepped every ${ellipticMeta.step_s}s · ${ellipticMeta.windows} windows.`
-                        : "Per-band amplitude in µV, computed after the session ends.") +
+                        ? `How strong each brainwave band's signal is, in µV, measured every ` +
+                          `${ellipticMeta.step_s}s in ${ellipticMeta.window_size_s}s windows (${ellipticMeta.windows} in total).`
+                        : "How strong each brainwave band's signal is, in µV. Ready shortly after the session ends.") +
                       (ellipticRows.length && ellipticStatMatters && currentEllipticStat
                         ? ` Showing ${currentEllipticStat.label} — ${currentEllipticStat.hint}.`
                         : "")
@@ -1179,24 +1179,24 @@ export default function SessionResults() {
                     // The worker ran and could not do it. It said why — show that,
                     // rather than a generic failure the technician cannot act on.
                     <div className="p-8 flex flex-col items-center gap-3 text-center">
-                      <Alert tone="crit">Could not compute the band statistics.</Alert>
+                      <Alert tone="crit">Couldn&apos;t calculate band strength for this session.</Alert>
                       {featuresError && (
                         <p className="max-w-lg font-mono text-[11px] leading-relaxed text-muted">
                           {featuresError}
                         </p>
                       )}
                       <p className="max-w-md text-[12px] leading-relaxed text-muted">
-                        Every other chart on this page comes from the bridge and is
-                        unaffected — only this card depends on the post-session job.
+                        Every other chart on this page comes straight from the headset and
+                        isn&apos;t affected — only this one depends on a background calculation
+                        that didn&apos;t finish.
                       </p>
                     </div>
                   ) : pollTimedOut ? (
                     <div className="p-8 flex flex-col items-center gap-3 text-center">
                       <Alert tone="warn">Still not ready after three minutes.</Alert>
                       <p className="max-w-md text-[12px] leading-relaxed text-muted">
-                        The job is taking longer than expected, or the worker is not
-                        running. It is safe to keep waiting — this only stops the page
-                        from polling forever.
+                        This is taking longer than expected. It&apos;s still safe to wait — this
+                        message just stops the page from checking forever.
                       </p>
                       <Button variant="subtle" onClick={() => window.location.reload()}>
                         Check again
@@ -1208,12 +1208,11 @@ export default function SessionResults() {
                     <div className="p-10 flex flex-col items-center gap-3 text-center">
                       <Spinner size={26} className="text-accent" />
                       <span className="font-medium text-ink">
-                        Computing band statistics…
+                        Calculating band strength…
                       </span>
                       <p className="max-w-md text-[12px] leading-relaxed text-muted">
-                        These are computed after the recording ends. This chart will
-                        appear on its own — no need to reload. Everything else on this
-                        page is already loaded.
+                        This happens automatically after the recording ends and can take a minute
+                        or two. The chart will appear here on its own — no need to reload.
                       </p>
                     </div>
                   ) : (
@@ -1324,16 +1323,16 @@ export default function SessionResults() {
 
                             {!ellipticAll && (
                               <p className="px-2 pt-1 text-[11px] leading-snug text-muted">
-                                The three groups do not share a scale — peak runs well above SD, and
-                                mean sits at zero because the signal is bandpassed before the
-                                statistic is taken. Read each group against itself.
+                                SD, Peak and Mean use different scales, so don&apos;t compare their
+                                bar heights to each other — compare each one across bands instead.
+                                Mean is expected to sit near zero; that&apos;s normal, not an error.
                               </p>
                             )}
                             {ellipticAll && ellipticStat === "mean" && (
                               <p className="px-2 pt-1 text-[11px] leading-snug text-muted">
-                                Mean sits near zero for every band and channel by construction — the
-                                signal is bandpassed before the statistic is taken, so it has no DC
-                                left to average. SD is the amplitude.
+                                Mean is close to zero for every band and channel here — that&apos;s
+                                expected, not a sign of a missing signal. Switch to SD to see the
+                                actual signal strength.
                               </p>
                             )}
                           </div>
@@ -1409,19 +1408,19 @@ export default function SessionResults() {
                                     <th className="text-right font-semibold py-2 px-3">
                                       SD µV
                                       <span className="block text-[10px] font-normal">
-                                        amplitude
+                                        typical strength
                                       </span>
                                     </th>
                                     <th className="text-right font-semibold py-2 px-3">
                                       Peak µV
                                       <span className="block text-[10px] font-normal">
-                                        largest excursion
+                                        biggest spike
                                       </span>
                                     </th>
                                     <th className="text-right font-semibold py-2 px-3">
                                       Mean µV
                                       <span className="block text-[10px] font-normal">
-                                        ≈0 by construction
+                                        usually near zero
                                       </span>
                                     </th>
                                   </tr>
@@ -1475,9 +1474,9 @@ export default function SessionResults() {
                       {ellipticView === "timeline" && ellipticStat === "mean" && (
                         <div className="px-5 pb-2">
                           <Alert tone="warn">
-                            Mean sits near zero for every band by construction — the signal is
-                            bandpassed before the statistic is taken, so it has no DC left to
-                            average. SD is the amplitude.
+                            Mean is close to zero for every band here — that&apos;s expected, not a
+                            sign of a missing signal. Switch to SD to see the actual signal
+                            strength.
                           </Alert>
                         </div>
                       )}
@@ -1485,11 +1484,13 @@ export default function SessionResults() {
                       {ellipticView === "timeline" && ellipticAxis.clipped > 0 && (
                         <div className="px-5 pb-2">
                           <Alert tone="warn">
-                            Axis capped at {fmtUv(ellipticAxis.max)} µV — {ellipticAxis.clipped}{" "}
-                            {ellipticAxis.clipped === 1 ? "value" : "values"} run above it, peaking
-                            at {fmtUv(ellipticAxis.maxValue)} µV. Excursions that large are
-                            electrode artefacts, not EEG; without the cap they would flatten every
-                            real trace onto the axis. Step through them in “By window”.
+                            The chart&apos;s scale is capped at {fmtUv(ellipticAxis.max)} µV so a
+                            few extreme spikes don&apos;t squash everything else flat.{" "}
+                            {ellipticAxis.clipped}{" "}
+                            {ellipticAxis.clipped === 1 ? "reading" : "readings"} go above that,
+                            peaking at {fmtUv(ellipticAxis.maxValue)} µV — almost certainly
+                            electrode noise, not real brain signal. Use &ldquo;By window&rdquo; to
+                            look at them one at a time.
                           </Alert>
                         </div>
                       )}
@@ -1497,9 +1498,11 @@ export default function SessionResults() {
                       {ellipticDead.length > 0 && (
                         <div className="px-5 pb-2">
                           <Alert tone="warn">
-                            {ellipticDead.join(" and ")} recorded no signal — an elliptic
-                            filter over a railed electrode still returns a value, so these
-                            traces are a flat line, not a measurement.
+                            {ellipticDead.join(" and ")}{" "}
+                            {ellipticDead.length === 1 ? "isn't" : "aren't"} picking up a real
+                            signal — the flat line here doesn&apos;t mean the reading is zero, it
+                            means there&apos;s nothing to measure. Reseat the electrode before the
+                            next session.
                           </Alert>
                         </div>
                       )}
@@ -1571,7 +1574,7 @@ export default function SessionResults() {
                 <Card className="overflow-hidden">
                   <CardHeader
                     title="Mental state"
-                    subtitle="Attention, relaxation and workload on the headset's 0–1 index."
+                    subtitle="How attentive, relaxed, and mentally loaded the headset estimates the client was, on a scale from 0 to 1."
                     actions={
                       <div className="flex flex-wrap items-center gap-2">
                         {qualityStat?.mean != null && (
@@ -1629,7 +1632,7 @@ export default function SessionResults() {
                 <Card className="overflow-hidden">
                   <CardHeader
                     title="Vitals"
-                    subtitle="Heart rate and blood-oxygen saturation, each on its own scale."
+                    subtitle="Heart rate and blood-oxygen level, shown on separate scales since they use different units."
                     actions={
                       vitalPanels.length > 0 && events.length > 0 ? (
                         <MarkerToggle
@@ -1642,7 +1645,7 @@ export default function SessionResults() {
                   {vitalPanels.length === 0 ? (
                     <div className="px-5 py-8 flex items-center justify-center">
                       <Alert tone="warn">
-                        No heart-rate or SpO₂ readings were recorded for this session.
+                        No heart-rate or blood-oxygen readings were recorded for this session.
                       </Alert>
                     </div>
                   ) : (

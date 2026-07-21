@@ -245,13 +245,13 @@ function ModelMetrics({ model }) {
         </div>
         <div className="mt-4 grid grid-cols-2 gap-x-6 gap-y-4 sm:grid-cols-4">
           <Metric
-            label="Valence R²"
+            label="Valence accuracy"
             value={fmt(model.cv_r2_valence)}
             dir="higher"
             hint={`vs ${fmt(model.null_r2_valence)} for guessing the average`}
           />
           <Metric
-            label="Arousal R²"
+            label="Arousal accuracy"
             value={fmt(model.cv_r2_arousal)}
             dir="higher"
             hint={`vs ${fmt(model.null_r2_arousal)} for guessing the average`}
@@ -384,18 +384,20 @@ function HowItWorksModal({ onClose, trained, readinessReady, dataOasisLabelled, 
             </Explainer>
 
             <Explainer title="What the numbers mean (and which direction is good)">
-              <Term term="R² — higher is better">
-                How much of the real variation the model captures.{" "}
-                <span className="font-mono tnum">1.00</span> is a perfect prediction,{" "}
+              <Term term="Accuracy score — higher is better">
+                Shown on the page as &ldquo;Valence accuracy&rdquo; / &ldquo;Arousal accuracy&rdquo;
+                (also called R² if you&apos;ve heard that term).{" "}
+                <span className="font-mono tnum">1.00</span> would be a perfect prediction,{" "}
                 <span className="font-mono tnum">0.00</span> means it does no better than ignoring
                 the EEG and always guessing the average rating, and{" "}
-                <strong className="font-semibold text-ink">a negative value means it does worse
+                <strong className="font-semibold text-ink">a negative number means it does worse
                 than that guess</strong>. Negative scores are normal for a model trained on very
-                little data.
+                little data — they&apos;re not a bug.
               </Term>
-              <Term term="Baseline (&ldquo;null&rdquo;) — the number to beat">
-                The score you would get by always predicting the average rating, without looking
-                at the brain at all. The model is only earning its keep when its R² is above this.
+              <Term term="Baseline — the number to beat">
+                The score you&apos;d get by always predicting the average rating, without looking at
+                the brain activity at all. The model is only doing something useful once its
+                accuracy score is above this.
               </Term>
               <Term term="Typical error — lower is better">
                 On average, how far off the prediction is, in points on the 1–7 scale. An error of{" "}
@@ -1018,12 +1020,12 @@ export default function InsightsPage() {
                           { label: "Valence", title: "Valence (pleasantness) · predicted vs actual", unit: "", min: 1, max: 7,
                             series: [
                               { key: "valence", label: "Predicted", color: "--accent" },
-                              { key: "actual_valence", label: "Actual (OASIS)", color: "--muted" },
+                              { key: "actual_valence", label: "Actual (established rating)", color: "--muted" },
                             ] },
                           { label: "Arousal", title: "Arousal (intensity) · predicted vs actual", unit: "", min: 1, max: 7,
                             series: [
                               { key: "arousal", label: "Predicted", color: "--warn" },
-                              { key: "actual_arousal", label: "Actual (OASIS)", color: "--muted" },
+                              { key: "actual_arousal", label: "Actual (established rating)", color: "--muted" },
                             ] },
                         ]}
                       />
@@ -1044,9 +1046,9 @@ export default function InsightsPage() {
                   />
                   <div className="px-6 py-5">
                     <p className="mb-1 text-[13.5px] leading-relaxed text-ink-2">
-                      The same two measures as above, plotted against each other instead of
-                      against time. Combining them divides the space into four regions — the
-                      standard map of emotion used in psychology (Russell&apos;s circumplex).
+                      The same two measures as above (valence and arousal), plotted against each
+                      other instead of against time. That splits the space into four named regions
+                      — a well-known way psychologists map emotions onto pleasantness and energy.
                       Each teal dot is one 2-second window of EEG; each hollow diamond is the
                       established rating of an image that was actually shown.
                     </p>
@@ -1065,11 +1067,12 @@ export default function InsightsPage() {
 
                     <Alert tone="warn" className="mt-5">
                       Region names describe an area of the chart, not a clinical finding. The
-                      boundaries sit at the midpoint of each scale ({MID}.0), so a prediction of{" "}
-                      {MID}.05 and one of {(MID - 0.05).toFixed(2)} are named differently while
-                      being statistically indistinguishable — and at the current data volume the
-                      model&apos;s predictions vary far too little for the region to describe how
-                      anyone actually felt.
+                      boundaries sit right at the middle of each scale ({MID}.0), so two
+                      predictions that are barely different from each other — say {MID}.05 and{" "}
+                      {(MID - 0.05).toFixed(2)} — can still land in different, differently-named
+                      regions. At the current data volume, the model&apos;s predictions don&apos;t
+                      vary enough for the region name to say anything reliable about how anyone
+                      actually felt.
                     </Alert>
                   </div>
                 </Card>

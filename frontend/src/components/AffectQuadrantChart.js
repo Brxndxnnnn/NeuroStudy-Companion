@@ -72,7 +72,7 @@ export default function AffectQuadrantChart({
       animation: false,
       grid: { left: 62, right: 26, top: 22, bottom: 80 },
       legend: {
-        data: ["Predicted from EEG", "Actual (OASIS rating)"],
+        data: ["Predicted from EEG", "Actual (established rating)"],
         bottom: 6,
         icon: "circle",
         itemWidth: 8,
@@ -161,7 +161,7 @@ export default function AffectQuadrantChart({
           },
         },
         {
-          name: "Actual (OASIS rating)",
+          name: "Actual (established rating)",
           type: "scatter",
           data: actual.map(point),
           symbol: "diamond",
