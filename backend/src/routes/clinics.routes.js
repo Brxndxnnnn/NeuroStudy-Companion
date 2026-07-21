@@ -6,6 +6,68 @@ import PERMS from '../constants/permissions.js'
 const router = Router()
 
 /**
+ * @openapi
+ * /api/clinics/database-access:
+ *   get:
+ *     summary: List clinics with database access information
+ *     description: |
+ *       Returns every clinic together with its database roles and
+ *       activation codes. Activation-code hashes are never returned.
+ *     tags: [Clinics]
+ *     security:
+ *       - bearerAuth: []
+ *     responses:
+ *       200:
+ *         description: Clinic database access overview retrieved
+ *       401:
+ *         description: Authentication required
+ *       403:
+ *         description: Administrator permission required
+ */
+router.get(
+    '/database-access',
+    requirePermission(PERMS.CLINICS_READ_ALL),
+    clinicController.getClinicDatabaseAccessOverview
+)
+
+/**
+ * @openapi
+ * /api/clinics/activation-codes/{activation_id}/revoke:
+ *   patch:
+ *     summary: Revoke an unused activation code
+ *     tags: [Clinics]
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - in: path
+ *         name: activation_id
+ *         required: true
+ *         schema:
+ *           type: string
+ *           format: uuid
+ *     responses:
+ *       200:
+ *         description: Activation code revoked
+ *       400:
+ *         description: Invalid activation UUID
+ *       401:
+ *         description: Authentication required
+ *       403:
+ *         description: Administrator permission required
+ *       404:
+ *         description: Activation code not found
+ *       409:
+ *         description: Activation code has already been used
+ *       410:
+ *         description: Activation code has expired
+ */
+router.patch(
+    '/activation-codes/:activation_id/revoke',
+    requirePermission(PERMS.CLINICS_WRITE_ALL),
+    clinicController.revokeClinicDatabaseAccess
+)
+
+/**
  * @swagger
  * /api/clinics/stimulus-sets:
  *   get:

@@ -409,6 +409,20 @@ export async function getClinic(clinicId) {
   const res = await fetchWithAuth(`${BASE_URL}/clinics/${clinicId}`);
   return res;
 }
+export async function getClinicsDatabaseAccessOverview() {
+  return fetchWithAuth(`${BASE_URL}/clinics/database-access`);
+}
+export async function revokeClinicDatabaseAccess(activationId) {
+  return fetchWithAuth(`${BASE_URL}/clinics/activation-codes/${activationId}/revoke`, {
+    method: "PATCH",
+  });
+}
+export async function grantClinicDatabaseAccess(clinicId) {
+  return fetchWithAuth(`${BASE_URL}/clinics/${clinicId}/database-access`, {
+    method: "POST",
+    body: JSON.stringify({ clinic_id: clinicId }),
+  });
+}
 
 // CLINIC STIMULUS SETS
 // Technicians are automatically scoped to their own clinic by the API.

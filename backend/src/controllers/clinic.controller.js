@@ -1,6 +1,6 @@
 import clinicModel from '../models/clinic.model.js'
 import catchAsync  from '../utils/catchAsync.js'
-import { BadRequestError, NotFoundError } from '../utils/AppError.js'
+import { BadRequestError, NotFoundError, ConflictError, AppError } from '../utils/AppError.js'
 import { getClinicScope } from '../utils/helper.js'
 import { createHmac, randomBytes } from 'crypto'
 
@@ -261,4 +261,43 @@ const activateClinicDatabaseAccess=catchAsync(async(req,res) => {
     })
 })
 
-export default { createClinic, listClinics, getClinic, updateClinic, getClinicStimulusSets, getClinicStimulusSetById, updateClinicStimulusSet, createClinicDatabaseAccess, activateClinicDatabaseAccess }
+// GET /api/clinics/database-access
+const getClinicDatabaseAccessOverview = catchAsync(async (req, res) => {
+     const clinics = await clinicModel.getDatabaseAccessOverview(req.dbClient)
+     return res.json({
+         status: 'success',
+         results: clinics.length,
+         data: clinics
+     })
+})
+
+// PATCH /api/clinics/database-access/:activation_id/revoke
+const revokeClinicDatabaseAccess = catchAsync(async (req, res) => {
+    const { activation_id: activationId } = req.params
+
+    const result = await clinicModel.revokeActivationCode(activationId, req.dbClient)
+
+    if (result.outcome === 'not_found')
+        throw new NotFoundError('Activation code not found')
+
+    if (result.outcome === 'used')
+        throw new ConflictError('The activation code has already been used and cannot be revoked.')
+
+    if (result.outcome === 'expired')
+        throw new AppError('The activation code has already expired.', 410)
+
+    return res.json({
+        status: 'success',
+        data: result.activationCode,
+        meta: {
+            already_revoked: result.outcome === 'already_revoked'
+        }
+    })
+}
+)
+
+export default { 
+    createClinic, listClinics, getClinic, updateClinic, getClinicStimulusSets, getClinicStimulusSetById, 
+    updateClinicStimulusSet, createClinicDatabaseAccess, activateClinicDatabaseAccess, 
+    getClinicDatabaseAccessOverview, revokeClinicDatabaseAccess 
+}

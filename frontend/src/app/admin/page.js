@@ -2,7 +2,17 @@
 import { useState, useEffect } from "react";
 import { useRouter } from "next/navigation";
 import TopNav from "@/components/TopNav";
-import { createUser, deleteUser, getUsers, updateUser, getClinics, getRoles } from "@/utils/api";
+import {
+  createUser,
+  deleteUser,
+  getUsers,
+  updateUser,
+  getClinics,
+  getRoles,
+  getClinicsDatabaseAccessOverview,
+  revokeClinicDatabaseAccess,
+  grantClinicDatabaseAccess,
+} from "@/utils/api";
 import {
   PageContainer,
   PageHeading,
@@ -26,8 +36,16 @@ export default function AdminDashboard() {
   const [loading, setLoading] = useState(true);
   const [errorMessage, setErrorMessage] = useState("");
   const [successMessage, setSuccessMessage] = useState("");
+  const [databaseAccess, setDatabaseAccess] = useState([]);
+  const [databaseAccessLoading, setDatabaseAccessLoading] = useState(false);
+  const [pendingDatabaseAction, setPendingDatabaseAction] = useState(null);
+  const [issuedDatabaseAccess, setIssuedDatabaseAccess] = useState(null);
 
-  const [clinics, setClinics] = useState([]);
+  // One clinic list feeds both the create-user Clinic picker and the user
+  // table's clinic-name lookup — no reason for two separate fetches of the
+  // same /clinics endpoint under different names.
+  const [clinicOptions, setClinicOptions] = useState([]);
+  const [clinicOptionsLoading, setClinicOptionsLoading] = useState(false);
   const [roles, setRoles] = useState([]);
 
   const [isModalOpen, setIsModalOpen] = useState(false);
@@ -61,17 +79,44 @@ export default function AdminDashboard() {
       setLoading(false);
     }
   };
-  
 
-  const fetchClinics = async () => {
+  const fetchClinicOptions = async () => {
+    setClinicOptionsLoading(true);
     try {
       const response = await getClinics();
       if (response.ok) {
         const data = await response.json();
-        setClinics(Array.isArray(data) ? data : data.clinics || data.data || []);
+        setClinicOptions(Array.isArray(data) ? data : data.data || data.clinics || []);
+      } else if (response.status === 401 || response.status === 403) {
+        router.push("/login");
+      } else {
+        setErrorMessage("Failed to retrieve clinics.");
+      }
+    } catch {
+      setErrorMessage("Network error: could not retrieve clinics.");
+    } finally {
+      setClinicOptionsLoading(false);
+    }
+  };
+
+  const fetchDatabaseAccess = async () => {
+    setDatabaseAccessLoading(true);
+    setErrorMessage("");
+    try {
+      const response = await getClinicsDatabaseAccessOverview();
+      if (response.ok) {
+        const data = await response.json();
+        let usableClinics = Array.isArray(data) ? data : data.data;
+        setDatabaseAccess(usableClinics.filter((c) => c.name !== "⟨Unclaimed⟩ — bridge placeholder clinic"));
+      } else if (response.status === 401 || response.status === 403) {
+        router.push("/login");
+      } else {
+        setErrorMessage("Failed to retrieve clinic database access.");
       }
     } catch (error) {
-      // Non-fatal: the clinic picker just falls back to an empty list.
+      setErrorMessage("Network error while retrieving clinic database access.");
+    } finally {
+      setDatabaseAccessLoading(false);
     }
   };
 
@@ -93,10 +138,14 @@ export default function AdminDashboard() {
       router.push("/login");
     } else {
       fetchUsers();
-      fetchClinics();
+      fetchClinicOptions();
       fetchRoles();
     }
   }, [router]);
+
+  useEffect(() => {
+    if (activeTab === "database") fetchDatabaseAccess();
+  }, [activeTab]);
 
   const openCreateModal = () => {
     setModalMode("create");
@@ -187,6 +236,37 @@ export default function AdminDashboard() {
     }
   };
 
+  const confirmDatabaseAction = async () => {
+    if (!pendingDatabaseAction) return;
+
+    const action = pendingDatabaseAction;
+    setErrorMessage("");
+    setSuccessMessage("");
+
+    try {
+      const response = action.type === "grant"
+        ? await grantClinicDatabaseAccess(action.clinicId)
+        : await revokeClinicDatabaseAccess(action.activationId);
+      const result = await response.json();
+
+      if (!response.ok) {
+        setErrorMessage(result.message || result.error?.message || "The server rejected the database access request.");
+        return;
+      }
+
+      if (action.type === "grant") {
+        setIssuedDatabaseAccess(result.data);
+        setSuccessMessage("Database role and activation code granted.");
+      } else {
+        setSuccessMessage("Activation code revoked.");
+      }
+      setPendingDatabaseAction(null);
+      fetchDatabaseAccess();
+    } catch (error) {
+      setErrorMessage("Network error while updating database access.");
+    }
+  };
+
   const TabButton = ({ id, children }) => (
     <button
       onClick={() => setActiveTab(id)}
@@ -219,6 +299,7 @@ export default function AdminDashboard() {
         <div className="flex gap-7 border-b border-border">
           <TabButton id="overview">Overview</TabButton>
           <TabButton id="manage">Manage users &amp; access</TabButton>
+          <TabButton id="database">Manage Database Access</TabButton>
         </div>
 
         {/* OVERVIEW */}
@@ -244,7 +325,7 @@ export default function AdminDashboard() {
                   <Spinner size={18} className="mr-2 align-[-3px] text-accent" /> Syncing directory…
                 </div>
               ) : (
-                <UserTable users={users} readOnly />
+                <UserTable users={users} readOnly clinicOptions={clinicOptions} />
               )}
             </Card>
           </div>
@@ -261,9 +342,63 @@ export default function AdminDashboard() {
               ) : users.length === 0 ? (
                 <div className="p-12 text-center text-muted">No active system accounts found.</div>
               ) : (
-                <UserTable users={users} onEdit={openEditModal} onDelete={(id, name) => setDeleteTarget({ id, name })} />
+                <UserTable
+                  users={users}
+                  onEdit={openEditModal}
+                  onDelete={(id, name) => setDeleteTarget({ id, name })}
+                  clinicOptions={clinicOptions}
+                />
               )}
             </Card>
+          </div>
+        )}
+
+        {/* DATABASE ACCESS */}
+        {activeTab === "database" && (
+          <div className="anim-fade space-y-5">
+            <Card className="overflow-hidden">
+              <div className="px-6 py-5 border-b border-border">
+                <h2 className="text-[15px] font-bold tracking-tight text-ink">Clinic database access</h2>
+                <p className="text-[12.5px] text-muted mt-0.5">
+                  Grant a database role and one-time activation code for each clinic installation.
+                </p>
+              </div>
+              {databaseAccessLoading ? (
+                <div className="p-12 text-center text-muted">
+                  <Spinner size={18} className="mr-2 align-[-3px] text-accent" /> Syncing database access...
+                </div>
+              ) : databaseAccess.length === 0 ? (
+                <div className="p-12 text-center text-muted">No clinics found.</div>
+              ) : (
+                <DatabaseAccessTable
+                  clinics={databaseAccess}
+                  onGrant={(clinic) => setPendingDatabaseAction({ type: "grant", clinicId: clinic.clinic_id, clinicName: clinic.name })}
+                  onRevoke={(activationCode, clinicName) => setPendingDatabaseAction({
+                    type: "revoke",
+                    activationId: activationCode.activation_id,
+                    clinicName,
+                    activationCode,
+                  })}
+                />
+              )}
+            </Card>
+
+            {issuedDatabaseAccess && (
+              <Card className="p-6 bg-good-soft">
+                <div className="flex items-start justify-between gap-4">
+                  <div>
+                    <h2 className="font-bold text-ink">New activation code</h2>
+                    <p className="mt-1 text-sm text-ink-2">Record this code now; it is not shown again after this page is refreshed.</p>
+                  </div>
+                  <button onClick={() => setIssuedDatabaseAccess(null)} className="text-muted hover:text-ink text-2xl leading-none" aria-label="Dismiss activation code">&times;</button>
+                </div>
+                <div className="mt-4 grid gap-3 sm:grid-cols-2">
+                  <div><p className="text-xs text-muted">Database role</p><p className="font-mono text-sm text-ink break-all">{issuedDatabaseAccess.database_role}</p></div>
+                  <div><p className="text-xs text-muted">Activation code</p><p className="font-mono text-sm font-bold text-ink break-all">{issuedDatabaseAccess.activation_code}</p></div>
+                  <div><p className="text-xs text-muted">Expires</p><p className="text-sm text-ink">{formatDateTime(issuedDatabaseAccess.expires_at)}</p></div>
+                </div>
+              </Card>
+            )}
           </div>
         )}
       </PageContainer>
@@ -316,9 +451,16 @@ export default function AdminDashboard() {
                     : "Leave unset for admin/global accounts."
                 }
               >
-                <Select id="u-clinic" value={clinicId} onChange={(e) => setClinicId(e.target.value)}>
-                  <option value="">No clinic (admin/global)</option>
-                  {clinics.map((c) => (
+                <Select
+                  id="u-clinic"
+                  value={clinicId}
+                  onChange={(e) => setClinicId(e.target.value)}
+                  disabled={clinicOptionsLoading}
+                >
+                  <option value="">
+                    {clinicOptionsLoading ? "Loading clinics…" : "No clinic (admin/global)"}
+                  </option>
+                  {clinicOptions.map((c) => (
                     <option key={c.clinic_id} value={c.clinic_id}>{c.name || c.clinic_id}</option>
                   ))}
                 </Select>
@@ -333,31 +475,36 @@ export default function AdminDashboard() {
         </div>
       )}
 
-      {/* DELETE CONFIRMATION */}
+      {/* DELETE CONFIRMATION — same shared ConfirmationModal as the database-access
+          actions below, rather than a second bespoke confirmation dialog. */}
       {deleteTarget && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-ink/40 backdrop-blur-sm anim-fade">
-          <Card className="w-full max-w-sm overflow-hidden anim-pop">
-            <div className="px-6 py-5 border-b border-border">
-              <h2 className="text-lg font-bold tracking-tight text-ink">Revoke account access?</h2>
-            </div>
-            <div className="px-6 py-5">
-              <p className="text-sm text-ink-2">
-                This revokes access for <span className="font-semibold text-ink">{deleteTarget.name}</span>.
-                This action cannot be undone from here.
-              </p>
-            </div>
-            <div className="flex justify-end gap-3 px-6 py-4 border-t border-border">
-              <Button variant="ghost" onClick={() => setDeleteTarget(null)}>Cancel</Button>
-              <Button variant="danger" onClick={handleDeleteUser}>Revoke access</Button>
-            </div>
-          </Card>
-        </div>
+        <ConfirmationModal
+          title="Revoke account access?"
+          description={`This revokes access for ${deleteTarget.name}. This action cannot be undone from here.`}
+          confirmLabel="Revoke access"
+          tone="danger"
+          onCancel={() => setDeleteTarget(null)}
+          onConfirm={handleDeleteUser}
+        />
+      )}
+
+      {pendingDatabaseAction && (
+        <ConfirmationModal
+          title={pendingDatabaseAction.type === "grant" ? "Grant database access?" : "Revoke activation code?"}
+          description={pendingDatabaseAction.type === "grant"
+            ? `This will create a database role and one-time activation code for ${pendingDatabaseAction.clinicName}.`
+            : `This will permanently revoke the available activation code for ${pendingDatabaseAction.clinicName}.`}
+          confirmLabel={pendingDatabaseAction.type === "grant" ? "Grant access" : "Revoke code"}
+          tone={pendingDatabaseAction.type === "grant" ? "primary" : "danger"}
+          onCancel={() => setPendingDatabaseAction(null)}
+          onConfirm={confirmDatabaseAction}
+        />
       )}
     </main>
   );
 }
 
-function UserTable({ users, onEdit, onDelete, readOnly = false }) {
+function UserTable({ users, onEdit, onDelete, readOnly = false, clinicOptions = [] }) {
   return (
     <div className="overflow-x-auto">
       <table className="w-full text-left min-w-[560px]">
@@ -366,6 +513,7 @@ function UserTable({ users, onEdit, onDelete, readOnly = false }) {
             <th className="px-6 py-3 font-mono text-[10px] uppercase tracking-[0.1em] text-muted font-semibold">User</th>
             <th className="px-6 py-3 font-mono text-[10px] uppercase tracking-[0.1em] text-muted font-semibold">Email</th>
             <th className="px-6 py-3 font-mono text-[10px] uppercase tracking-[0.1em] text-muted font-semibold">Clinic</th>
+            <th className="px-6 py-3 font-mono text-[10px] uppercase tracking-[0.1em] text-muted font-semibold">Role</th>
             {!readOnly && <th className="px-6 py-3 font-mono text-[10px] uppercase tracking-[0.1em] text-muted font-semibold text-right">Actions</th>}
           </tr>
         </thead>
@@ -377,14 +525,26 @@ function UserTable({ users, onEdit, onDelete, readOnly = false }) {
                 {!readOnly && <div className="font-mono text-[11px] text-muted mt-0.5">{user.user_id}</div>}
               </td>
               <td className="px-6 py-4 text-sm text-ink-2">{user.email}</td>
-              <td className="px-6 py-4">
-                {user.clinic_id ? (
-                  <span className="font-mono text-[11px] text-accent-strong bg-accent-soft px-2 py-1 rounded">{user.clinic_id.slice(0, 12)}</span>
-                ) : (
-                  <Pill tone="neutral">Global admin</Pill>
-                )}
-              </td>
-              {!readOnly && ['technician'].includes(user.role) &&  (
+              {user.clinic_id && user.role === "technician" ? (
+                <>
+                  <td className="px-6 py-4">
+                    <span className="font-mono text-[11px] text-accent-strong bg-accent-soft px-2 py-1 rounded">{clinicOptions.find((c) => c.clinic_id === user.clinic_id)?.name || user.clinic_id.slice(0, 12)}</span>
+                  </td>
+                  <td className="px-6 py-4">
+                    <span className="font-mono text-[11px] text-accent-strong bg-accent-soft px-2 py-1 rounded">{user.role}</span>
+                  </td>
+                </>
+              ) : (
+                <>
+                  <td className="px-6 py-4">
+                    <Pill tone="neutral">Global admin</Pill>
+                  </td>
+                  <td className="px-6 py-4">
+                    <Pill tone="neutral">Global admin</Pill>
+                  </td>
+                </>
+              )}
+              {!readOnly && ["technician"].includes(user.role) && (
                 <td className="px-6 py-4 text-right">
                   <div className="flex justify-end gap-2">
                     <Button variant="subtle" size="sm" onClick={() => onEdit(user)}>Edit</Button>
@@ -398,4 +558,98 @@ function UserTable({ users, onEdit, onDelete, readOnly = false }) {
       </table>
     </div>
   );
+}
+
+function DatabaseAccessTable({ clinics, onGrant, onRevoke }) {
+  return (
+    <div className="divide-y divide-border">
+      {clinics.map((clinic) => (
+        <section key={clinic.clinic_id} className="p-6 space-y-4">
+          <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+            <div>
+              <h3 className="font-bold text-ink">{clinic.name}</h3>
+              <p className="font-mono text-[11px] text-muted mt-0.5">{clinic.clinic_id}</p>
+            </div>
+            <Button size="sm" onClick={() => onGrant(clinic)}>Grant database access</Button>
+          </div>
+
+          {clinic.database_roles?.length ? (
+            <div className="overflow-x-auto border border-border rounded-lg">
+              <table className="w-full min-w-[720px] text-left">
+                <thead>
+                  <tr className="bg-inset/40 border-b border-border">
+                    <th className="px-4 py-3 font-mono text-[10px] uppercase tracking-[0.1em] text-muted">Database role</th>
+                    <th className="px-4 py-3 font-mono text-[10px] uppercase tracking-[0.1em] text-muted">Connection limit</th>
+                    <th className="px-4 py-3 font-mono text-[10px] uppercase tracking-[0.1em] text-muted">Activation codes</th>
+                    <th className="px-4 py-3 font-mono text-[10px] uppercase tracking-[0.1em] text-muted text-right">Action</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {clinic.database_roles.map((role) => (
+                    role.activation_codes?.length ? role.activation_codes.map((activationCode, index) => (
+                      <tr key={activationCode.activation_id} className="border-b border-border last:border-0">
+                        <td className="px-4 py-3 font-mono text-xs text-ink">{index === 0 ? role.database_role : ""}</td>
+                        <td className="px-4 py-3 text-sm text-ink-2">{index === 0 ? role.connection_limit : ""}</td>
+                        <td className="px-4 py-3">
+                          <div className="flex items-center gap-2">
+                            <Pill tone={activationTone(activationCode.status)}>{activationCode.status}</Pill>
+                            <span className="text-xs text-muted">Expires {formatDateTime(activationCode.expires_at)}</span>
+                          </div>
+                        </td>
+                        <td className="px-4 py-3 text-right">
+                          {activationCode.status === "available" && (
+                            <Button variant="danger" size="sm" onClick={() => onRevoke(activationCode, clinic.name)}>Revoke code</Button>
+                          )}
+                        </td>
+                      </tr>
+                    )) : (
+                      <tr key={role.database_role} className="border-b border-border last:border-0">
+                        <td className="px-4 py-3 font-mono text-xs text-ink">{role.database_role}</td>
+                        <td className="px-4 py-3 text-sm text-ink-2">{role.connection_limit}</td>
+                        <td className="px-4 py-3 text-sm text-muted">No activation codes</td>
+                        <td className="px-4 py-3" />
+                      </tr>
+                    )
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          ) : (
+            <p className="text-sm text-muted">No database roles have been granted for this clinic.</p>
+          )}
+        </section>
+      ))}
+    </div>
+  );
+}
+
+function ConfirmationModal({ title, description, confirmLabel, tone, onCancel, onConfirm }) {
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-ink/40 backdrop-blur-sm anim-fade" role="dialog" aria-modal="true" aria-labelledby="database-confirmation-title">
+      <Card className="w-full max-w-md overflow-hidden anim-pop">
+        <div className="px-6 py-5 border-b border-border">
+          <h2 id="database-confirmation-title" className="text-lg font-bold tracking-tight text-ink">{title}</h2>
+        </div>
+        <div className="p-6">
+          <p className="text-sm text-ink-2">{description}</p>
+          <div className="flex justify-end gap-3 mt-6">
+            <Button variant="ghost" onClick={onCancel}>Cancel</Button>
+            <Button variant={tone === "danger" ? "danger" : "primary"} onClick={onConfirm}>{confirmLabel}</Button>
+          </div>
+        </div>
+      </Card>
+    </div>
+  );
+}
+
+function activationTone(status) {
+  if (status === "available") return "good";
+  if (status === "used" || status === "expired") return "warn";
+  return "crit";
+}
+
+function formatDateTime(value) {
+  if (!value) return "—";
+  const date = new Date(value);
+  return Number.isNaN(date.getTime()) ? value : date.toLocaleString();
 }
