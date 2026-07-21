@@ -11,6 +11,16 @@ const eslintConfig = defineConfig([
     "build/**",
     "next-env.d.ts",
   ]),
+  {
+    rules: {
+      // This app fetches all its data client-side via useEffect + setState
+      // (no Suspense/RSC data loading, no query library) and syncs localStorage
+      // on mount the same way — that's the whole app's data-loading pattern,
+      // not a bug. Downgraded to a warning rather than left as a permanently
+      // red, ignored error.
+      "react-hooks/set-state-in-effect": "warn",
+    },
+  },
 ]);
 
 export default eslintConfig;

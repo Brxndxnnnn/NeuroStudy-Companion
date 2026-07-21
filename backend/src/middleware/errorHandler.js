@@ -31,9 +31,9 @@ const handlePostgresErrors = (err) => {
         case '23505': // unique_violation (e.g., duplicate email)
             return new ConflictError(`Duplicate entry: ${err.detail || 'Resource already exists'}`);
             
-        case '23503': // foreign_key_violation (e.g., invalid clinic_id)
-        const constraint = err.constraint ?? '';
-            let msg = ''
+        case '23503': { // foreign_key_violation (e.g., invalid clinic_id)
+            const constraint = err.constraint ?? '';
+            let msg;
             if (constraint.includes('_clinic_id_fkey'))
                 msg = 'Invalid clinic_id: The specified clinic does not exist.'
             else if (constraint.includes('_session_id_fkey'))
@@ -51,6 +51,7 @@ const handlePostgresErrors = (err) => {
             else
                 msg = `Foreign key violation: A related resource does not exist`;
             return new BadRequestError(msg);
+        }
             
         case '23502': // not_null_violation
             return new BadRequestError(`Missing required field: ${err.column || 'unknown'}`);

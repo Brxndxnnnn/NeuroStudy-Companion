@@ -23,14 +23,7 @@ jobs:
           cache-dependency-path: frontend/package-lock.json
 
       - run: npm ci
-
-      # Not merge-blocking yet: there are pre-existing lint errors elsewhere in
-      # the app (stricter react-hooks rules) unrelated to any given PR. Fixing
-      # those is separate follow-up work, not something to bundle into CI setup.
-      - name: Lint (non-blocking)
-        run: npm run lint
-        continue-on-error: true
-
+      - run: npm run lint
       - run: npm run build
 
       # Builds the actual production image so a broken Dockerfile / build step
@@ -54,9 +47,11 @@ jobs:
           cache-dependency-path: backend/package-lock.json
 
       - run: npm ci
+      - run: npm run lint
 
-      # No lint config or test suite exists for the backend yet, so there is
-      # nothing real to run here beyond dependency install + image build.
+      # No test suite exists for the backend yet — that's separate, larger
+      # follow-up work (choosing a framework, deciding what to cover), not
+      # something to bundle into CI setup.
       - name: Docker build check
         run: docker build -f Dockerfile -t ci-backend .
 
