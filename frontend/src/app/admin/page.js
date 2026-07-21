@@ -7,10 +7,11 @@ import {
   deleteUser,
   getUsers,
   updateUser,
+  getClinics,
+  getRoles,
   getClinicsDatabaseAccessOverview,
   revokeClinicDatabaseAccess,
   grantClinicDatabaseAccess,
-  getClinics
 } from "@/utils/api";
 import {
   PageContainer,
@@ -19,11 +20,12 @@ import {
   Button,
   Field,
   Input,
+  Select,
+  Label,
   StatCard,
   Pill,
   Alert,
   Spinner,
-  Select
 } from "@/components/ui";
 
 export default function AdminDashboard() {
@@ -38,8 +40,13 @@ export default function AdminDashboard() {
   const [databaseAccessLoading, setDatabaseAccessLoading] = useState(false);
   const [pendingDatabaseAction, setPendingDatabaseAction] = useState(null);
   const [issuedDatabaseAccess, setIssuedDatabaseAccess] = useState(null);
-  const [clinicOptions, setClinicOptions] = useState([])
-  const [clinicOptionsLoading, setClinicOptionsLoading] = useState(false)
+
+  // One clinic list feeds both the create-user Clinic picker and the user
+  // table's clinic-name lookup — no reason for two separate fetches of the
+  // same /clinics endpoint under different names.
+  const [clinicOptions, setClinicOptions] = useState([]);
+  const [clinicOptionsLoading, setClinicOptionsLoading] = useState(false);
+  const [roles, setRoles] = useState([]);
 
   const [isModalOpen, setIsModalOpen] = useState(false);
   const [modalMode, setModalMode] = useState("create");
@@ -50,6 +57,8 @@ export default function AdminDashboard() {
   const [displayName, setDisplayName] = useState("");
   const [clinicId, setClinicId] = useState("");
   const [roleId, setRoleId] = useState("");
+
+  const [deleteTarget, setDeleteTarget] = useState(null); // { id, name } | null
 
   const fetchUsers = async () => {
     setLoading(true);
@@ -72,23 +81,23 @@ export default function AdminDashboard() {
   };
 
   const fetchClinicOptions = async () => {
-    setClinicOptionsLoading(true)
+    setClinicOptionsLoading(true);
     try {
-      const response = await getClinics()
+      const response = await getClinics();
       if (response.ok) {
-        const data = await response.json()
-        setClinicOptions(Array.isArray(data) ? data : data.data || data.clinics || [])
+        const data = await response.json();
+        setClinicOptions(Array.isArray(data) ? data : data.data || data.clinics || []);
       } else if (response.status === 401 || response.status === 403) {
-        router.push("/login")
+        router.push("/login");
       } else {
-        setErrorMessage("Failed to retrieve clinics.")
+        setErrorMessage("Failed to retrieve clinics.");
       }
     } catch {
-      setErrorMessage("Network error: could not retrieve clinics.")
+      setErrorMessage("Network error: could not retrieve clinics.");
     } finally {
-      setClinicOptionsLoading(false)
+      setClinicOptionsLoading(false);
     }
-  }
+  };
 
   const fetchDatabaseAccess = async () => {
     setDatabaseAccessLoading(true);
@@ -97,17 +106,29 @@ export default function AdminDashboard() {
       const response = await getClinicsDatabaseAccessOverview();
       if (response.ok) {
         const data = await response.json();
-        let usableClinics = Array.isArray(data) ? data : data.data
-        setDatabaseAccess(usableClinics.filter(c => c.name !== '⟨Unclaimed⟩ — bridge placeholder clinic'));
+        let usableClinics = Array.isArray(data) ? data : data.data;
+        setDatabaseAccess(usableClinics.filter((c) => c.name !== "⟨Unclaimed⟩ — bridge placeholder clinic"));
       } else if (response.status === 401 || response.status === 403) {
         router.push("/login");
       } else {
         setErrorMessage("Failed to retrieve clinic database access.");
       }
     } catch (error) {
-      setErrorMessage("Network error: could not retrieve clinic database access.");
+      setErrorMessage("Network error while retrieving clinic database access.");
     } finally {
       setDatabaseAccessLoading(false);
+    }
+  };
+
+  const fetchRoles = async () => {
+    try {
+      const response = await getRoles();
+      if (response.ok) {
+        const data = await response.json();
+        setRoles(Array.isArray(data) ? data : data.roles || data.data || []);
+      }
+    } catch (error) {
+      // Non-fatal: the role picker just falls back to an empty list.
     }
   };
 
@@ -117,7 +138,8 @@ export default function AdminDashboard() {
       router.push("/login");
     } else {
       fetchUsers();
-      fetchClinicOptions()
+      fetchClinicOptions();
+      fetchRoles();
     }
   }, [router]);
 
@@ -152,10 +174,19 @@ export default function AdminDashboard() {
 
     try {
       if (modalMode === "create") {
-        const payload = { email: email.trim(), password };
+        if (!roleId) {
+          setErrorMessage("Choose a role for this account.");
+          return;
+        }
+        const chosenRole = roles.find((r) => r.role_id === roleId);
+        if (chosenRole?.requires_clinic && !clinicId) {
+          setErrorMessage(`The ${chosenRole.name} role requires a clinic — pick one above.`);
+          return;
+        }
+
+        const payload = { email: email.trim(), password, role_id: roleId };
         if (displayName.trim()) payload.display_name = displayName.trim();
         if (clinicId.trim()) payload.clinic_id = clinicId.trim();
-        if (roleId.trim()) payload.role_id = roleId.trim();
 
         const response = await createUser(payload);
         if (response.ok) {
@@ -186,12 +217,12 @@ export default function AdminDashboard() {
     }
   };
 
-  const handleDeleteUser = async (userId, name) => {
-    if (!confirm(`Revoke account access for ${name}?`)) return;
+  const handleDeleteUser = async () => {
+    if (!deleteTarget) return;
     setErrorMessage("");
     setSuccessMessage("");
     try {
-      const response = await deleteUser(userId);
+      const response = await deleteUser(deleteTarget.id);
       if (response.ok) {
         setSuccessMessage("Account access revoked.");
         fetchUsers();
@@ -200,6 +231,8 @@ export default function AdminDashboard() {
       }
     } catch (error) {
       setErrorMessage("Network error while revoking access.");
+    } finally {
+      setDeleteTarget(null);
     }
   };
 
@@ -237,8 +270,9 @@ export default function AdminDashboard() {
   const TabButton = ({ id, children }) => (
     <button
       onClick={() => setActiveTab(id)}
-      className={`pb-3 -mb-px text-sm font-semibold transition-colors border-b-2 ${activeTab === id ? "border-accent text-accent" : "border-transparent text-muted hover:text-ink"
-        }`}
+      className={`pb-3 -mb-px text-sm font-semibold transition-colors border-b-2 ${
+        activeTab === id ? "border-accent text-accent-strong" : "border-transparent text-muted hover:text-ink"
+      }`}
     >
       {children}
     </button>
@@ -308,7 +342,12 @@ export default function AdminDashboard() {
               ) : users.length === 0 ? (
                 <div className="p-12 text-center text-muted">No active system accounts found.</div>
               ) : (
-                <UserTable users={users} onEdit={openEditModal} onDelete={handleDeleteUser} clinicOptions={clinicOptions} />
+                <UserTable
+                  users={users}
+                  onEdit={openEditModal}
+                  onDelete={(id, name) => setDeleteTarget({ id, name })}
+                  clinicOptions={clinicOptions}
+                />
               )}
             </Card>
           </div>
@@ -390,28 +429,39 @@ export default function AdminDashboard() {
                   <Field label="Password" htmlFor="u-pw" hint="Minimum 8 characters.">
                     <Input id="u-pw" type="password" required minLength="8" placeholder="••••••••" value={password} onChange={(e) => setPassword(e.target.value)} />
                   </Field>
-                  <Field label="Role ID (UUID)" htmlFor="u-role">
-                    <Input id="u-role" type="text" className="font-mono text-xs" placeholder="Optional — valid role UUID" value={roleId} onChange={(e) => setRoleId(e.target.value)} />
+                  <Field label="Role" required htmlFor="u-role">
+                    <Select id="u-role" value={roleId} onChange={(e) => setRoleId(e.target.value)}>
+                      <option value="">Select a role…</option>
+                      {roles.map((r) => (
+                        <option key={r.role_id} value={r.role_id}>
+                          {r.name}{r.requires_clinic ? " (requires a clinic)" : ""}
+                        </option>
+                      ))}
+                    </Select>
                   </Field>
                 </>
               )}
 
-              <Field label="Clinic" htmlFor="u-clinic" hint="Leave empty for admin/global accounts.">
+              <Field
+                label="Clinic"
+                htmlFor="u-clinic"
+                hint={
+                  roles.find((r) => r.role_id === roleId)?.requires_clinic
+                    ? "This role requires a clinic."
+                    : "Leave unset for admin/global accounts."
+                }
+              >
                 <Select
                   id="u-clinic"
                   value={clinicId}
-                  onChange={e => setClinicId(e.target.value)}
+                  onChange={(e) => setClinicId(e.target.value)}
                   disabled={clinicOptionsLoading}
-                  className="w-full rounded-lg border border-border px-3 py-2 text-sm text-ink outline-none focus:border-accent disabled:cursor-not-allowed disabled:opacity-60"
                 >
                   <option value="">
-                    {clinicOptionsLoading ? "Loading clinics..." : "No clinic / global account"}
+                    {clinicOptionsLoading ? "Loading clinics…" : "No clinic (admin/global)"}
                   </option>
-
-                  {clinicOptions.map(clinic => (
-                    <option key={clinic.clinic_id} value={clinic.clinic_id}>
-                      {clinic.name} ({clinic.clinic_id.slice(0, 8)})
-                    </option>
+                  {clinicOptions.map((c) => (
+                    <option key={c.clinic_id} value={c.clinic_id}>{c.name || c.clinic_id}</option>
                   ))}
                 </Select>
               </Field>
@@ -423,6 +473,19 @@ export default function AdminDashboard() {
             </form>
           </Card>
         </div>
+      )}
+
+      {/* DELETE CONFIRMATION — same shared ConfirmationModal as the database-access
+          actions below, rather than a second bespoke confirmation dialog. */}
+      {deleteTarget && (
+        <ConfirmationModal
+          title="Revoke account access?"
+          description={`This revokes access for ${deleteTarget.name}. This action cannot be undone from here.`}
+          confirmLabel="Revoke access"
+          tone="danger"
+          onCancel={() => setDeleteTarget(null)}
+          onConfirm={handleDeleteUser}
+        />
       )}
 
       {pendingDatabaseAction && (
@@ -462,10 +525,10 @@ function UserTable({ users, onEdit, onDelete, readOnly = false, clinicOptions = 
                 {!readOnly && <div className="font-mono text-[11px] text-muted mt-0.5">{user.user_id}</div>}
               </td>
               <td className="px-6 py-4 text-sm text-ink-2">{user.email}</td>
-              {user.clinic_id && user.role === 'technician' ? (
+              {user.clinic_id && user.role === "technician" ? (
                 <>
                   <td className="px-6 py-4">
-                    <span className="font-mono text-[11px] text-accent-strong bg-accent-soft px-2 py-1 rounded">{clinicOptions.find(c => c.clinic_id === user.clinic_id)?.name || user.clinic_id.slice(0, 12)}</span>
+                    <span className="font-mono text-[11px] text-accent-strong bg-accent-soft px-2 py-1 rounded">{clinicOptions.find((c) => c.clinic_id === user.clinic_id)?.name || user.clinic_id.slice(0, 12)}</span>
                   </td>
                   <td className="px-6 py-4">
                     <span className="font-mono text-[11px] text-accent-strong bg-accent-soft px-2 py-1 rounded">{user.role}</span>
@@ -481,7 +544,7 @@ function UserTable({ users, onEdit, onDelete, readOnly = false, clinicOptions = 
                   </td>
                 </>
               )}
-              {!readOnly && ['technician'].includes(user.role) && (
+              {!readOnly && ["technician"].includes(user.role) && (
                 <td className="px-6 py-4 text-right">
                   <div className="flex justify-end gap-2">
                     <Button variant="subtle" size="sm" onClick={() => onEdit(user)}>Edit</Button>

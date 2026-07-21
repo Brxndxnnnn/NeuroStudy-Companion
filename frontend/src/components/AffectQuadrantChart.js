@@ -2,6 +2,7 @@
 import { useEffect, useRef } from "react";
 import * as echarts from "echarts";
 import { MID, QUADRANTS, SCALE_MAX, SCALE_MIN, quadrantOf } from "@/components/affect";
+import { attachTapDismiss } from "@/utils/chartTouch";
 
 const NO_POINTS = [];
 
@@ -71,7 +72,7 @@ export default function AffectQuadrantChart({
       animation: false,
       grid: { left: 62, right: 26, top: 22, bottom: 80 },
       legend: {
-        data: ["Predicted from EEG", "Actual (OASIS rating)"],
+        data: ["Predicted from EEG", "Actual (established rating)"],
         bottom: 6,
         icon: "circle",
         itemWidth: 8,
@@ -104,6 +105,7 @@ export default function AffectQuadrantChart({
       },
       tooltip: {
         trigger: "item",
+        confine: true,
         backgroundColor: c.surface,
         borderColor: c.border,
         borderWidth: 1,
@@ -159,7 +161,7 @@ export default function AffectQuadrantChart({
           },
         },
         {
-          name: "Actual (OASIS rating)",
+          name: "Actual (established rating)",
           type: "scatter",
           data: actual.map(point),
           symbol: "diamond",
@@ -199,10 +201,13 @@ export default function AffectQuadrantChart({
     const mq = window.matchMedia("(prefers-color-scheme: dark)");
     mq.addEventListener?.("change", recolor);
 
+    const detachTapDismiss = attachTapDismiss(chart, elRef.current);
+
     return () => {
       ro.disconnect();
       mo.disconnect();
       mq.removeEventListener?.("change", recolor);
+      detachTapDismiss();
       chart.dispose();
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps

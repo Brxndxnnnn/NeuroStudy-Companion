@@ -11,10 +11,11 @@ import {
 } from "@/utils/api";
 import { buildEventWindows } from "@/utils/events";
 import { SessionTopBar } from "@/components/TopNav";
-import { Card, CardHeader, Button, Label, Pill, Alert, Spinner } from "@/components/ui";
+import { Card, CardHeader, Button, Label, Pill, Alert, Spinner, Select } from "@/components/ui";
 import EegStripChart from "@/components/EegStripChart";
 import TimeSeriesChart from "@/components/TimeSeriesChart";
 import BandProfileChart from "@/components/BandProfileChart";
+import StimulusModal from "@/components/StimulusModal";
 
 const CHANNELS = [
   { key: "fp1_left_front", prefix: "fp1", label: "Fp1", color: "--ch-fp1" },
@@ -48,9 +49,9 @@ const MENTAL = [
 // hiding a column invites someone to "fix" its absence, but it is labelled for
 // what it is.
 const ELLIPTIC_STATS = [
-  { key: "std", label: "SD", hint: "RMS amplitude — the meaningful one" },
-  { key: "peak", label: "Peak", hint: "Largest excursion in the window" },
-  { key: "mean", label: "Mean", hint: "≈0 by construction: the signal is bandpassed first" },
+  { key: "std", label: "SD", hint: "How strong the signal typically is — the number that matters here" },
+  { key: "peak", label: "Peak", hint: "The single biggest spike in this time window" },
+  { key: "mean", label: "Mean", hint: "Almost always close to zero here — not a useful reading for this chart" },
 ];
 
 // Peak carries electrode-pop artefacts orders of magnitude above the signal (this
@@ -205,7 +206,11 @@ function MarkerToggle({ on, onToggle }) {
       onClick={onToggle}
       aria-pressed={on}
       title={on ? "Hide stimulus markers" : "Show stimulus markers"}
-      className={`px-3 py-1.5 rounded-lg text-[12px] font-semibold transition-colors border ${
+      // py-2, not py-1.5: matches the toolbar Select's sm size and a segmented
+      // button group's effective height (its own py-1.5 plus its wrapper's
+      // p-0.5), so this sits flush with whichever of those it's next to in a
+      // card's actions row instead of reading a couple px shorter.
+      className={`px-3 py-2 rounded-lg text-[12px] font-semibold transition-colors border ${
         on
           ? "bg-inset text-ink border-border"
           : "bg-transparent text-muted border-border hover:text-ink"
@@ -215,6 +220,22 @@ function MarkerToggle({ on, onToggle }) {
     </button>
   );
 }
+
+// Labeled wrapper for one header control (a select or a button group). The
+// label sits above the control so a header with several of these reads as
+// "View: ___  Channel: ___  Markers: ___" instead of an unlabeled row of
+// controls the technician has to hover each one to identify.
+function ControlGroup({ label, children }) {
+  return (
+    <div className="flex flex-col gap-1">
+      <span className="px-0.5 font-mono text-[9px] font-semibold uppercase tracking-[0.08em] text-muted">
+        {label}
+      </span>
+      {children}
+    </div>
+  );
+}
+
 
 function fmtDuration(sec) {
   if (!sec || sec < 0) return "—";
@@ -250,11 +271,6 @@ export default function SessionResults() {
   // window, so it is displayed but never used to index).
   const [ellipticIdx, setEllipticIdx] = useState(0);
   const [ellipticView, setEllipticView] = useState("window"); // "window" | "timeline"
-  // Which statistic the cross-channel profile draws under "All". Only one can be
-  // drawn: the three do not share a scale (peak runs an order of magnitude above
-  // SD, mean sits at zero), so putting them on a single axis to compare four
-  // channels would be meaningless. SD is the amplitude, hence the default.
-  const [ellipticAllStat, setEllipticAllStat] = useState("std");
   const [events, setEvents] = useState([]);
   const [selectedEvent, setSelectedEvent] = useState(null);
   // One per chart, so a chart can drop its markers without the others losing theirs.
@@ -285,8 +301,8 @@ export default function SessionResults() {
   const [mentalRange, setMentalRange] = useState({ from: 0, to: 0 });
   const [vitalsRange, setVitalsRange] = useState({ from: 0, to: 0 });
   const [channel, setChannel] = useState(CHANNELS[0].prefix);
-  // "stacked" = one strip per channel, "overlay" = all four on a shared µV axis,
-  // or a single channel prefix to isolate one trace.
+  // "stacked" = one strip per channel, or a single channel prefix to isolate
+  // one trace.
   const [eegView, setEegView] = useState("stacked");
 
   useEffect(() => {
@@ -499,7 +515,7 @@ export default function SessionResults() {
   // Which traces the EEG chart draws. Memoised because EegStripChart re-inits the
   // canvas whenever this array identity changes.
   const eegChannels = useMemo(() => {
-    if (eegView === "stacked" || eegView === "overlay") return CHANNELS;
+    if (eegView === "stacked") return CHANNELS;
     return CHANNELS.filter((ch) => ch.prefix === eegView);
   }, [eegView]);
 
@@ -562,6 +578,11 @@ export default function SessionResults() {
   // ── Elliptic band statistics (ml_service) ─────────────────────────────────
   // `ellipticChannel` is either a channel prefix or "all".
   const ellipticAll = ellipticChannel === "all";
+  const currentEllipticStat = ELLIPTIC_STATS.find((s) => s.key === ellipticStat);
+  // Statistic only matters where more than one could plausibly be on screen —
+  // see the header control's own comment for why. Used both to show/hide that
+  // control and to name the current one in the subtitle below it.
+  const ellipticStatMatters = ellipticView === "timeline" || ellipticAll;
   const ellipticShownChannels = useMemo(
     () => (ellipticAll ? CHANNELS : CHANNELS.filter((c) => c.prefix === ellipticChannel)),
     [ellipticAll, ellipticChannel]
@@ -694,7 +715,7 @@ export default function SessionResults() {
       return CHANNELS.map((ch) => ({
         label: ch.label,
         values: Object.fromEntries(
-          BANDS.map((b) => [b.key, ellipticWindow[`${ch.prefix}_${b.key}_${ellipticAllStat}`] ?? null])
+          BANDS.map((b) => [b.key, ellipticWindow[`${ch.prefix}_${b.key}_${ellipticStat}`] ?? null])
         ),
       }));
     }
@@ -704,7 +725,7 @@ export default function SessionResults() {
         BANDS.map((b) => [b.key, ellipticWindow[`${ellipticChannel}_${b.key}_${s.key}`] ?? null])
       ),
     }));
-  }, [ellipticWindow, ellipticAll, ellipticAllStat, ellipticChannel]);
+  }, [ellipticWindow, ellipticAll, ellipticStat, ellipticChannel]);
 
   // Which stimulus was on screen during this window. A window straddling two
   // stimuli belongs cleanly to neither, so match on its midpoint and say when it
@@ -840,33 +861,26 @@ export default function SessionResults() {
                 title="Filtered EEG"
                 subtitle={
                   events.length
-                    ? "µV. Drag to zoom, scroll to pan — the stats update to the visible window. Shaded bands mark stimuli (teal = image, amber = question); click one to see what was shown."
-                    : "µV. Drag to zoom, scroll to pan — the stats update to the visible window."
+                    ? "The raw signal in µV. Drag to zoom, scroll to pan — the numbers below update to match what's on screen. Shaded bands mark when an image (teal) or question (amber) was shown; click one to see it."
+                    : "The raw signal in µV. Drag to zoom, scroll to pan — the numbers below update to match what's on screen."
                 }
                 actions={
-                  <div className="flex flex-wrap items-center gap-2">
-                    <div
-                      role="group"
-                      aria-label="EEG view"
-                      className="inline-flex rounded-lg border border-border bg-inset/60 p-0.5"
-                    >
-                      {[
-                        { id: "stacked", label: "Stacked" },
-                        { id: "overlay", label: "Overlay" },
-                        ...CHANNELS.map((ch) => ({ id: ch.prefix, label: ch.label })),
-                      ].map((v) => (
-                        <button
-                          key={v.id}
-                          onClick={() => setEegView(v.id)}
-                          aria-pressed={eegView === v.id}
-                          className={`px-2.5 py-1.5 rounded-md text-[12px] font-semibold transition-colors ${
-                            eegView === v.id ? "bg-surface text-ink shadow-sm" : "text-muted hover:text-ink"
-                          }`}
+                  <div className="flex flex-wrap items-end gap-3">
+                    <ControlGroup label="View">
+                      <div className="w-28">
+                        <Select
+                          aria-label="EEG view"
+                          value={eegView}
+                          onChange={(e) => setEegView(e.target.value)}
+                          size="sm"
                         >
-                          {v.label}
-                        </button>
-                      ))}
-                    </div>
+                          <option value="stacked">Stacked</option>
+                          {CHANNELS.map((ch) => (
+                            <option key={ch.prefix} value={ch.prefix}>{ch.label}</option>
+                          ))}
+                        </Select>
+                      </div>
+                    </ControlGroup>
                     {events.length > 0 && (
                       <MarkerToggle on={markers.eeg} onToggle={() => toggleMarkers("eeg")} />
                     )}
@@ -877,7 +891,6 @@ export default function SessionResults() {
                 <EegStripChart
                   samples={samples}
                   channels={eegChannels}
-                  overlay={eegView === "overlay"}
                   events={chartEvents("eeg")}
                   onEventClick={setSelectedEvent}
                   onVisibleRangeChange={onEegRange}
@@ -906,13 +919,13 @@ export default function SessionResults() {
                       </div>
                       {ch.flat ? (
                         <p className="text-[11px] leading-snug text-muted">
-                          Flat line ({fmtUv(ch.pkpk)} µV peak-to-peak) — this electrode recorded
-                          nothing. Reseat it before the next session.
+                          This electrode isn&apos;t picking up a signal — the line is flat (barely any
+                          change: {fmtUv(ch.pkpk)} µV). Reseat it before the next session.
                         </p>
                       ) : (
                         <dl className="space-y-1">
                           <StatLine label="Mean" value={`${fmtUv(ch.mean)} µV`} />
-                          <StatLine label="Peak |µV|" value={fmtUv(ch.peak)} />
+                          <StatLine label="Peak (µV)" value={fmtUv(ch.peak)} />
                           <StatLine label="SD" value={fmtUv(ch.sd)} />
                         </dl>
                       )}
@@ -935,29 +948,25 @@ export default function SessionResults() {
                 <Card className="overflow-hidden">
                   <CardHeader
                     title="Frequency bands"
-                    subtitle="Band power (µV²) computed by FFT on the filtered EEG. Stacked gives a panel per channel; pick a channel for a single timeline."
+                    subtitle="How much energy is in each brainwave band (delta, theta, alpha, beta, gamma) over time. Stacked shows all four channels; pick one channel for a closer look. A second way of measuring these same bands — filtered amplitude instead of energy — is in Band strength below."
                     actions={
-                      <div className="flex flex-wrap items-center gap-2">
-                        <div
-                          role="group"
-                          aria-label="Channel"
-                          className="inline-flex rounded-lg border border-border bg-inset/60 p-0.5"
-                        >
-                          {[{ prefix: "stacked", label: "Stacked" }, ...CHANNELS].map((ch) => (
-                            <button
-                              key={ch.prefix}
-                              onClick={() => setChannel(ch.prefix)}
-                              aria-pressed={channel === ch.prefix}
-                              className={`px-2.5 py-1.5 rounded-md font-mono text-[12px] font-semibold transition-colors ${
-                                channel === ch.prefix
-                                  ? "bg-surface text-ink shadow-sm"
-                                  : "text-muted hover:text-ink"
-                              }`}
+                      <div className="flex flex-wrap items-end gap-3">
+                        <ControlGroup label="Channel">
+                          <div className="w-28">
+                            <Select
+                              aria-label="Channel"
+                              value={channel}
+                              onChange={(e) => setChannel(e.target.value)}
+                              size="sm"
+                              className="font-mono"
                             >
-                              {ch.label}
-                            </button>
-                          ))}
-                        </div>
+                              <option value="stacked">Stacked</option>
+                              {CHANNELS.map((ch) => (
+                                <option key={ch.prefix} value={ch.prefix}>{ch.label}</option>
+                              ))}
+                            </Select>
+                          </div>
+                        </ControlGroup>
                         {events.length > 0 && (
                           <MarkerToggle on={markers.bands} onToggle={() => toggleMarkers("bands")} />
                         )}
@@ -1064,60 +1073,89 @@ export default function SessionResults() {
                     and are never mixed with it. */}
                 <Card className="overflow-hidden">
                   <CardHeader
-                    title="Spectral amplitude · elliptic filter"
+                    title="Band strength"
                     subtitle={
-                      ellipticMeta
-                        ? `Per-band amplitude in µV over a ${ellipticMeta.window_size_s}s window ` +
-                          `stepped every ${ellipticMeta.step_s}s · ${ellipticMeta.windows} windows.`
-                        : "Per-band amplitude in µV, computed after the session ends."
+                      (ellipticMeta
+                        ? `How strong each brainwave band's signal is, in µV, measured every ` +
+                          `${ellipticMeta.step_s}s in ${ellipticMeta.window_size_s}s windows (${ellipticMeta.windows} in total).`
+                        : "How strong each brainwave band's signal is, in µV. Ready shortly after the session ends.") +
+                      " A second way of measuring these same bands — energy instead of filtered amplitude — is in Frequency bands above." +
+                      (ellipticRows.length && ellipticStatMatters && currentEllipticStat
+                        ? ` Showing ${currentEllipticStat.label} — ${currentEllipticStat.hint}.`
+                        : "")
                     }
                     actions={
                       ellipticRows.length ? (
-                        <div className="flex flex-wrap gap-2">
-                          <div className="flex items-center gap-1 rounded-lg bg-inset p-1">
-                            {[
-                              { key: "window", label: "By window" },
-                              { key: "timeline", label: "Timeline" },
-                            ].map((v) => (
-                              <button
-                                key={v.key}
-                                onClick={() => setEllipticView(v.key)}
-                                aria-pressed={ellipticView === v.key}
-                                className={`px-3 py-1.5 rounded-md text-[12px] font-semibold transition-colors ${
-                                  ellipticView === v.key
-                                    ? "bg-surface text-ink shadow-sm"
-                                    : "text-muted hover:text-ink"
-                                }`}
-                              >
-                                {v.label}
-                              </button>
-                            ))}
-                          </div>
-                          {/* The statistic picker is TIMELINE-only. A line chart can
-                              draw one statistic at a time, so there it is a real
-                              choice. The window view has room to show SD, peak and
-                              mean side by side for the selected channel, so making
-                              you toggle between them there would only hide two thirds
-                              of a snapshot that fits on screen. */}
-                          {ellipticView === "timeline" && (
-                            <div className="flex items-center gap-1 rounded-lg bg-inset p-1">
-                              {ELLIPTIC_STATS.map((s) => (
+                        <div className="flex flex-wrap items-end gap-3">
+                          <ControlGroup label="View">
+                            <div
+                              role="group"
+                              aria-label="Elliptic view"
+                              className="inline-flex rounded-lg border border-border bg-inset/60 p-0.5"
+                            >
+                              {[
+                                { key: "window", label: "By window" },
+                                { key: "timeline", label: "Timeline" },
+                              ].map((v) => (
                                 <button
-                                  key={s.key}
-                                  onClick={() => setEllipticStat(s.key)}
-                                  aria-pressed={ellipticStat === s.key}
-                                  title={s.hint}
-                                  className={`px-3 py-1.5 rounded-md text-[12px] font-semibold transition-colors ${
-                                    ellipticStat === s.key
+                                  key={v.key}
+                                  onClick={() => setEllipticView(v.key)}
+                                  aria-pressed={ellipticView === v.key}
+                                  className={`px-2.5 py-1.5 rounded-md text-[12px] font-semibold transition-colors ${
+                                    ellipticView === v.key
                                       ? "bg-surface text-ink shadow-sm"
                                       : "text-muted hover:text-ink"
                                   }`}
                                 >
-                                  {s.label}
+                                  {v.label}
                                 </button>
                               ))}
                             </div>
+                          </ControlGroup>
+
+                          {/* Timeline-only here: a line chart draws one statistic at
+                              a time, so this is the only place a chart is on screen
+                              that this control could apply to. The window view's own
+                              "All channels" equivalent sits inline next to the label
+                              it controls, further down — right beside what changes
+                              when you touch it, rather than up in the header where the
+                              actual profile chart it affects isn't even in view yet.
+                              Same ellipticStat state either way, so switching between
+                              window and timeline never silently shows a different
+                              statistic than the one just picked. */}
+                          {ellipticView === "timeline" && (
+                            <ControlGroup label="Statistic">
+                              <div className="w-24">
+                                <Select
+                                  aria-label="Elliptic statistic"
+                                  value={ellipticStat}
+                                  onChange={(e) => setEllipticStat(e.target.value)}
+                                  size="sm"
+                                >
+                                  {ELLIPTIC_STATS.map((s) => (
+                                    <option key={s.key} value={s.key}>{s.label}</option>
+                                  ))}
+                                </Select>
+                              </div>
+                            </ControlGroup>
                           )}
+
+                          <ControlGroup label="Channel">
+                            <div className="w-24">
+                              <Select
+                                aria-label="Elliptic channel"
+                                value={ellipticChannel}
+                                onChange={(e) => setEllipticChannel(e.target.value)}
+                                size="sm"
+                                className="font-mono"
+                              >
+                                <option value="all">All</option>
+                                {CHANNELS.map((ch) => (
+                                  <option key={ch.prefix} value={ch.prefix}>{ch.label}</option>
+                                ))}
+                              </Select>
+                            </div>
+                          </ControlGroup>
 
                           {/* Markers need a time axis, so they are timeline-only too.
                               The window view names the stimulus in prose instead. */}
@@ -1127,23 +1165,6 @@ export default function SessionResults() {
                               onToggle={() => toggleMarkers("elliptic")}
                             />
                           )}
-
-                          <div className="flex items-center gap-1 rounded-lg bg-inset p-1">
-                            {[{ prefix: "all", label: "All" }, ...CHANNELS].map((ch) => (
-                              <button
-                                key={ch.prefix}
-                                onClick={() => setEllipticChannel(ch.prefix)}
-                                aria-pressed={ellipticChannel === ch.prefix}
-                                className={`px-3 py-1.5 rounded-md font-mono text-[12px] font-semibold transition-colors ${
-                                  ellipticChannel === ch.prefix
-                                    ? "bg-surface text-ink shadow-sm"
-                                    : "text-muted hover:text-ink"
-                                }`}
-                              >
-                                {ch.label}
-                              </button>
-                            ))}
-                          </div>
                         </div>
                       ) : null
                     }
@@ -1157,26 +1178,26 @@ export default function SessionResults() {
                     // The worker ran and could not do it. It said why — show that,
                     // rather than a generic failure the technician cannot act on.
                     <div className="p-8 flex flex-col items-center gap-3 text-center">
-                      <Alert tone="crit">Could not compute the band statistics.</Alert>
+                      <Alert tone="crit">Couldn&apos;t calculate band strength for this session.</Alert>
                       {featuresError && (
                         <p className="max-w-lg font-mono text-[11px] leading-relaxed text-muted">
                           {featuresError}
                         </p>
                       )}
                       <p className="max-w-md text-[12px] leading-relaxed text-muted">
-                        Every other chart on this page comes from the bridge and is
-                        unaffected — only this card depends on the post-session job.
+                        Every other chart on this page comes straight from the headset and
+                        isn&apos;t affected — only this one depends on a background calculation
+                        that didn&apos;t finish.
                       </p>
                     </div>
                   ) : pollTimedOut ? (
                     <div className="p-8 flex flex-col items-center gap-3 text-center">
                       <Alert tone="warn">Still not ready after three minutes.</Alert>
                       <p className="max-w-md text-[12px] leading-relaxed text-muted">
-                        The job is taking longer than expected, or the worker is not
-                        running. It is safe to keep waiting — this only stops the page
-                        from polling forever.
+                        This is taking longer than expected. It&apos;s still safe to wait — this
+                        message just stops the page from checking forever.
                       </p>
-                      <Button variant="secondary" onClick={() => window.location.reload()}>
+                      <Button variant="subtle" onClick={() => window.location.reload()}>
                         Check again
                       </Button>
                     </div>
@@ -1186,12 +1207,11 @@ export default function SessionResults() {
                     <div className="p-10 flex flex-col items-center gap-3 text-center">
                       <Spinner size={26} className="text-accent" />
                       <span className="font-medium text-ink">
-                        Computing band statistics…
+                        Calculating band strength…
                       </span>
                       <p className="max-w-md text-[12px] leading-relaxed text-muted">
-                        These are computed after the recording ends. This chart will
-                        appear on its own — no need to reload. Everything else on this
-                        page is already loaded.
+                        This happens automatically after the recording ends and can take a minute
+                        or two. The chart will appear here on its own — no need to reload.
                       </p>
                     </div>
                   ) : (
@@ -1203,7 +1223,7 @@ export default function SessionResults() {
                               window can't shift the whole inspector by one. */}
                           <div className="flex flex-wrap items-center gap-3">
                             <Button
-                              variant="secondary"
+                              variant="subtle"
                               onClick={() => setEllipticIdx((i) => Math.max(0, i - 1))}
                               disabled={ellipticIdx === 0}
                             >
@@ -1224,7 +1244,7 @@ export default function SessionResults() {
                               </div>
                             </div>
                             <Button
-                              variant="secondary"
+                              variant="subtle"
                               onClick={() =>
                                 setEllipticIdx((i) => Math.min(ellipticRows.length - 1, i + 1))
                               }
@@ -1253,7 +1273,7 @@ export default function SessionResults() {
                                 onClick={() =>
                                   setSelectedEvent(events.indexOf(ellipticWindowEvent))
                                 }
-                                className="text-[12px] font-semibold text-accent hover:underline"
+                                className="text-[12px] font-semibold text-accent-strong hover:underline"
                               >
                                 Showing: {ellipticWindowEvent.label} →
                               </button>
@@ -1265,36 +1285,36 @@ export default function SessionResults() {
                           </div>
 
                           <div>
-                            <div className="mb-1 flex flex-wrap items-center justify-between gap-2 px-2">
-                              <Label>
-                                {ellipticAll
-                                  ? `${
-                                      ELLIPTIC_STATS.find((s) => s.key === ellipticAllStat)?.label
-                                    } amplitude by channel · this window only (µV)`
-                                  : `${
-                                      CHANNELS.find((c) => c.prefix === ellipticChannel)?.label
-                                    } · SD, peak and mean · this window only (µV)`}
-                              </Label>
-
-                              {/* Comparing four channels needs ONE statistic on the
-                                  axis — the three do not share a scale. So under
-                                  "All" the statistic is a choice rather than being
-                                  pinned to SD. */}
-                              {ellipticAll && (
-                                <label className="flex items-center gap-2 text-[11px] text-muted">
-                                  <span className="sr-only">Statistic</span>
-                                  <select
-                                    value={ellipticAllStat}
-                                    onChange={(e) => setEllipticAllStat(e.target.value)}
-                                    className="rounded-md border border-border bg-surface px-2 py-1 text-[12px] font-semibold text-ink"
-                                  >
-                                    {ELLIPTIC_STATS.map((s) => (
-                                      <option key={s.key} value={s.key}>
-                                        {s.label}
-                                      </option>
-                                    ))}
-                                  </select>
-                                </label>
+                            <div className="mb-1 flex flex-wrap items-center gap-2 px-2">
+                              {ellipticAll ? (
+                                <>
+                                  {/* The picker sits right in the sentence it
+                                      controls — "[SD ▾] amplitude by channel…" —
+                                      rather than up in the card header, out of
+                                      sight of the chart it actually changes. Same
+                                      ellipticStat as the timeline's own header
+                                      control, so picking one here and switching
+                                      views doesn't silently show a different
+                                      statistic there. */}
+                                  <div className="w-20">
+                                    <Select
+                                      aria-label="Statistic"
+                                      value={ellipticStat}
+                                      onChange={(e) => setEllipticStat(e.target.value)}
+                                      size="sm"
+                                    >
+                                      {ELLIPTIC_STATS.map((s) => (
+                                        <option key={s.key} value={s.key}>{s.label}</option>
+                                      ))}
+                                    </Select>
+                                  </div>
+                                  <Label>amplitude by channel · this window only (µV)</Label>
+                                </>
+                              ) : (
+                                <Label>
+                                  {CHANNELS.find((c) => c.prefix === ellipticChannel)?.label} · SD, peak and
+                                  mean · this window only (µV)
+                                </Label>
                               )}
                             </div>
 
@@ -1302,16 +1322,16 @@ export default function SessionResults() {
 
                             {!ellipticAll && (
                               <p className="px-2 pt-1 text-[11px] leading-snug text-muted">
-                                The three groups do not share a scale — peak runs well above SD, and
-                                mean sits at zero because the signal is bandpassed before the
-                                statistic is taken. Read each group against itself.
+                                SD, Peak and Mean use different scales, so don&apos;t compare their
+                                bar heights to each other — compare each one across bands instead.
+                                Mean is expected to sit near zero; that&apos;s normal, not an error.
                               </p>
                             )}
-                            {ellipticAll && ellipticAllStat === "mean" && (
+                            {ellipticAll && ellipticStat === "mean" && (
                               <p className="px-2 pt-1 text-[11px] leading-snug text-muted">
-                                Mean sits near zero for every band and channel by construction — the
-                                signal is bandpassed before the statistic is taken, so it has no DC
-                                left to average. SD is the amplitude.
+                                Mean is close to zero for every band and channel here — that&apos;s
+                                expected, not a sign of a missing signal. Switch to SD to see the
+                                actual signal strength.
                               </p>
                             )}
                           </div>
@@ -1332,7 +1352,7 @@ export default function SessionResults() {
                                 <thead>
                                   <tr className="text-muted">
                                     <th className="text-left font-semibold py-2 pr-4">
-                                      {ELLIPTIC_STATS.find((s) => s.key === ellipticAllStat)?.label}{" "}
+                                      {currentEllipticStat?.label}{" "}
                                       µV · channel
                                     </th>
                                     {BANDS.map((b) => (
@@ -1364,7 +1384,7 @@ export default function SessionResults() {
                                         >
                                           {fmtUv(
                                             ellipticWindow?.[
-                                              `${ch.prefix}_${b.key}_${ellipticAllStat}`
+                                              `${ch.prefix}_${b.key}_${ellipticStat}`
                                             ]
                                           )}
                                         </td>
@@ -1387,19 +1407,19 @@ export default function SessionResults() {
                                     <th className="text-right font-semibold py-2 px-3">
                                       SD µV
                                       <span className="block text-[10px] font-normal">
-                                        amplitude
+                                        typical strength
                                       </span>
                                     </th>
                                     <th className="text-right font-semibold py-2 px-3">
                                       Peak µV
                                       <span className="block text-[10px] font-normal">
-                                        largest excursion
+                                        biggest spike
                                       </span>
                                     </th>
                                     <th className="text-right font-semibold py-2 px-3">
                                       Mean µV
                                       <span className="block text-[10px] font-normal">
-                                        ≈0 by construction
+                                        usually near zero
                                       </span>
                                     </th>
                                   </tr>
@@ -1453,9 +1473,9 @@ export default function SessionResults() {
                       {ellipticView === "timeline" && ellipticStat === "mean" && (
                         <div className="px-5 pb-2">
                           <Alert tone="warn">
-                            Mean sits near zero for every band by construction — the signal is
-                            bandpassed before the statistic is taken, so it has no DC left to
-                            average. SD is the amplitude.
+                            Mean is close to zero for every band here — that&apos;s expected, not a
+                            sign of a missing signal. Switch to SD to see the actual signal
+                            strength.
                           </Alert>
                         </div>
                       )}
@@ -1463,11 +1483,13 @@ export default function SessionResults() {
                       {ellipticView === "timeline" && ellipticAxis.clipped > 0 && (
                         <div className="px-5 pb-2">
                           <Alert tone="warn">
-                            Axis capped at {fmtUv(ellipticAxis.max)} µV — {ellipticAxis.clipped}{" "}
-                            {ellipticAxis.clipped === 1 ? "value" : "values"} run above it, peaking
-                            at {fmtUv(ellipticAxis.maxValue)} µV. Excursions that large are
-                            electrode artefacts, not EEG; without the cap they would flatten every
-                            real trace onto the axis. Step through them in “By window”.
+                            The chart&apos;s scale is capped at {fmtUv(ellipticAxis.max)} µV so a
+                            few extreme spikes don&apos;t squash everything else flat.{" "}
+                            {ellipticAxis.clipped}{" "}
+                            {ellipticAxis.clipped === 1 ? "reading" : "readings"} go above that,
+                            peaking at {fmtUv(ellipticAxis.maxValue)} µV — almost certainly
+                            electrode noise, not real brain signal. Use &ldquo;By window&rdquo; to
+                            look at them one at a time.
                           </Alert>
                         </div>
                       )}
@@ -1475,9 +1497,11 @@ export default function SessionResults() {
                       {ellipticDead.length > 0 && (
                         <div className="px-5 pb-2">
                           <Alert tone="warn">
-                            {ellipticDead.join(" and ")} recorded no signal — an elliptic
-                            filter over a railed electrode still returns a value, so these
-                            traces are a flat line, not a measurement.
+                            {ellipticDead.join(" and ")}{" "}
+                            {ellipticDead.length === 1 ? "isn't" : "aren't"} picking up a real
+                            signal — the flat line here doesn&apos;t mean the reading is zero, it
+                            means there&apos;s nothing to measure. Reseat the electrode before the
+                            next session.
                           </Alert>
                         </div>
                       )}
@@ -1549,7 +1573,7 @@ export default function SessionResults() {
                 <Card className="overflow-hidden">
                   <CardHeader
                     title="Mental state"
-                    subtitle="Attention, relaxation and workload on the headset's 0–1 index."
+                    subtitle="How attentive, relaxed, and mentally loaded the headset estimates the client was, on a scale from 0 to 1."
                     actions={
                       <div className="flex flex-wrap items-center gap-2">
                         {qualityStat?.mean != null && (
@@ -1607,7 +1631,7 @@ export default function SessionResults() {
                 <Card className="overflow-hidden">
                   <CardHeader
                     title="Vitals"
-                    subtitle="Heart rate and blood-oxygen saturation, each on its own scale."
+                    subtitle="Heart rate and blood-oxygen level, shown on separate scales since they use different units."
                     actions={
                       vitalPanels.length > 0 && events.length > 0 ? (
                         <MarkerToggle
@@ -1620,7 +1644,7 @@ export default function SessionResults() {
                   {vitalPanels.length === 0 ? (
                     <div className="px-5 py-8 flex items-center justify-center">
                       <Alert tone="warn">
-                        No heart-rate or SpO₂ readings were recorded for this session.
+                        No heart-rate or blood-oxygen readings were recorded for this session.
                       </Alert>
                     </div>
                   ) : (
@@ -1678,98 +1702,6 @@ export default function SessionResults() {
         <StimulusModal event={events[selectedEvent]} onClose={() => setSelectedEvent(null)} />
       )}
     </main>
-  );
-}
-
-// Click-through from an event band: the image (or math question) that was on
-// screen during that window, plus the band-power averages recorded while it showed.
-function StimulusModal({ event, onClose }) {
-  useEffect(() => {
-    const onKey = (e) => {
-      if (e.key === "Escape") onClose();
-    };
-    window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
-  }, [onClose]);
-
-  const isImage = event.type === "image";
-  const averages = [
-    { label: "Attention", value: event.avg_attention, digits: 2 },
-    { label: "Relaxation", value: event.avg_relaxation, digits: 2 },
-    { label: "Workload", value: event.avg_mental_workload, digits: 2 },
-    { label: "Heart rate", value: event.avg_heart_rate, digits: 0, unit: "bpm" },
-    { label: "SpO₂", value: event.avg_spo2, digits: 0, unit: "%" },
-  ].filter((a) => a.value != null);
-
-  return (
-    <div
-      className="fixed inset-0 z-50 grid place-items-center p-4 sm:p-8 bg-black/50 anim-fade"
-      role="dialog"
-      aria-modal="true"
-      aria-label={event.label}
-      onClick={onClose}
-    >
-      <div
-        className="w-full max-w-2xl rounded-2xl border border-border bg-surface shadow-2xl overflow-hidden"
-        onClick={(e) => e.stopPropagation()}
-      >
-        <div className="flex items-center justify-between gap-3 px-5 py-4 border-b border-border">
-          <div className="flex items-center gap-3">
-            <span className="font-semibold text-ink">{event.label}</span>
-            {event.category && <Pill tone="neutral">{event.category}</Pill>}
-            {event.difficulty && <Pill tone="neutral">{event.difficulty}</Pill>}
-          </div>
-          <button
-            onClick={onClose}
-            aria-label="Close"
-            className="grid h-8 w-8 place-items-center rounded-lg text-muted hover:text-ink hover:bg-inset transition-colors"
-          >
-            ✕
-          </button>
-        </div>
-
-        {isImage ? (
-          <div className="bg-inset grid place-items-center">
-            {event.url ? (
-              <img
-                src={event.url}
-                alt={event.filename || event.label}
-                className="max-h-[55vh] w-full object-contain"
-              />
-            ) : (
-              <p className="py-14 text-muted text-sm">Image details unavailable for this event.</p>
-            )}
-          </div>
-        ) : (
-          <div className="px-6 py-12 text-center">
-            {event.prompt ? (
-              <p className="font-mono text-3xl font-semibold text-ink tnum">{event.prompt}</p>
-            ) : (
-              <p className="text-muted text-sm">Question details unavailable for this event.</p>
-            )}
-          </div>
-        )}
-
-        <div className="px-5 py-4 border-t border-border flex flex-wrap items-center justify-between gap-x-6 gap-y-2">
-          <span className="font-mono text-[12px] text-muted tnum">
-            Shown {event.from.toFixed(1)}s – {event.to.toFixed(1)}s · {(event.to - event.from).toFixed(1)}s
-          </span>
-          {averages.length > 0 && (
-            <div className="flex flex-wrap gap-x-5 gap-y-1">
-              {averages.map((a) => (
-                <span key={a.label} className="text-[12px] text-muted">
-                  {a.label}{" "}
-                  <b className="font-mono text-ink tnum">
-                    {Number(a.value).toFixed(a.digits)}
-                    {a.unit ? ` ${a.unit}` : ""}
-                  </b>
-                </span>
-              ))}
-            </div>
-          )}
-        </div>
-      </div>
-    </div>
   );
 }
 

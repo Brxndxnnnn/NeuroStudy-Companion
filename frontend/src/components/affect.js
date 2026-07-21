@@ -21,19 +21,24 @@ export const SCALE_MIN = 1;
 export const SCALE_MAX = 7;
 export const MID = 4;
 
+// `color` doubles as text (the on-chart quadrant label, the tooltip heading)
+// and as a decorative fill (the breakdown bar/dot in Insights) — the -strong
+// tokens clear 4.5:1 as text on their matching `soft` background in light
+// mode, where the plain tone only hits ~3-3.3:1, and read just as well as a
+// swatch color for the decorative uses.
 export const QUADRANTS = {
   angry: {
     key: "angry",
     label: "Angry / Tense",
     words: "tense, afraid, distressed",
-    color: "--crit",
+    color: "--crit-strong",
     soft: "--crit-soft",
   },
   happy: {
     key: "happy",
     label: "Happy / Excited",
     words: "elated, enthusiastic, alert",
-    color: "--good",
+    color: "--good-strong",
     soft: "--good-soft",
   },
   sad: {
@@ -47,7 +52,7 @@ export const QUADRANTS = {
     key: "relaxed",
     label: "Relaxed / Calm",
     words: "content, serene, at ease",
-    color: "--accent",
+    color: "--accent-strong",
     soft: "--accent-soft",
   },
 };

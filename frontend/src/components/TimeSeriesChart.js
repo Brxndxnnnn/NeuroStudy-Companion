@@ -1,6 +1,7 @@
 "use client";
 import { useEffect, useRef } from "react";
 import * as echarts from "echarts";
+import { attachTapDismiss } from "@/utils/chartTouch";
 
 // Stable default so omitting the prop doesn't re-init the chart every render.
 const NO_EVENTS = [];
@@ -14,8 +15,16 @@ const NO_EVENTS = [];
  *
  * Props:
  *   samples   [{ t_seconds, ... }]                    ascending in t_seconds
- *   panels    [{ label, unit, series, min, max }]     one grid each, top→bottom
+ *   panels    [{ label, unit, series, min, max, title }]  one grid each, top→bottom
  *               series: [{ key, label, color }]       color may be a CSS var name
+ *               title   optional caption printed above this panel instead of
+ *                       rotated up the y-axis. Use this instead of a long
+ *                       `label` when the panel needs more than a couple words
+ *                       to identify it — a rotated axis name that long either
+ *                       overflows into the next panel or gets clipped, where a
+ *                       horizontal title just wraps like any other text. When
+ *                       set, the y-axis name is omitted (the title replaces
+ *                       it) rather than printing the same words twice.
  *   events    [{ from, to, label, type }]             stimulus windows (seconds); type "image"|"question"
  *   onVisibleRangeChange(startSec, endSec)            fired on zoom/pan
  *   onEventClick(index)                               fired when an event band is clicked
@@ -29,6 +38,15 @@ const NO_EVENTS = [];
  *               for panels that are independent measures (per-channel amplitude,
  *               heart rate vs SpO2, …) merging just floods the tooltip with
  *               unrelated rows.
+ *   perPanelEventLabels  when true, every panel prints its own hover label for
+ *               a stimulus band under the cursor (default false — only the
+ *               top panel does). The default suits repeated-measure panels
+ *               (four identical channel strips): showing the same event name
+ *               on all four would just be noise. Turn this on when the panels
+ *               are genuinely different measures (e.g. valence vs arousal) —
+ *               there each one needs to answer "what was shown here?" on its
+ *               own, since a viewer hovering the second panel never sees the
+ *               first panel's label.
  *   height    px per panel (default 190)
  */
 export default function TimeSeriesChart({
@@ -39,6 +57,7 @@ export default function TimeSeriesChart({
   onEventClick,
   annotate,
   linkPanels = false,
+  perPanelEventLabels = false,
   height = 190,
 }) {
   const elRef = useRef(null);
@@ -102,17 +121,33 @@ export default function TimeSeriesChart({
     // it headroom or the text gets clipped by the canvas edge.
     const topPad = (showLegend ? 34 : 12) + (events.length ? 16 : 0);
     const gap = 30;
+    // Reserved above any panel that carries its own `title`, so a caption long
+    // enough to need a horizontal line doesn't get laid on top of the grid below
+    // it (or, rotated as a y-axis name, on top of the panel above it).
+    const TITLE_H = 20;
     const grids = [];
     const xAxes = [];
     const yAxes = [];
     const series = [];
+    const titles = [];
 
+    let cursor = topPad;
     panels.forEach((panel, i) => {
       const isLast = i === n - 1;
+      if (panel.title) {
+        titles.push({
+          text: panel.title,
+          left: 66,
+          top: cursor,
+          textStyle: { color: c.muted, fontSize: 11, fontWeight: 600 },
+        });
+        cursor += TITLE_H;
+      }
+      const gridTop = cursor;
       grids.push({
         left: 66,
         right: rightPad,
-        top: topPad + i * (height + gap),
+        top: gridTop,
         height,
         // Multiple stacked panels each read 1–7 (or whatever scale) on their own
         // axis — without a boxed boundary they visually run together into one
@@ -135,7 +170,11 @@ export default function TimeSeriesChart({
       yAxes.push({
         type: "value",
         gridIndex: i,
-        name: panel.unit ? `${panel.label} (${panel.unit})` : panel.label,
+        // A titled panel already names itself above the grid — repeating that
+        // same text rotated up the axis is redundant, and for a title long
+        // enough to need horizontal room in the first place, printing it
+        // vertically instead just overflows into the neighbouring panel.
+        name: panel.title ? undefined : (panel.unit ? `${panel.label} (${panel.unit})` : panel.label),
         nameLocation: "middle",
         nameGap: 48,
         nameTextStyle: { color: c.muted, fontSize: 11, fontWeight: 600 },
@@ -147,14 +186,18 @@ export default function TimeSeriesChart({
         axisLabel: { color: c.muted, fontSize: 10 },
         splitLine: { lineStyle: { color: c.border, opacity: 0.6 } },
       });
+      cursor = gridTop + height + gap;
 
       const directLabel = panel.series.length > 1 && panel.series.length <= 4;
       panel.series.forEach((ser, si) => {
         const color = resolve(ser.color);
         series.push({
           // Bands attach to one series per grid (they'd stack translucency
-          // otherwise); the hover label only prints on the top panel.
-          markArea: si === 0 ? buildMarkArea(i === 0) : undefined,
+          // otherwise); the hover label prints on every panel only when the
+          // caller says the panels are distinct measures (perPanelEventLabels)
+          // — otherwise just the top one, since repeated channel strips would
+          // print the same name four times over.
+          markArea: si === 0 ? buildMarkArea(perPanelEventLabels || i === 0) : undefined,
           name: ser.label,
           type: "line",
           xAxisIndex: i,
@@ -201,6 +244,7 @@ export default function TimeSeriesChart({
             inactiveColor: c.muted,
           }
         : { show: false },
+      title: titles,
       grid: grids,
       xAxis: xAxes,
       yAxis: yAxes,
@@ -214,6 +258,7 @@ export default function TimeSeriesChart({
       },
       tooltip: {
         trigger: "axis",
+        confine: true,
         backgroundColor: c.surface,
         borderColor: c.border,
         borderWidth: 1,
@@ -296,20 +341,25 @@ export default function TimeSeriesChart({
     const mq = window.matchMedia("(prefers-color-scheme: dark)");
     mq.addEventListener?.("change", recolor);
 
+    const detachTapDismiss = attachTapDismiss(chart, elRef.current);
+
     return () => {
       ro.disconnect();
       mo.disconnect();
       mq.removeEventListener?.("change", recolor);
+      detachTapDismiss();
       chart.dispose();
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [samples, panels, height, events, linkPanels]);
+  }, [samples, panels, height, events, linkPanels, perPanelEventLabels]);
 
   const showLegend = panels.some((p) => p.series.length > 1);
+  const titledPanels = panels.filter((p) => p.title).length;
   const totalH =
     panels.length * height +
     (showLegend ? 34 : 12) +
     (events.length ? 16 : 0) +
+    titledPanels * 20 +
     46 +
     30 * (panels.length - 1);
   return <div ref={elRef} className="w-full" style={{ height: `${totalH}px` }} />;

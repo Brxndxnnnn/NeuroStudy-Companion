@@ -1,6 +1,6 @@
 "use client";
 import { useEffect, useState } from "react";
-import { usePathname, useRouter } from "next/navigation";
+import { usePathname } from "next/navigation";
 import Link from "next/link";
 import { BrandMark, Button } from "./ui";
 import ThemeToggle from "./ThemeToggle";
@@ -26,9 +26,9 @@ const ADMIN_LINKS = [
  */
 export default function TopNav() {
   const pathname = usePathname();
-  const router = useRouter();
   const [name, setName] = useState("");
   const [links, setLinks] = useState(CLINICIAN_LINKS);
+  const [menuOpen, setMenuOpen] = useState(false);
 
   useEffect(() => {
     const role = localStorage.getItem("userRole");
@@ -43,6 +43,8 @@ export default function TopNav() {
     .slice(0, 2)
     .toUpperCase();
 
+  const isActive = (href) => pathname === href || pathname.startsWith(href + "/");
+
   return (
     <header className="sticky top-0 z-40 border-b border-border bg-surface/80 backdrop-blur-md">
       <div className="max-w-7xl mx-auto flex h-15 items-center justify-between px-5 sm:px-8 py-3">
@@ -51,38 +53,83 @@ export default function TopNav() {
             <BrandMark size={28} />
             <span className="font-bold tracking-tight text-ink hidden sm:block">NeuroStudy</span>
           </Link>
-          <nav className="flex items-center gap-1">
-            {links.map((l) => {
-              const active = pathname === l.href || pathname.startsWith(l.href + "/");
-              return (
-                <Link
-                  key={l.href}
-                  href={l.href}
-                  className={`rounded-lg px-3 py-2 text-[13px] font-semibold transition-colors ${
-                    active ? "bg-accent-soft text-accent-strong" : "text-muted hover:text-ink hover:bg-inset"
-                  }`}
-                >
-                  {l.label}
-                </Link>
-              );
-            })}
+          <nav aria-label="Main" className="hidden md:flex items-center gap-1">
+            {links.map((l) => (
+              <Link
+                key={l.href}
+                href={l.href}
+                className={`rounded-lg px-3 py-2 text-[13px] font-semibold transition-colors ${
+                  isActive(l.href) ? "bg-accent-soft text-accent-strong" : "text-muted hover:text-ink hover:bg-inset"
+                }`}
+              >
+                {l.label}
+              </Link>
+            ))}
           </nav>
         </div>
         <div className="flex items-center gap-3">
-          <ThemeToggle />
-          <Button variant="quiet" size="sm" onClick={() => logout()}>
-            Sign out
-          </Button>
-          <Link
-            href="/profile"
-            className="grid h-8 w-8 place-items-center rounded-full bg-accent text-on-accent text-[12px] font-bold ring-offset-2 ring-offset-surface hover:ring-2 hover:ring-accent/40 transition-shadow"
-            title={name ? `${name} — view profile` : "View profile"}
-            aria-label="View your profile"
+          <button
+            type="button"
+            onClick={() => setMenuOpen((v) => !v)}
+            aria-expanded={menuOpen}
+            aria-label={menuOpen ? "Close menu" : "Open menu"}
+            className="grid h-8 w-8 place-items-center rounded-lg border border-border bg-surface text-ink-2 hover:text-ink hover:border-border-strong transition-colors md:hidden"
           >
-            {initials}
-          </Link>
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" aria-hidden="true">
+              {menuOpen ? <path d="M6 6l12 12M18 6L6 18" /> : <path d="M3 6h18M3 12h18M3 18h18" />}
+            </svg>
+          </button>
+          <div className="hidden md:flex items-center gap-3">
+            <ThemeToggle />
+            <Button variant="quiet" size="sm" onClick={() => logout()}>
+              Sign out
+            </Button>
+            <Link
+              href="/profile"
+              className="grid h-8 w-8 place-items-center rounded-full bg-accent text-on-accent text-[12px] font-bold ring-offset-2 ring-offset-surface hover:ring-2 hover:ring-accent/40 transition-shadow"
+              title={name ? `${name} — view profile` : "View profile"}
+              aria-label="View your profile"
+            >
+              {initials}
+            </Link>
+          </div>
         </div>
       </div>
+
+      {menuOpen && (
+        <nav aria-label="Main" className="md:hidden border-t border-border bg-surface px-5 py-3 space-y-1 anim-fade">
+          {links.map((l) => (
+            <Link
+              key={l.href}
+              href={l.href}
+              onClick={() => setMenuOpen(false)}
+              className={`block rounded-lg px-3 py-2.5 text-[14px] font-semibold transition-colors ${
+                isActive(l.href) ? "bg-accent-soft text-accent-strong" : "text-ink-2 hover:text-ink hover:bg-inset"
+              }`}
+            >
+              {l.label}
+            </Link>
+          ))}
+          <div className="flex items-center justify-between gap-3 pt-3 mt-2 border-t border-border">
+            <Link
+              href="/profile"
+              onClick={() => setMenuOpen(false)}
+              className="flex items-center gap-2.5 text-[13px] font-semibold text-ink-2 hover:text-ink"
+            >
+              <span className="grid h-7 w-7 place-items-center rounded-full bg-accent text-on-accent text-[11px] font-bold">
+                {initials}
+              </span>
+              Profile
+            </Link>
+            <div className="flex items-center gap-2">
+              <ThemeToggle />
+              <Button variant="quiet" size="sm" onClick={() => logout()}>
+                Sign out
+              </Button>
+            </div>
+          </div>
+        </nav>
+      )}
     </header>
   );
 }

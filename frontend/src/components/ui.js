@@ -41,10 +41,15 @@ const BTN_BASE =
   "focus-visible:outline-offset-2 focus-visible:outline-accent select-none";
 
 const BTN_VARIANTS = {
-  primary: "bg-accent text-on-accent shadow-sm hover:bg-accent-strong",
+  // accent-strong at rest, not accent: white text on plain accent only hits
+  // ~3.8:1 in light mode, under the 4.5:1 text minimum. accent-strong clears
+  // it with room. Hover goes the other way (to the brighter accent) rather
+  // than darker still — a transient hover state gets more contrast leeway
+  // than what's on screen at rest.
+  primary: "bg-accent-strong text-on-accent shadow-sm hover:bg-accent",
   ghost: "bg-surface text-ink-2 border border-border hover:border-border-strong hover:text-ink",
   subtle: "bg-inset text-ink-2 hover:bg-border/60 hover:text-ink",
-  danger: "bg-crit-soft text-crit hover:bg-crit hover:text-white",
+  danger: "bg-crit-soft text-crit-strong hover:bg-crit hover:text-white",
   quiet: "bg-transparent text-muted hover:text-ink hover:bg-inset",
 };
 
@@ -121,10 +126,18 @@ export function Label({ children, className = "" }) {
 }
 
 /* ── Form field + inputs ──────────────────────────────────────── */
-const INPUT =
-  "w-full rounded-xl border border-border-strong bg-inset px-3.5 py-3 text-[15px] text-ink " +
+// Split into "chrome" (color/border/focus, size-independent) and per-size
+// padding/type, so a compact Select can swap in different sizing without
+// fighting the default padding/text-size classes for the same properties —
+// two Tailwind classes that both set e.g. padding-y have no reliable winner
+// based on source order, only one based on Tailwind's own internal stylesheet
+// order, so a compact variant needs its own complete class string rather than
+// an override appended after the default one.
+const INPUT_CHROME =
+  "w-full border border-border-strong bg-inset text-ink " +
   "placeholder:text-muted transition-all focus:outline-none focus:border-accent focus:bg-surface " +
   "focus:ring-[3px] focus:ring-accent/20 disabled:opacity-60 disabled:cursor-not-allowed";
+const INPUT = `${INPUT_CHROME} rounded-xl px-3.5 py-3 text-[15px]`;
 
 export function Field({ label, required, hint, htmlFor, children, className = "" }) {
   return (
@@ -132,7 +145,7 @@ export function Field({ label, required, hint, htmlFor, children, className = ""
       {label && (
         <label htmlFor={htmlFor} className="mb-2 flex items-center gap-1">
           <Label>{label}</Label>
-          {required && <span className="text-crit text-xs leading-none">*</span>}
+          {required && <span className="text-crit-strong text-xs leading-none">*</span>}
         </label>
       )}
       {children}
@@ -145,13 +158,29 @@ export function Input({ className = "", ...props }) {
   return <input className={`${INPUT} ${className}`} {...props} />;
 }
 
-export function Select({ className = "", children, ...props }) {
+// "md" is the standard form-field size (unchanged from before). "sm" is for a
+// select sitting in a toolbar next to compact buttons — e.g. a segmented
+// button group or a "Markers on" toggle — where the full form-field size reads
+// as noticeably oversized next to them.
+//
+// py-2 (not py-1.5, which is what the segmented buttons themselves use) is
+// deliberate: a segmented group's actual height is its border (1px) + its
+// OWN p-0.5 wrapper padding (2px) + a button's py-1.5 (6px) per side, i.e. 2px
+// more per side than the button padding alone. Select has no such wrapper —
+// it's just a bordered box — so its py has to absorb that difference itself
+// (py-1.5 + 2px = py-2) or it sits a few px shorter than a segmented group
+// placed next to it in the same toolbar row, which throws off both controls'
+// vertical centering AND their labels above (ControlGroup bottom-aligns).
+const SELECT_SIZES = {
+  md: `${INPUT} peer appearance-none cursor-pointer pr-9`,
+  sm: `${INPUT_CHROME} rounded-lg px-2.5 py-2 text-[12px] font-semibold peer appearance-none cursor-pointer pr-7`,
+};
+
+export function Select({ className = "", size = "md", children, ...props }) {
+  const small = size === "sm";
   return (
     <div className="relative">
-      <select
-        className={`${INPUT} peer appearance-none cursor-pointer pr-9 ${className}`}
-        {...props}
-      >
+      <select className={`${SELECT_SIZES[size]} ${className}`} {...props}>
         {children}
       </select>
       {/* Native <select> arrows are dropped (appearance-none, for consistent
@@ -162,7 +191,9 @@ export function Select({ className = "", children, ...props }) {
         aria-hidden="true"
         viewBox="0 0 20 20"
         fill="none"
-        className="pointer-events-none absolute right-3.5 top-1/2 h-4 w-4 -translate-y-1/2 text-muted peer-disabled:opacity-50"
+        className={`pointer-events-none absolute top-1/2 -translate-y-1/2 text-muted peer-disabled:opacity-50 ${
+          small ? "right-2.5 h-3.5 w-3.5" : "right-3.5 h-4 w-4"
+        }`}
       >
         <path d="M5.5 7.5 10 12l4.5-4.5" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" />
       </svg>
@@ -175,12 +206,17 @@ export function Textarea({ className = "", ...props }) {
 }
 
 /* ── Pill / status badge ──────────────────────────────────────── */
+// good/warn/crit text on their own -soft background hit only ~2.8-3.3:1 in
+// light mode — the -strong variants exist for exactly this (text on a soft
+// tint), same pattern accent already used before this file had good/warn/crit
+// equivalents. The dot below stays the plain tone: a small swatch is a
+// graphical object (3:1 floor), not text, so it doesn't need the same fix.
 const PILL_TONES = {
   neutral: "bg-inset text-ink-2",
   accent: "bg-accent-soft text-accent-strong",
-  good: "bg-good-soft text-good",
-  warn: "bg-warn-soft text-warn",
-  crit: "bg-crit-soft text-crit",
+  good: "bg-good-soft text-good-strong",
+  warn: "bg-warn-soft text-warn-strong",
+  crit: "bg-crit-soft text-crit-strong",
 };
 
 export function Pill({ tone = "neutral", dot = false, live = false, className = "", children }) {
@@ -214,9 +250,9 @@ export function StatCard({ label, value, unit, hint, className = "" }) {
 
 /* ── Alert (inline feedback) ──────────────────────────────────── */
 const ALERT_TONES = {
-  good: "bg-good-soft text-good border-good/25",
-  crit: "bg-crit-soft text-crit border-crit/25",
-  warn: "bg-warn-soft text-warn border-warn/25",
+  good: "bg-good-soft text-good-strong border-good/25",
+  crit: "bg-crit-soft text-crit-strong border-crit/25",
+  warn: "bg-warn-soft text-warn-strong border-warn/25",
   accent: "bg-accent-soft text-accent-strong border-accent/25",
 };
 

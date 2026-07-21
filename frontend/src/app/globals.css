@@ -14,17 +14,24 @@
   --border-strong: #d4dee3;
   --ink: #33434e;
   --ink-2: #5f7280;
-  --muted: #8fa0ab;
+  /* #63707a, not the brighter teal-gray the surface/ground/inset pull toward —
+     this is the floor for 4.5:1 text contrast against the darkest background
+     (inset) it's actually used on (Labels, hints, timestamps are often small
+     text, so the AA text minimum applies, not the looser 3:1 graphical one). */
+  --muted: #63707a;
   --accent: #2f8f9b;
-  --accent-strong: #26808c;
+  --accent-strong: #22737e;
   --accent-soft: #e6f3f5;
   --on-accent: #ffffff;
   --good: #1f9d73;
   --good-soft: #e6f3ee;
+  --good-strong: #166e51;
   --warn: #bd821f;
   --warn-soft: #f6ecd8;
+  --warn-strong: #845b16;
   --crit: #d15b5b;
   --crit-soft: #f8e6e6;
+  --crit-strong: #924040;
   /* EEG channel identity — CVD-validated (light) */
   --ch-fp1: #0693a8;
   --ch-fp2: #3f5bd9;
@@ -64,10 +71,13 @@
     --on-accent: #04222a;
     --good: #35b98a;
     --good-soft: #10281f;
+    --good-strong: #35b98a;
     --warn: #d69a38;
     --warn-soft: #2a2113;
+    --warn-strong: #d69a38;
     --crit: #e36b6b;
     --crit-soft: #2c1616;
+    --crit-strong: #e36b6b;
     --ch-fp1: #12a0b4;
     --ch-fp2: #6072ce;
     --ch-t3: #c07e1e;
@@ -89,9 +99,11 @@
 
 :root[data-theme="light"] {
   --ground: #f5f8f9; --surface: #fff; --inset: #eef3f5; --border: #e5ebee; --border-strong: #d4dee3;
-  --ink: #33434e; --ink-2: #5f7280; --muted: #8fa0ab;
-  --accent: #2f8f9b; --accent-strong: #26808c; --accent-soft: #e6f3f5; --on-accent: #fff;
-  --good: #1f9d73; --good-soft: #e6f3ee; --warn: #bd821f; --warn-soft: #f6ecd8; --crit: #d15b5b; --crit-soft: #f8e6e6;
+  --ink: #33434e; --ink-2: #5f7280; --muted: #63707a;
+  --accent: #2f8f9b; --accent-strong: #22737e; --accent-soft: #e6f3f5; --on-accent: #fff;
+  --good: #1f9d73; --good-soft: #e6f3ee; --good-strong: #166e51;
+  --warn: #bd821f; --warn-soft: #f6ecd8; --warn-strong: #845b16;
+  --crit: #d15b5b; --crit-soft: #f8e6e6; --crit-strong: #924040;
   --ch-fp1: #0693a8; --ch-fp2: #3f5bd9; --ch-t3: #c7791a; --ch-t4: #c24c6b;
   --band-delta: #2a78d6; --band-theta: #1baf7a; --band-alpha: #eda100; --band-beta: #4a3aa7; --band-gamma: #e34948;
   --ms-attention: #2a78d6; --ms-relaxation: #1baf7a; --ms-workload: #eb6834;
@@ -101,7 +113,9 @@
   --ground: #0a0f14; --surface: #121b22; --inset: #0d151b; --border: #223038; --border-strong: #2e3f49;
   --ink: #e8eff4; --ink-2: #aabac6; --muted: #7c8f9b;
   --accent: #2aa7b8; --accent-strong: #4fc2d1; --accent-soft: #103138; --on-accent: #04222a;
-  --good: #35b98a; --good-soft: #10281f; --warn: #d69a38; --warn-soft: #2a2113; --crit: #e36b6b; --crit-soft: #2c1616;
+  --good: #35b98a; --good-soft: #10281f; --good-strong: #35b98a;
+  --warn: #d69a38; --warn-soft: #2a2113; --warn-strong: #d69a38;
+  --crit: #e36b6b; --crit-soft: #2c1616; --crit-strong: #e36b6b;
   --ch-fp1: #12a0b4; --ch-fp2: #6072ce; --ch-t3: #c07e1e; --ch-t4: #cf6383;
   --band-delta: #3987e5; --band-theta: #199e70; --band-alpha: #c98500; --band-beta: #9085e9; --band-gamma: #e66767;
   --ms-attention: #3987e5; --ms-relaxation: #199e70; --ms-workload: #d95926;
@@ -126,10 +140,13 @@
   --color-on-accent: var(--on-accent);
   --color-good: var(--good);
   --color-good-soft: var(--good-soft);
+  --color-good-strong: var(--good-strong);
   --color-warn: var(--warn);
   --color-warn-soft: var(--warn-soft);
+  --color-warn-strong: var(--warn-strong);
   --color-crit: var(--crit);
   --color-crit-soft: var(--crit-soft);
+  --color-crit-strong: var(--crit-strong);
   --color-ch-fp1: var(--ch-fp1);
   --color-ch-fp2: var(--ch-fp2);
   --color-ch-t3: var(--ch-t3);

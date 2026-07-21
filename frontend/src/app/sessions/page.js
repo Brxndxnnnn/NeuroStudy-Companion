@@ -182,7 +182,7 @@ export default function SessionsPage() {
                   </tr>
                 ) : error ? (
                   <tr>
-                    <td colSpan="5" className="px-6 py-12 text-center text-crit font-medium">
+                    <td colSpan="5" className="px-6 py-12 text-center text-crit-strong font-medium">
                       {error}
                     </td>
                   </tr>
