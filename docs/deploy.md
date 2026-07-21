@@ -1,5 +1,14 @@
 # Deploying to the droplet
 
+**Normal path**: use the GitHub Actions workflow instead of the manual steps below.
+Actions tab -> "Deploy to production" -> "Run workflow", branch `main` (or a `v*` tag
+to roll back to a previous release). It SSHes in, rebuilds, restarts nginx, and runs
+health checks automatically. Deploys never happen automatically on merge — this has to
+be triggered by hand every time, on purpose.
+
+The manual steps below are what that workflow does under the hood — useful if Actions
+itself is unavailable, or you're debugging a failed run.
+
 The droplet is `139.59.126.77`. The repo lives at `/opt/NeuroStudy-Companion` and the
 whole stack runs from Docker Compose. Anyone with an authorised SSH key can deploy —
 this does not need to go through one person.
