@@ -5,27 +5,17 @@ const BASE_URL = "/api"
 // TOKEN CACHING (in memory)
 let accessToken = null;
 
-// Helper to set token in memory + localStorage
+// Helper to set the token for the current browser session only.
 export function setAuthToken(token) {
   accessToken = token;
-  if (token) {
-    localStorage.setItem("token", token);
-  } else {
-    localStorage.removeItem("token");
-  }
-}
-
-// Load token from localStorage on module initialization
-if (typeof window !== "undefined") {
-  const stored = localStorage.getItem("token");
-  if (stored) accessToken = stored;
 }
 
 
 // CORE fetchWithAuth (with network error handling and token refresh)
 export async function fetchWithAuth(url, options = {}) {
-  // Use cached token if available, otherwise read from localStorage
-  let token = accessToken || localStorage.getItem("token");
+  // Access tokens intentionally live only in memory. On a full reload, the
+  // HttpOnly refresh cookie supplies a fresh one when needed.
+  let token = accessToken;
 
   const headers = {
     "Content-Type": "application/json",
@@ -62,7 +52,7 @@ export async function fetchWithAuth(url, options = {}) {
     if (refreshRes.ok) {
       const data = await refreshRes.json();
       const newToken = data.accessToken;
-      // Update both memory and localStorage
+      // Update the in-memory token before retrying the original request.
       setAuthToken(newToken);
       token = newToken;
 
@@ -74,9 +64,7 @@ export async function fetchWithAuth(url, options = {}) {
     }
   } catch (error) {
     // 4. Refresh failed – user is truly unauthenticated
-    setAuthToken(null); // clears both
-    localStorage.removeItem("userRole");
-    window.location.href = "/login";
+    setAuthToken(null);
     return Promise.reject(error);
   }
 }
@@ -98,8 +86,6 @@ export async function logout() {
     // ignore network errors on logout
   }
   setAuthToken(null);
-  localStorage.removeItem("userRole");
-  window.location.href = "/login";
 }
 
 export async function getCurrentUser() {

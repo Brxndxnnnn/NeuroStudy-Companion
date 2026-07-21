@@ -1,20 +1,22 @@
 "use client";
 import { useState, useEffect } from "react";
 import { useRouter } from "next/navigation";
-import { pairSession, logout } from "@/utils/api";
+import { pairSession } from "@/utils/api";
 import { SessionTopBar } from "@/components/TopNav";
+import { useAuth } from "@/context/AuthContext";
 import { Button, Label, Alert } from "@/components/ui";
 
 export default function SessionSetup() {
   const router = useRouter();
+  const { isAuthenticated, isLoading: isAuthLoading, signOut } = useAuth();
   const [pairingCode, setPairingCode] = useState("");
   const [isLoading, setIsLoading] = useState(false);
   const [feedback, setFeedback] = useState({ type: "", message: "" });
   const [selectedClient, setSelectedClient] = useState({ id: "", name: "" });
 
   useEffect(() => {
-    const token = localStorage.getItem("token");
-    if (!token) {
+    if (isAuthLoading) return;
+    if (!isAuthenticated) {
       router.push("/login");
       return;
     }
@@ -25,7 +27,12 @@ export default function SessionSetup() {
     } else {
       setSelectedClient({ id: clientId, name: clientName });
     }
-  }, [router]);
+  }, [isAuthenticated, isAuthLoading, router]);
+
+  const handleSignOut = async () => {
+    await signOut();
+    router.replace("/login");
+  };
 
   const handleVerify = async (e) => {
     e.preventDefault();
@@ -62,7 +69,7 @@ export default function SessionSetup() {
         onBack={() => router.push("/history")}
         backLabel="Change client"
         right={
-          <Button variant="quiet" size="sm" onClick={() => logout()}>
+          <Button variant="quiet" size="sm" onClick={handleSignOut}>
             Sign out
           </Button>
         }

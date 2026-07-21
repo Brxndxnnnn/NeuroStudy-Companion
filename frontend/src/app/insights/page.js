@@ -1,6 +1,7 @@
 "use client";
 import { useState, useEffect } from "react";
 import { useRouter } from "next/navigation";
+import { useAuth } from "@/context/AuthContext";
 import {
   getPhase1Status,
   getPhase1Model,
@@ -457,6 +458,7 @@ function HowItWorksModal({ onClose, trained, readinessReady, dataOasisLabelled, 
 
 export default function InsightsPage() {
   const router = useRouter();
+  const { isAuthenticated, isLoading: isAuthLoading } = useAuth();
   const [status, setStatus] = useState(null);
   const [model, setModel] = useState(null);
   const [sessions, setSessions] = useState([]);
@@ -610,14 +612,14 @@ export default function InsightsPage() {
   };
 
   useEffect(() => {
-    const token = localStorage.getItem("token");
-    if (!token) {
+    if (isAuthLoading) return;
+    if (!isAuthenticated) {
       router.push("/login");
       return;
     }
     load();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+  }, [isAuthenticated, isAuthLoading, router]);
 
   const data = status?.data || {};
   const readiness = status?.readiness || {};
