@@ -87,6 +87,9 @@ jobs:
           DB_HOST: localhost
           DB_PORT: "5432"
           DB_NAME: ci_dummy
+          # Matches the Dockerfile's own PYTHONPATH=/app — "from app.x import
+          # y" only resolves with the ml_service root on the path.
+          PYTHONPATH: "."
         run: pytest app/tests/ --ignore=app/tests/test_features.py --ignore=app/tests/test_preprocessing.py -v
 
       - name: Docker build check
