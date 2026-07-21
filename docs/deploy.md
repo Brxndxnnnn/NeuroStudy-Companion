@@ -67,6 +67,21 @@ Velopack release files, served by nginx as `/bridge-updates/`. It is populated f
 dev machine via `neuuro_bridge/packaging/publish.ps1`, not by deploys — a deploy's
 `git reset --hard` never touches it, and it must never be moved into the repo tree.
 
+## Migrations
+
+`db/migrate.sh` applies anything in `db/migrations/*.sql` not yet recorded in the
+`schema_migrations` table, in filename order, and is idempotent — safe to run every
+deploy. The GitHub Actions deploy workflow runs it automatically, after `git reset`
+and before the app containers restart, so schema changes are always in place before
+the code that depends on them starts.
+
+`.sh` migrations (like `002_create_bridge_user.sh`) are NOT auto-applied — they rely
+on env vars only present in postgres's own `docker-entrypoint-initdb.d` bootstrap and
+aren't safely re-runnable (`CREATE ROLE` has no `IF NOT EXISTS`). The script flags
+these instead of touching them; apply and record any new one by hand.
+
+To run it locally: `docker compose up -d db && ./db/migrate.sh`.
+
 ## Rebuilds
 
 `ml_service` and `backend` are **bind-mounted** (`./ml_service:/app`, `./backend/src:/app/src`),
