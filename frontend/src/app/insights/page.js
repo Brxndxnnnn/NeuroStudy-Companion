@@ -14,6 +14,7 @@ import { buildEventWindows } from "@/utils/events";
 import TopNav from "@/components/TopNav";
 import TimeSeriesChart from "@/components/TimeSeriesChart";
 import AffectQuadrantChart from "@/components/AffectQuadrantChart";
+import StimulusModal from "@/components/StimulusModal";
 import {
   MID,
   WEAK_CONFIDENCE,
@@ -465,6 +466,7 @@ export default function InsightsPage() {
   const [predictions, setPredictions] = useState(null);
   const [predLoading, setPredLoading] = useState(false);
   const [sessionEvents, setSessionEvents] = useState([]);
+  const [selectedEvent, setSelectedEvent] = useState(null);
   const [howItWorksOpen, setHowItWorksOpen] = useState(false);
   const [trainPanelOpen, setTrainPanelOpen] = useState(false);
   const [clientSessions, setClientSessions] = useState(null);
@@ -506,6 +508,7 @@ export default function InsightsPage() {
     setSelectedSession(sessionId);
     setPredictions(null);
     setSessionEvents([]);
+    setSelectedEvent(null);
     if (!sessionId) return;
     setPredLoading(true);
     try {
@@ -555,6 +558,7 @@ export default function InsightsPage() {
     setSelectedSession("");
     setPredictions(null);
     setSessionEvents([]);
+    setSelectedEvent(null);
     setTrainPanelOpen(false);
     setTrainResult(null);
     setClientSessions(null);
@@ -1007,7 +1011,9 @@ export default function InsightsPage() {
                         height={150}
                         annotate={annotateEmotion}
                         linkPanels
+                        perPanelEventLabels
                         events={sessionEvents}
+                        onEventClick={setSelectedEvent}
                         panels={[
                           { label: "Valence", title: "Valence (pleasantness) · predicted vs actual", unit: "", min: 1, max: 7,
                             series: [
@@ -1073,6 +1079,10 @@ export default function InsightsPage() {
           )}
         </PageContainer>
       </main>
+
+      {selectedEvent != null && sessionEvents[selectedEvent] && (
+        <StimulusModal event={sessionEvents[selectedEvent]} onClose={() => setSelectedEvent(null)} />
+      )}
     </>
   );
 }

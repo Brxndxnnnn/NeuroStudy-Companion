@@ -38,6 +38,15 @@ const NO_EVENTS = [];
  *               for panels that are independent measures (per-channel amplitude,
  *               heart rate vs SpO2, …) merging just floods the tooltip with
  *               unrelated rows.
+ *   perPanelEventLabels  when true, every panel prints its own hover label for
+ *               a stimulus band under the cursor (default false — only the
+ *               top panel does). The default suits repeated-measure panels
+ *               (four identical channel strips): showing the same event name
+ *               on all four would just be noise. Turn this on when the panels
+ *               are genuinely different measures (e.g. valence vs arousal) —
+ *               there each one needs to answer "what was shown here?" on its
+ *               own, since a viewer hovering the second panel never sees the
+ *               first panel's label.
  *   height    px per panel (default 190)
  */
 export default function TimeSeriesChart({
@@ -48,6 +57,7 @@ export default function TimeSeriesChart({
   onEventClick,
   annotate,
   linkPanels = false,
+  perPanelEventLabels = false,
   height = 190,
 }) {
   const elRef = useRef(null);
@@ -183,8 +193,11 @@ export default function TimeSeriesChart({
         const color = resolve(ser.color);
         series.push({
           // Bands attach to one series per grid (they'd stack translucency
-          // otherwise); the hover label only prints on the top panel.
-          markArea: si === 0 ? buildMarkArea(i === 0) : undefined,
+          // otherwise); the hover label prints on every panel only when the
+          // caller says the panels are distinct measures (perPanelEventLabels)
+          // — otherwise just the top one, since repeated channel strips would
+          // print the same name four times over.
+          markArea: si === 0 ? buildMarkArea(perPanelEventLabels || i === 0) : undefined,
           name: ser.label,
           type: "line",
           xAxisIndex: i,
@@ -338,7 +351,7 @@ export default function TimeSeriesChart({
       chart.dispose();
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [samples, panels, height, events, linkPanels]);
+  }, [samples, panels, height, events, linkPanels, perPanelEventLabels]);
 
   const showLegend = panels.some((p) => p.series.length > 1);
   const titledPanels = panels.filter((p) => p.title).length;
