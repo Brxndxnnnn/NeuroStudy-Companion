@@ -1,0 +1,98 @@
+name: Deploy bridge update
+
+# Manual-trigger only, like the production web deploy. Packs the C# WPF bridge with
+# Velopack against the CURRENT feed (so delta packages build), then publishes the
+# release set to the droplet's /bridge-updates feed. Installed bridges pick up the
+# new version on their next launch.
+#
+# IMPORTANT: bump <Version> in neuuro_bridge/NeuuroBridge.Wpf/NeuuroBridge.Wpf.csproj
+# first. Velopack decides whether to offer an update by comparing version NUMBERS, not
+# by whether files changed, so a run without a version bump reaches no client. This
+# workflow refuses to publish a version that is already on the feed, so a forgotten
+# bump fails loudly here instead of silently doing nothing.
+#
+# Runs on a Windows runner because the .NET Framework 4.8 build and the vpk tool are
+# Windows-only. Reuses the same droplet SSH secrets as deploy-production.yml.
+
+on:
+  workflow_dispatch: {}
+
+concurrency:
+  group: bridge-deploy
+  cancel-in-progress: false
+
+env:
+  FEED_URL: https://clinics.axonview.sg/bridge-updates/
+  RELEASES_DIR: neuuro_bridge/packaging/releases
+
+jobs:
+  deploy-bridge:
+    name: Pack and publish the bridge
+    runs-on: windows-latest
+    environment: production
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: "8.0"
+
+      - name: Install Velopack CLI
+        shell: pwsh
+        run: |
+          dotnet tool install -g vpk
+          "$env:USERPROFILE\.dotnet\tools" >> $env:GITHUB_PATH
+
+      - name: Read bridge version from csproj
+        id: ver
+        shell: pwsh
+        run: |
+          $csproj = "neuuro_bridge/NeuuroBridge.Wpf/NeuuroBridge.Wpf.csproj"
+          $m = Select-String -Path $csproj -Pattern '<Version>([^<]+)</Version>'
+          if (-not $m) { throw "No <Version> found in $csproj" }
+          $version = $m.Matches[0].Groups[1].Value
+          Write-Host "Bridge version: $version"
+          "version=$version" >> $env:GITHUB_OUTPUT
+
+      - name: Refuse to republish an existing version
+        shell: pwsh
+        run: |
+          $version = "${{ steps.ver.outputs.version }}"
+          try {
+            $feed = (Invoke-WebRequest -UseBasicParsing "$env:FEED_URL/releases.win.json").Content
+          } catch {
+            Write-Host "No existing feed found (first release) - continuing."
+            $feed = ""
+          }
+          if ($feed -match [regex]::Escape('"' + $version + '"')) {
+            throw "Version $version is already on the feed. Bump <Version> in NeuuroBridge.Wpf.csproj before deploying."
+          }
+          Write-Host "Version $version is new - OK to publish."
+
+      - name: Download current feed so deltas build against it
+        shell: pwsh
+        continue-on-error: true   # the first-ever release has nothing to download
+        run: |
+          New-Item -ItemType Directory -Force -Path "$env:RELEASES_DIR" | Out-Null
+          vpk download http --url "$env:FEED_URL" -o "$env:RELEASES_DIR"
+
+      - name: Build and pack the release
+        shell: pwsh
+        run: powershell -ExecutionPolicy Bypass -File neuuro_bridge/packaging/pack.ps1
+
+      - name: Publish the release set to the droplet feed
+        uses: appleboy/scp-action@v0.1.7
+        with:
+          host: ${{ secrets.DROPLET_HOST }}
+          username: ${{ secrets.DROPLET_USER }}
+          key: ${{ secrets.DROPLET_SSH_KEY }}
+          source: "neuuro_bridge/packaging/releases/*"
+          target: "/var/bridge-updates"
+          strip_components: 3
+          overwrite: true
+
+      - name: Summary
+        shell: pwsh
+        run: Write-Host "Published bridge $($env:VERSION) to $env:FEED_URL"
+        env:
+          VERSION: ${{ steps.ver.outputs.version }}
