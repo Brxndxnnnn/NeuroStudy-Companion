@@ -1,8 +1,9 @@
 "use client";
 import { useState, useEffect } from "react";
 import { useRouter } from "next/navigation";
-import { getCurrentUser, logout } from "@/utils/api";
+import { getCurrentUser } from "@/utils/api";
 import TopNav from "@/components/TopNav";
+import { useAuth } from "@/context/AuthContext";
 import { PageContainer, PageHeading, Card, Button, Label, Pill, Spinner } from "@/components/ui";
 
 function roleLabel(role) {
@@ -24,13 +25,14 @@ function DetailRow({ label, children }) {
 
 export default function ProfilePage() {
   const router = useRouter();
+  const { user: authenticatedUser, isLoading: isAuthLoading, isAuthenticated, signOut } = useAuth();
   const [user, setUser] = useState(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
 
   useEffect(() => {
-    const token = localStorage.getItem("token");
-    if (!token) {
+    if (isAuthLoading) return;
+    if (!isAuthenticated) {
       router.push("/login");
       return;
     }
@@ -44,15 +46,15 @@ export default function ProfilePage() {
         } else {
           // Fall back to whatever we stored at login so the page is still useful offline.
           setUser({
-            display_name: localStorage.getItem("userName") || "",
-            role: localStorage.getItem("userRole") || "",
+            display_name: authenticatedUser?.display_name || "",
+            role: authenticatedUser?.role || "",
           });
           setError("Showing saved details — could not reach the server for the latest profile.");
         }
       } catch (err) {
         setUser({
-          display_name: localStorage.getItem("userName") || "",
-          role: localStorage.getItem("userRole") || "",
+          display_name: authenticatedUser?.display_name || "",
+          role: authenticatedUser?.role || "",
         });
         setError("Showing saved details — could not reach the server for the latest profile.");
       } finally {
@@ -60,7 +62,12 @@ export default function ProfilePage() {
       }
     };
     load();
-  }, [router]);
+  }, [authenticatedUser, isAuthenticated, isAuthLoading, router]);
+
+  const handleSignOut = async () => {
+    await signOut();
+    router.replace("/login");
+  };
 
   const name = user?.display_name || "Unnamed technician";
   const initials = (user?.display_name || "NS")
@@ -114,7 +121,7 @@ export default function ProfilePage() {
 
             <div className="flex items-center justify-between gap-4">
               <Button variant="ghost" onClick={() => router.push("/history")}>← Back to dashboard</Button>
-              <Button variant="danger" onClick={() => logout()}>Sign out</Button>
+              <Button variant="danger" onClick={handleSignOut}>Sign out</Button>
             </div>
           </>
         )}

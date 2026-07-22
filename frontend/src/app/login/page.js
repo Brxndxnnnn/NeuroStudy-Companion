@@ -2,11 +2,13 @@
 import { useState } from "react";
 import { useRouter } from "next/navigation";
 import { login } from "@/utils/api";
+import { useAuth } from "@/context/AuthContext";
 import { BrandMark, Button, Field, Input, Alert } from "@/components/ui";
 import ThemeToggle from "@/components/ThemeToggle";
 
 export default function LoginPage() {
   const router = useRouter();
+  const { signIn } = useAuth();
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [error, setError] = useState("");
@@ -26,9 +28,7 @@ export default function LoginPage() {
         const token = data.accessToken;
         const userRole = data.user.role;
 
-        localStorage.setItem("token", token);
-        localStorage.setItem("userRole", userRole);
-        if (data.user.display_name) localStorage.setItem("userName", data.user.display_name);
+        signIn({ accessToken: token, user: data.user });
 
         if (userRole === "admin" || userRole === "superadmin") {
           router.push("/admin");
