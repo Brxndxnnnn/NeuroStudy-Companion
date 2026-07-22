@@ -139,10 +139,30 @@ To exercise the activation flow without the real backend:
 
 ## Releasing a bridge update
 
-One-time: `dotnet tool install -g vpk`. Then, with the fix merged to `main`:
+**Always bump the version first.** Velopack decides whether to offer an update by
+comparing **version numbers**, not by whether files changed. Edit
+`<Version>` in
+[`neuuro_bridge/NeuuroBridge.Wpf/NeuuroBridge.Wpf.csproj`](neuuro_bridge/NeuuroBridge.Wpf/NeuuroBridge.Wpf.csproj)
+and raise it (e.g. `1.0.2` → `1.0.3`) for **every** release. A release that reuses an
+existing version reaches no client, and code changed without a bump is silently never
+delivered.
+
+### Option A — GitHub Actions (recommended)
+
+With the version bumped and merged, go to the repo's **Actions** tab, pick
+**"Deploy bridge update"**, and **Run workflow**. It packs the bridge against the
+current feed (so deltas build) and publishes the release set to the droplet, the same
+way the web services deploy. The workflow **refuses to publish a version that is
+already on the feed**, so a forgotten bump fails there instead of shipping nothing.
+Defined in [`.github/workflows/deploy-bridge.yml`](.github/workflows/deploy-bridge.yml);
+it reuses the same `DROPLET_HOST` / `DROPLET_USER` / `DROPLET_SSH_KEY` secrets as the
+production deploy.
+
+### Option B — manual scripts (fallback)
+
+One-time: `dotnet tool install -g vpk`. Then, with the version bumped:
 
 ```powershell
-# 1. bump <Version> in neuuro_bridge\NeuuroBridge.Wpf\NeuuroBridge.Wpf.csproj
 powershell -ExecutionPolicy Bypass -File neuuro_bridge\packaging\pack.ps1     # build + vpk pack
 powershell -ExecutionPolicy Bypass -File neuuro_bridge\packaging\publish.ps1  # scp to the droplet feed
 ```
