@@ -1,10 +1,10 @@
 "use client";
-import { useEffect, useState } from "react";
+import { useState } from "react";
 import { usePathname } from "next/navigation";
 import Link from "next/link";
 import { BrandMark, Button } from "./ui";
 import ThemeToggle from "./ThemeToggle";
-import { logout } from "@/utils/api";
+import { useAuth } from "@/context/AuthContext";
 
 const CLINICIAN_LINKS = [
   { href: "/history", label: "Clients" },
@@ -26,15 +26,15 @@ const ADMIN_LINKS = [
  */
 export default function TopNav() {
   const pathname = usePathname();
-  const [name, setName] = useState("");
-  const [links, setLinks] = useState(CLINICIAN_LINKS);
   const [menuOpen, setMenuOpen] = useState(false);
+  const { user, signOut } = useAuth();
+  const name = user?.display_name || user?.role || "";
+  const links = user?.role === "admin" || user?.role === "superadmin" ? ADMIN_LINKS : CLINICIAN_LINKS;
 
-  useEffect(() => {
-    const role = localStorage.getItem("userRole");
-    setLinks(role === "admin" || role === "superadmin" ? ADMIN_LINKS : CLINICIAN_LINKS);
-    setName(localStorage.getItem("userName") || localStorage.getItem("userRole") || "");
-  }, []);
+  const handleSignOut = async () => {
+    await signOut();
+    window.location.assign("/login");
+  };
 
   const initials = (name || "NS")
     .split(" ")
@@ -81,7 +81,7 @@ export default function TopNav() {
           </button>
           <div className="hidden md:flex items-center gap-3">
             <ThemeToggle />
-            <Button variant="quiet" size="sm" onClick={() => logout()}>
+            <Button variant="quiet" size="sm" onClick={handleSignOut}>
               Sign out
             </Button>
             <Link
@@ -123,7 +123,7 @@ export default function TopNav() {
             </Link>
             <div className="flex items-center gap-2">
               <ThemeToggle />
-              <Button variant="quiet" size="sm" onClick={() => logout()}>
+              <Button variant="quiet" size="sm" onClick={handleSignOut}>
                 Sign out
               </Button>
             </div>

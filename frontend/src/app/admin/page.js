@@ -2,6 +2,7 @@
 import { useState, useEffect } from "react";
 import { useRouter } from "next/navigation";
 import TopNav from "@/components/TopNav";
+import { useAuth } from "@/context/AuthContext";
 import {
   createUser,
   deleteUser,
@@ -43,6 +44,7 @@ function TabButton({ id, activeTab, onSelect, children }) {
 
 export default function AdminDashboard() {
   const router = useRouter();
+  const { isAuthenticated, isLoading: isAuthLoading } = useAuth();
 
   const [activeTab, setActiveTab] = useState("overview");
   const [users, setUsers] = useState([]);
@@ -146,15 +148,15 @@ export default function AdminDashboard() {
   };
 
   useEffect(() => {
-    const token = localStorage.getItem("token");
-    if (!token) {
+    if (isAuthLoading) return;
+    if (!isAuthenticated) {
       router.push("/login");
     } else {
       fetchUsers();
       fetchClinicOptions();
       fetchRoles();
     }
-  }, [router]);
+  }, [isAuthenticated, isAuthLoading, router]);
 
   useEffect(() => {
     if (activeTab === "database") fetchDatabaseAccess();

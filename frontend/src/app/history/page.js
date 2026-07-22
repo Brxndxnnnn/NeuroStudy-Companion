@@ -2,6 +2,7 @@
 import { useState, useEffect, useMemo } from "react";
 import { useRouter } from "next/navigation";
 import { getClients, createClient } from "@/utils/api";
+import { useAuth } from "@/context/AuthContext";
 import { Toaster, toast } from "react-hot-toast";
 import TopNav from "@/components/TopNav";
 import {
@@ -23,6 +24,7 @@ const RACE_OPTIONS = ["Chinese", "Malay", "Indian", "Caucasian", "Eurasian", "Ot
 
 export default function ClinicalDashboard() {
   const router = useRouter();
+  const { user } = useAuth();
   // Captured once instead of read fresh (Date.now()) inside calculateAge, which
   // is called during render — reading the wall clock there is an impure call.
   const [now] = useState(() => Date.now());
@@ -40,12 +42,7 @@ export default function ClinicalDashboard() {
   const [customRace, setCustomRace] = useState("");
   const [newNotes, setNewNotes] = useState("");
   const [submitting, setSubmitting] = useState(false);
-  const [greetName, setGreetName] = useState("");
-
-  useEffect(() => {
-    const n = localStorage.getItem("userName") || "";
-    setGreetName(n.split(" ")[0]);
-  }, []);
+  const greetName = user?.display_name?.split(" ")[0] || "";
 
   const greeting = () => {
     const h = new Date().getHours();
