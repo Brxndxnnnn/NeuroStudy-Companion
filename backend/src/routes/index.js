@@ -12,6 +12,7 @@ import mlRouter from './ml.routes.js'
 import authenticate from '../middleware/authenticate.js'
 import dbContext from '../middleware/dbContext.js'
 import clinicController from '../controllers/clinic.controller.js'
+import eventsController from '../controllers/event.controller.js'
 import { activationLimiter, authenticatedApiLimiter } from '../middleware/rateLimiters.js'
 
 const router = Router()
@@ -47,7 +48,8 @@ router.post(
     activationLimiter,
     clinicController.activateClinicDatabaseAccess
 )
-router.get('/health', async (req, res) => res.json({ status: 'ok' }))
+router.get('/time', eventsController.getServerTime)
+router.get('/health', async (req, res) => res.json({ status: 'ok', timestamp: new Date().toISOString() }))
 router.use('/auth', authRoutes)
 // Everything below this line will run through `authenticate` and `authenticatedApiLimiter`
 router.use(authenticate)
