@@ -130,6 +130,10 @@ export async function getCurrentUser() {
   return res;
 }
 
+export async function getServerTime() {
+  return fetch(`${BASE_URL}/time`, { method: "GET", cache: "no-store" });
+}
+
 // IMAGES
 export async function getImageCategories() {
   const res = await fetchWithAuth(`${BASE_URL}/images/categories`);
@@ -356,9 +360,10 @@ export async function createEvent(sessionId, payload) {
   });
   return res;
 }
-export async function hideEvent(eventId) {
+export async function hideEvent(eventId, occurredAt) {
   const res = await fetchWithAuth(`${BASE_URL}/events/${eventId}/hide`, {
     method: "PATCH",
+    body: JSON.stringify({ occurred_at: occurredAt }),
   });
   return res;
 }

@@ -25,10 +25,12 @@ const router = Router()
  *         application/json:
  *           schema:
  *             type: object
+ *             required: [session_id, occurred_at]
  *             properties:
  *               session_id: { type: string, format: uuid }
  *               image_id: { type: string, format: uuid }
  *               question_id: { type: string, format: uuid }
+ *               occurred_at: { type: string, format: date-time, description: Timestamp captured at the stimulus transition. }
  *     responses:
  *       201:
  *         description: Event created successfully
@@ -63,6 +65,15 @@ router.post(
  *         schema:
  *           type: string
  *           format: uuid
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required: [occurred_at]
+ *             properties:
+ *               occurred_at: { type: string, format: date-time, description: Timestamp captured at the stimulus transition. }
  *     responses:
  *       200:
  *         description: Event updated successfully
