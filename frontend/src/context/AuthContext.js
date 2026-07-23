@@ -4,11 +4,43 @@ import { createContext, useContext, useEffect, useRef, useState } from "react";
 import { getCurrentUser, logout, setAuthToken } from "@/utils/api";
 
 const AuthContext = createContext(null);
+const AUTH_CHANNEL_NAME = "neurostudy-auth"
+const LOGOUT_MESSAGE = "logout"
 
 export function AuthProvider({ children }) {
   const [user, setUser] = useState(null);
   const [isLoading, setIsLoading] = useState(true);
   const sessionVersion = useRef(0);
+  const channelRef = useRef(null)
+
+  const clearLocalSession = () => {
+    sessionVersion.current += 1
+    setAuthToken(null)
+    setUser(null)
+    setIsLoading(false)
+  }
+
+  useEffect(() => {
+    if (!("BroadcastChannel" in window))
+      return
+
+    const channel = new BroadcastChannel(AUTH_CHANNEL_NAME)
+    channelRef.current = channel
+
+    channel.onmessage = event => {
+      if (event.data?.type !== LOGOUT_MESSAGE)
+        return
+
+      clearLocalSession()
+      window.location.assign("/login")
+    }
+
+    return () => {
+      channel.close()
+      channelRef.current = null
+    }
+  }, [])
+
 
   useEffect(() => {
     let active = true;
@@ -39,12 +71,14 @@ export function AuthProvider({ children }) {
   };
 
   const signOut = async () => {
-    sessionVersion.current += 1;
-    setUser(null);
+    sessionVersion.current += 1
+    setUser(null)
+    setIsLoading(false)
     try {
       await logout();
     } finally {
-      setAuthToken(null);
+      setAuthToken(null)
+      channelRef.current?.postMessage({ type: LOGOUT_MESSAGE })
     }
   };
 

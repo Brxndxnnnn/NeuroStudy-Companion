@@ -1,5 +1,5 @@
 "use client";
-import { useState, useEffect, useRef } from "react";
+import { useState, useEffect, useRef, useLayoutEffect } from "react";
 import { useRouter } from "next/navigation";
 import {
   fetchWithAuth,
@@ -12,6 +12,7 @@ import {
   createEvent,
   hideEvent,
 } from "@/utils/api";
+import { calibrateSessionClock, getSessionTimestamp, resetSessionClock } from "@/utils/sessionClock";
 import { SessionTopBar } from "@/components/TopNav";
 import { Card, Button, Label, Pill, Alert, Spinner, Field, Input } from "@/components/ui";
 import PostSessionSurvey from "@/components/PostSessionSurvey";
@@ -44,13 +45,12 @@ function Stepper({ step }) {
           <div key={p.key} className="flex items-center gap-2 sm:gap-3">
             <div className="flex items-center gap-2">
               <span
-                className={`grid place-items-center h-6 w-6 rounded-full text-[11px] font-bold tnum transition-colors ${
-                  state === "done"
-                    ? "bg-accent text-on-accent"
-                    : state === "active"
+                className={`grid place-items-center h-6 w-6 rounded-full text-[11px] font-bold tnum transition-colors ${state === "done"
+                  ? "bg-accent text-on-accent"
+                  : state === "active"
                     ? "bg-accent-soft text-accent-strong ring-2 ring-accent/30"
                     : "bg-inset text-muted"
-                }`}
+                  }`}
               >
                 {state === "done" ? "✓" : i + 1}
               </span>
@@ -89,11 +89,9 @@ export default function ActiveSessionMockup() {
   // previous open event and stamps the new one in the same request, so consecutive
   // windows are contiguous by construction — a client-side hide + create pair can
   // arrive out of order under latency spikes and record overlapping windows.
-  // Explicit hides are only for phase exits (last image, last question), and must
-  // be AWAITED there: setHiddenAt overwrites unconditionally, so a slow hide PATCH
-  // landing after the next phase's create would push hidden_at past that event's
-  // shown_at. The refs hold the create-request PROMISE, not the resolved id, so a
-  // hide can never miss its event just because the create response was slow.
+  // Explicit hides are only for phase exits (last image, last question). The refs
+  // hold the create-request PROMISE, not the resolved id, so a hide can never miss
+  // its event just because the create response was slow.
   const logStimulusShown = (ref, payload, what) => {
     const sessionId = localStorage.getItem("currentSessionId");
     ref.current = createEvent(sessionId, payload)
@@ -111,23 +109,32 @@ export default function ActiveSessionMockup() {
   // Claims the pending event synchronously (no double-hide race) and hides it
   // once its id is known. Returns a promise so session teardown can await the
   // final stamp; mid-sequence callers just fire and forget.
-  const logStimulusHidden = (ref, what) => {
+  const logStimulusHidden = (ref, what, occurredAt) => {
     const pending = ref.current;
     ref.current = null;
     if (!pending) return Promise.resolve();
     return Promise.resolve(pending)
-      .then((eventId) => (eventId ? hideEvent(eventId) : null))
+      .then(async (eventId) => {
+        if (!eventId) return null;
+        const response = await hideEvent(eventId, occurredAt);
+        if (!response.ok) throw new Error(await response.text());
+        return response;
+      })
       .catch((err) => console.error(`${what} event hide failed`, err));
   };
 
-  const logImageShown = (imageId) => {
-    if (imageId) logStimulusShown(currentEventIdRef, { image_id: imageId }, "Image");
+  const logImageShown = (imageId, occurredAt) => {
+    // if (imageId) logStimulusShown(currentEventIdRef, { image_id: imageId }, "Image");
+    if (!imageId) return;
+    logStimulusShown(currentEventIdRef, { image_id: imageId, occurred_at: occurredAt }, "Image");
   };
-  const logImageHidden = () => logStimulusHidden(currentEventIdRef, "Image");
-  const logQuestionShown = (questionId) => {
-    if (questionId) logStimulusShown(currentMathEventIdRef, { question_id: questionId }, "Question");
+  const logImageHidden = occurredAt => logStimulusHidden(currentEventIdRef, "Image", occurredAt);
+  const logQuestionShown = (questionId, occurredAt) => {
+    // if (questionId) logStimulusShown(currentMathEventIdRef, { question_id: questionId }, "Question");
+    if (!questionId) return;
+    logStimulusShown(currentMathEventIdRef, { question_id: questionId, occurred_at: occurredAt }, "Question");
   };
-  const logQuestionHidden = () => logStimulusHidden(currentMathEventIdRef, "Question");
+  const logQuestionHidden = occurredAt => logStimulusHidden(currentMathEventIdRef, "Question", occurredAt);
 
   useEffect(() => {
     setPatientName(localStorage.getItem("currentClientName") || "");
@@ -151,10 +158,10 @@ export default function ActiveSessionMockup() {
           const sessionImages = Array.isArray(data.data?.images)
             ? data.data.images
             : Array.isArray(data.data)
-            ? data.data
-            : Array.isArray(data)
-            ? data
-            : [];
+              ? data.data
+              : Array.isArray(data)
+                ? data
+                : [];
           setImages(sessionImages);
           // Warm the browser cache so every swap during the timed sequence is
           // instant instead of waiting on a fetch from object storage.
@@ -186,6 +193,9 @@ export default function ActiveSessionMockup() {
   // and cap the fallback refetch (mount prefetch failed) at a single retry.
   const mathStartedRef = useRef(false);
   const mathRefetchedRef = useRef(false);
+  const lastLoggedImageRef = useRef(null)
+  const lastLoggedQuestionRef = useRef(null)
+  const imagePresentationRef = useRef(null)
   useEffect(() => {
     if (currentStep !== "math") return;
     if (questions.length === 0) {
@@ -202,7 +212,7 @@ export default function ActiveSessionMockup() {
       mathStartedRef.current = true;
       setCurrentMathIndex(0);
       setMathInputEnabled(false);
-      logQuestionShown(questions[0].question_id);
+      // logQuestionShown(questions[0].question_id);
     }
   }, [currentStep, questions]);
 
@@ -223,21 +233,88 @@ export default function ActiveSessionMockup() {
   // land after the first question's create and overwrite its auto-closed
   // hidden_at with a later time.
   useEffect(() => {
-    let timer;
-    if (currentStep === "images" && images.length > 0) {
-      timer = setTimeout(async () => {
-        if (currentImageIndex < images.length - 1) {
-          const nextIdx = currentImageIndex + 1;
-          logImageShown(images[nextIdx].image_id);
-          setCurrentImageIndex(nextIdx);
-        } else {
-          await logImageHidden();
-          setCurrentStep("math");
-        }
-      }, IMAGE_DISPLAY_MS);
-    }
-    return () => clearTimeout(timer);
+    if (currentStep !== "images" || images.length === 0) return;
+
+    let frameId;
+    const image = images[currentImageIndex];
+    const key = image?.image_id ? `${currentImageIndex}:${image.image_id}` : null;
+    const advance = (frameTime) => {
+      const presentation = imagePresentationRef.current;
+      if (!key || presentation?.key !== key) {
+        frameId = requestAnimationFrame(advance);
+        return;
+      }
+      if (frameTime - presentation.frameTime < IMAGE_DISPLAY_MS) {
+        frameId = requestAnimationFrame(advance);
+        return;
+      }
+
+      const occurredAt = getSessionTimestamp(frameTime);
+      if (currentImageIndex < images.length - 1) {
+        setCurrentImageIndex((index) => index + 1);
+      } else {
+        logImageHidden(occurredAt);
+        setCurrentStep("math");
+      }
+    };
+
+    frameId = requestAnimationFrame(advance);
+    return () => cancelAnimationFrame(frameId);
   }, [currentStep, currentImageIndex, images]);
+
+  useLayoutEffect(() => {
+    if (currentStep !== 'images')
+      return
+
+    const image = images[currentImageIndex]
+
+    if (!image?.image_id)
+      return
+
+    const key = `${currentImageIndex}:${image.image_id}`
+
+    if (lastLoggedImageRef.current === key)
+      return
+
+    const frameId = requestAnimationFrame((frameTime) => {
+      if (lastLoggedImageRef.current === key) return;
+      lastLoggedImageRef.current = key;
+      imagePresentationRef.current = { key, frameTime };
+      logImageShown(image.image_id, getSessionTimestamp(frameTime));
+    });
+
+    return () => cancelAnimationFrame(frameId);
+  }, [
+    currentStep,
+    currentImageIndex,
+    images
+  ])
+  useLayoutEffect(() => {
+    if (currentStep !== 'math')
+      return
+
+    const question = questions[currentMathIndex]
+
+    if (!question?.question_id)
+      return
+
+    const key = `${currentMathIndex}:${question.question_id}`
+
+    if (lastLoggedQuestionRef.current === key)
+      return
+
+    const frameId = requestAnimationFrame((frameTime) => {
+      if (lastLoggedQuestionRef.current === key) return;
+      lastLoggedQuestionRef.current = key;
+      logQuestionShown(question.question_id, getSessionTimestamp(frameTime));
+    });
+
+    return () => cancelAnimationFrame(frameId);
+  }, [
+    currentStep,
+    currentMathIndex,
+    questions
+  ])
 
   // 6. START SESSION & POLL
   const handleStartRecording = async () => {
@@ -253,8 +330,16 @@ export default function ActiveSessionMockup() {
     }
 
     try {
+      resetSessionClock();
       const startRes = await startSession(sessionId);
       if (!startRes.ok) throw new Error("Failed to initialize session on the server.");
+
+      try {
+        const calibration = await calibrateSessionClock()
+        console.info('Session clock calibrated', calibration)
+      } catch (error) {
+        console.warn('Session clock calibration failed; browser time will be used', error)
+      }
 
       let attempts = 0;
       const pollInterval = setInterval(async () => {
@@ -265,7 +350,8 @@ export default function ActiveSessionMockup() {
           if (sessionData.bridge_recording_at !== null) {
             clearInterval(pollInterval);
             setIsWaitingForBridge(false);
-            if (images.length > 0) logImageShown(images[0].image_id);
+            // if (images.length > 0) logImageShown(images[0].image_id);
+            setCurrentImageIndex(0);
             setCurrentStep("images");
             return;
           }
@@ -297,27 +383,30 @@ export default function ActiveSessionMockup() {
     setMathError("");
     if (currentMathIndex < questions.length - 1) {
       // No hide: the next question's create auto-closes this event server-side.
-      const nextIdx = currentMathIndex + 1;
-      logQuestionShown(questions[nextIdx].question_id);
-      setCurrentMathIndex(nextIdx);
+      // const nextIdx = currentMathIndex + 1;
+      // logQuestionShown(questions[nextIdx].question_id);
+      // setCurrentMathIndex(nextIdx);
+      setCurrentMathIndex(currentMathIndex + 1)
       setMathInputEnabled(false);
     } else {
-      // Last stimulus: make sure its hidden_at lands before end_time is stamped.
-      await logQuestionHidden();
-      await endSessionAndGoToSurvey();
+      // Capture the user-visible transition immediately; do not keep the question
+      // on screen while its network request is in flight.
+      const occurredAt = getSessionTimestamp();
+      const hideRequest = logQuestionHidden(occurredAt);
+      setCurrentStep("survey");
+      await endSessionAndGoToSurvey(hideRequest);
     }
   };
 
   // 8. END SESSION
-  const endSessionAndGoToSurvey = async () => {
+  const endSessionAndGoToSurvey = async (hideRequest = Promise.resolve()) => {
     try {
+      await hideRequest;
       const sessionId = localStorage.getItem("currentSessionId");
       const res = await endSession(sessionId);
       if (!res.ok) throw new Error("Failed to end session");
-      setCurrentStep("survey");
     } catch (err) {
       console.error("Error ending session:", err);
-      setCurrentStep("survey");
     }
   };
 

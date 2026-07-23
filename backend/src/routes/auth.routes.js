@@ -2,6 +2,9 @@ import { Router } from 'express'
 import authController from '../controllers/auth.controller.js'
 import authenticate from '../middleware/authenticate.js'
 import dbContext from '../middleware/dbContext.js'
+import validateRequest from '../middleware/validateRequest.js'
+import { loginLimiter, refreshLimiter } from '../middleware/rateLimiters.js'
+import { loginValidation } from '../validators/auth.validators.js'
 
 const router = Router()
 /**
@@ -36,7 +39,7 @@ const router = Router()
  *       409:
  *         description: Conflict - An active session already exists for this user and override is not set to true
  */
-router.post('/login', authController.login)
+router.post('/login', loginLimiter, loginValidation, validateRequest, authController.login)
 
 /**
  * @swagger
@@ -59,7 +62,7 @@ router.post('/login', authController.login)
  *       401:
  *         description: No refresh token provided, or session is invalid/expired
  */
-router.post('/refresh', authController.refresh)
+router.post('/refresh', refreshLimiter, authController.refresh)
 
 /**
  * @swagger
