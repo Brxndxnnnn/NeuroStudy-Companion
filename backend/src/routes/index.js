@@ -51,13 +51,15 @@ router.post(
 router.get('/time', eventsController.getServerTime)
 router.get('/health', async (req, res) => res.json({ status: 'ok', timestamp: new Date().toISOString() }))
 router.use('/auth', authRoutes)
-// Everything below this line will run through `authenticate` and `authenticatedApiLimiter`
+// Everything below this line runs through `authenticate` and `authenticatedApiLimiter`.
 router.use(authenticate)
 router.use(authenticatedApiLimiter)
-// No dbContext: this only proxies to ml_service, which holds its own connection as
-// a BYPASSRLS role. Opening a tenant-scoped backend connection here would be dead weight.
+// Authenticated proxy to ml_service (no auth of its own; connects to the DB BYPASSRLS).
+// Mounted here so it runs under authenticate + the API rate limiter, but ABOVE the
+// global dbContext below: ml.routes.js opens its own RLS-scoped connection, and only
+// on the session/client-scoped routes that need a clinic-ownership check.
 router.use('/ml', mlRouter)
-// Everything below this line will run through `dbContext` (in addition to authentication)
+// Everything below this line additionally runs through `dbContext`.
 router.use(dbContext)
 router.use('/users', usersRouter)
 router.use('/clinics', clinicsRouter)

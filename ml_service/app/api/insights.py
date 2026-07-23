@@ -11,9 +11,13 @@ ML Phase 1 endpoints for the web Insights tab:
 
 Inference (per-session predictions) is produced automatically by the background
 prediction worker; these endpoints read what it wrote. Training is offline and
-occasional — the POST here is the manual lever alongside the weekly cron. It is not
-surfaced in the technician UI; ml_service has no auth of its own, so treat the
-train endpoint as an operator tool (see docs/ml-phase1-plan.md).
+occasional — the POST here is the manual lever alongside the weekly cron.
+
+ml_service has no auth of its own and connects to the DB as a BYPASSRLS role, so it
+is NOT exposed publicly. Every one of these endpoints is reached only through the
+backend's authenticated /api/ml/... proxy, which verifies the JWT and enforces
+per-clinic row-level security (session/client ownership) before forwarding here.
+See backend/src/routes/ml.routes.js and docs/ml-phase1-plan.md.
 """
 
 from fastapi import APIRouter, HTTPException
@@ -191,9 +195,9 @@ def train_endpoint(req: TrainRequest | None = None):
     technician asked for it explicitly, and its honest score is returned alongside.
     A POPULATION model still has to clear the promotion gate.
 
-    ⚠ NOTE: ml_service has no authentication of its own. Until this is fronted by an
-    authenticated backend route, treat it as an operator tool and do not link it from
-    the technician UI. See docs/ml-phase1-plan.md.
+    Reached only through the backend's authenticated /api/ml/train proxy, which
+    verifies the caller and confirms any client_id / session_ids belong to their
+    clinic before forwarding here. See backend/src/routes/ml.routes.js.
     """
     req = req or TrainRequest()
     try:
