@@ -269,21 +269,23 @@ export async function getSessionResultsFftBandPower(sessionId) {
 
 
 // ML PHASE 1 (Insights tab)
-// The ML service sits behind nginx at /ml/ (not /api), so this bypasses BASE_URL.
+// All ML calls go through the authenticated backend (/api/ml/...), which enforces
+// the JWT and per-clinic row-level security before proxying to ml_service. The ML
+// service is not publicly reachable.
 // Returns a readiness snapshot: whether a valence/arousal model is trained yet and
 // how much OASIS-labelled EEG has accumulated toward training one.
 export async function getPhase1Status() {
-  const res = await fetchWithAuth(`/ml/phase1/status`);
+  const res = await fetchWithAuth(`${BASE_URL}/ml/phase1/status`);
   return res;
 }
 // Current trained model + version history (metrics for the model card).
 export async function getPhase1Model() {
-  const res = await fetchWithAuth(`/ml/phase1/model`);
+  const res = await fetchWithAuth(`${BASE_URL}/ml/phase1/model`);
   return res;
 }
 // Completed sessions + their prediction status (session picker).
 export async function getPhase1Sessions() {
-  const res = await fetchWithAuth(`/ml/phase1/sessions`);
+  const res = await fetchWithAuth(`${BASE_URL}/ml/phase1/sessions`);
   return res;
 }
 // One session's predicted valence/arousal trajectory.
@@ -292,16 +294,16 @@ export async function getPhase1Sessions() {
 // `available_models` for the switch. Pass modelVersion to pick the other.
 export async function getPhase1Predictions(sessionId, modelVersion) {
   const q = modelVersion != null ? `?model_version=${modelVersion}` : "";
-  const res = await fetchWithAuth(`/ml/phase1/predictions/${sessionId}${q}`);
+  const res = await fetchWithAuth(`${BASE_URL}/ml/phase1/predictions/${sessionId}${q}`);
   return res;
 }
 // One client's completed sessions + their personal model, for the training picker.
 export async function getPhase1ClientSessions(clientId) {
-  const res = await fetchWithAuth(`/ml/phase1/clients/${clientId}/sessions`);
+  const res = await fetchWithAuth(`${BASE_URL}/ml/phase1/clients/${clientId}/sessions`);
   return res;
 }
-// Train a model. Goes through the BACKEND (not /ml/) because training writes —
-// ml_service has no auth of its own, so /api/ml/train is the authenticated door.
+// Train a model. Like every ML call it goes through the authenticated backend
+// (/api/ml/train), which is the only path exposed to ml_service.
 export async function trainPhase1Model({ clientId, sessionIds } = {}) {
   const res = await fetchWithAuth(`${BASE_URL}/ml/train`, {
     method: "POST",
