@@ -55,8 +55,10 @@ router.use('/images', authenticate, dbContext, imagesRouter)
 router.use('/clients', authenticate, dbContext, clientsRouter)
 router.use('/questions', authenticate, dbContext, questionsRouter)
 router.use('/questionnaires', authenticate, dbContext, questionnairesRouter)
-// No dbContext: this only proxies to ml_service, which holds its own connection as
-// a BYPASSRLS role. Opening a tenant-scoped backend connection here would be dead weight.
+// Authenticated proxy to ml_service (which has no auth and connects BYPASSRLS).
+// dbContext is applied inside ml.routes.js only on the session/client-scoped routes,
+// which need an RLS-scoped connection for their clinic-ownership checks; the
+// metadata routes (status/model) skip it.
 router.use('/ml', authenticate, mlRouter)
 
 export default router
