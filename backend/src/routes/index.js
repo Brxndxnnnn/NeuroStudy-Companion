@@ -12,6 +12,8 @@ import mlRouter from './ml.routes.js'
 import authenticate from '../middleware/authenticate.js'
 import dbContext from '../middleware/dbContext.js'
 import clinicController from '../controllers/clinic.controller.js'
+import eventsController from '../controllers/event.controller.js'
+import { activationLimiter, authenticatedApiLimiter } from '../middleware/rateLimiters.js'
 
 const router = Router()
 
@@ -43,22 +45,29 @@ const router = Router()
  */
 router.post(
     '/clinics/activate',
+    activationLimiter,
     clinicController.activateClinicDatabaseAccess
 )
-router.get('/health', async (req, res) => res.json({ status: 'ok' }))
+router.get('/time', eventsController.getServerTime)
+router.get('/health', async (req, res) => res.json({ status: 'ok', timestamp: new Date().toISOString() }))
 router.use('/auth', authRoutes)
-router.use('/users', authenticate, dbContext, usersRouter)
-router.use('/clinics', authenticate, dbContext, clinicsRouter)
-router.use('/sessions', authenticate, dbContext, sessionsRouter)
-router.use('/events', authenticate, dbContext, eventsRouter)
-router.use('/images', authenticate, dbContext, imagesRouter)
-router.use('/clients', authenticate, dbContext, clientsRouter)
-router.use('/questions', authenticate, dbContext, questionsRouter)
-router.use('/questionnaires', authenticate, dbContext, questionnairesRouter)
-// Authenticated proxy to ml_service (which has no auth and connects BYPASSRLS).
-// dbContext is applied inside ml.routes.js only on the session/client-scoped routes,
-// which need an RLS-scoped connection for their clinic-ownership checks; the
-// metadata routes (status/model) skip it.
-router.use('/ml', authenticate, mlRouter)
+// Everything below this line runs through `authenticate` and `authenticatedApiLimiter`.
+router.use(authenticate)
+router.use(authenticatedApiLimiter)
+// Authenticated proxy to ml_service (no auth of its own; connects to the DB BYPASSRLS).
+// Mounted here so it runs under authenticate + the API rate limiter, but ABOVE the
+// global dbContext below: ml.routes.js opens its own RLS-scoped connection, and only
+// on the session/client-scoped routes that need a clinic-ownership check.
+router.use('/ml', mlRouter)
+// Everything below this line additionally runs through `dbContext`.
+router.use(dbContext)
+router.use('/users', usersRouter)
+router.use('/clinics', clinicsRouter)
+router.use('/sessions', sessionsRouter)
+router.use('/events', eventsRouter)
+router.use('/images', imagesRouter)
+router.use('/clients', clientsRouter)
+router.use('/questions', questionsRouter)
+router.use('/questionnaires', questionnairesRouter)
 
 export default router

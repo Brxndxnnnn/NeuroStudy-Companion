@@ -1,6 +1,9 @@
 import { Router } from 'express'
 import userController from '../controllers/user.controller.js'
 import requirePermission from '../middleware/requirePermission.js'
+import validateRequest from '../middleware/validateRequest.js'
+import { adminReadLimiter, adminWriteLimiter } from '../middleware/rateLimiters.js'
+import { assignRoleValidation, createUserValidation, updateUserValidation, userIdValidation } from '../validators/user.validators.js'
 import PERMS from '../constants/permissions.js'
 
 const router = Router()
@@ -34,7 +37,10 @@ const router = Router()
  */
 router.post(
   '/',
+  adminWriteLimiter,
   requirePermission(PERMS.USERS_WRITE_ALL),
+  createUserValidation,
+  validateRequest,
   userController.createUser
 )
 
@@ -52,6 +58,7 @@ router.post(
  */
 router.get(
   '/',
+  adminReadLimiter,
   requirePermission(PERMS.USERS_READ_ALL),
   userController.listUsers
 )
@@ -70,6 +77,7 @@ router.get(
  */
 router.get(
   '/roles',
+  adminReadLimiter,
   requirePermission(PERMS.USERS_READ_ALL),
   userController.listRoles
 )
@@ -85,8 +93,6 @@ router.get(
  *     parameters:
  *       - in: path
  *         name: id
- *         required: true
- *         schema: { type: string, format: uuid }
  *     responses:
  *       200:
  *         description: User object
@@ -95,7 +101,10 @@ router.get(
  */
 router.get(
   '/:id',
+  adminReadLimiter,
   requirePermission(PERMS.USERS_READ_ALL),
+  userIdValidation,
+  validateRequest,
   userController.getUser
 )
 
@@ -128,7 +137,10 @@ router.get(
  */
 router.patch(
   '/:id',
+  adminWriteLimiter,
   requirePermission(PERMS.USERS_WRITE_ALL),
+  updateUserValidation,
+  validateRequest,
   userController.updateUser
 )
 
@@ -153,7 +165,10 @@ router.patch(
  */
 router.delete(
   '/:id',
+  adminWriteLimiter,
   requirePermission(PERMS.USERS_WRITE_ALL),
+  userIdValidation,
+  validateRequest,
   userController.deactivateUser
 )
 
@@ -187,7 +202,10 @@ router.delete(
  */
 router.post(
   '/:id/role',
+  adminWriteLimiter,
   requirePermission(PERMS.USERS_WRITE_ALL),
+  assignRoleValidation,
+  validateRequest,
   userController.assignRole
 )
 

@@ -303,6 +303,147 @@ describe("fetchWithAuth", () => {
     expect(fetchMock.mock.calls[2][1].headers.Authorization)
       .toBeUndefined()
   })
+
+  test("concurrent 401 responses share one refresh request", async () => {
+    const api = await freshApi();
+
+    let resolveRefresh;
+
+    const pendingRefresh = new Promise(resolve => {
+      resolveRefresh = resolve;
+    });
+
+    const retriedResponseA = {
+      status: 200,
+      ok: true,
+      request: "a",
+    };
+
+    const retriedResponseB = {
+      status: 200,
+      ok: true,
+      request: "b",
+    };
+
+    const fetchMock = vi.fn((url, options = {}) => {
+      if (url === "/api/auth/refresh")
+        return pendingRefresh;
+
+      if (options.headers?.Authorization === "Bearer new-token")
+        return Promise.resolve(
+          url === "/api/a"
+            ? retriedResponseA
+            : retriedResponseB
+        );
+
+      return Promise.resolve({
+        status: 401,
+        ok: false,
+      });
+    });
+
+    vi.stubGlobal("fetch", fetchMock);
+    api.setAuthToken("expired-token");
+
+    const requestA = api.fetchWithAuth("/api/a");
+    const requestB = api.fetchWithAuth("/api/b");
+
+    await vi.waitFor(() => {
+      const refreshCalls = fetchMock.mock.calls.filter(
+        ([url]) => url === "/api/auth/refresh"
+      );
+
+      expect(refreshCalls).toHaveLength(1);
+    });
+
+    resolveRefresh({
+      status: 200,
+      ok: true,
+      json: vi.fn().mockResolvedValue({
+        accessToken: "new-token",
+      }),
+    });
+
+    await expect(
+      Promise.all([requestA, requestB])
+    ).resolves.toEqual([
+      retriedResponseA,
+      retriedResponseB,
+    ]);
+
+    const refreshCalls = fetchMock.mock.calls.filter(
+      ([url]) => url === "/api/auth/refresh"
+    );
+
+    expect(refreshCalls).toHaveLength(1);
+
+    const retryCalls = fetchMock.mock.calls.filter(
+      ([url, options]) =>
+        url !== "/api/auth/refresh" &&
+        options.headers?.Authorization === "Bearer new-token"
+    );
+
+    expect(retryCalls).toHaveLength(2);
+  })
+
+  test("a delayed 401 reuses a token refreshed by another request", async () => {
+    const api = await freshApi();
+
+    let resolveDelayedRequest;
+
+    const delayedResponse = new Promise(resolve => {
+      resolveDelayedRequest = resolve;
+    });
+
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce({
+        status: 401,
+        ok: false,
+      })
+      .mockResolvedValueOnce({
+        status: 200,
+        ok: true,
+        json: vi.fn().mockResolvedValue({
+          accessToken: "new-token",
+        }),
+      })
+      .mockResolvedValueOnce({
+        status: 200,
+        ok: true,
+      })
+      .mockImplementationOnce(() => delayedResponse)
+      .mockResolvedValueOnce({
+        status: 200,
+        ok: true,
+      });
+
+    vi.stubGlobal("fetch", fetchMock);
+    api.setAuthToken("expired-token");
+
+    await api.fetchWithAuth("/api/first");
+
+    // Simulate a request that was sent with the expired token but whose
+    // 401 response arrived after another request completed the refresh.
+    api.setAuthToken("expired-token");
+    const delayed = api.fetchWithAuth("/api/delayed");
+
+    api.setAuthToken("newer-token");
+
+    resolveDelayedRequest({
+      status: 401,
+      ok: false,
+    });
+
+    await delayed;
+
+    const refreshCalls = fetchMock.mock.calls.filter(
+      ([url]) => url === "/api/auth/refresh"
+    );
+
+    expect(refreshCalls).toHaveLength(1);
+    expect(fetchMock.mock.calls[4][1].headers.Authorization)
+      .toBe("Bearer newer-token");
+  })
 })
 
 describe("login", () => {
