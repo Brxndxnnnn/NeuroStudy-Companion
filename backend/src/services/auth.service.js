@@ -27,7 +27,7 @@ const setupRevocationListener = async () => {
   });
   await listener.connect();
   await listener.query('LISTEN token_revocations');
-  
+
   listener.on('notification', (msg) => {
     if (msg.channel === 'token_revocations') {
       revokedTokens.add(msg.payload);
@@ -57,6 +57,33 @@ export const createRefreshSession = async (userId, refreshToken, ip, userAgent) 
   );
 };
 
+export const rotateRefreshSession = async (currentRefreshToken, newRefreshToken, ip, userAgent) => {
+  const currentHash = hashToken(currentRefreshToken)
+  const newHash = hashToken(newRefreshToken)
+  const expiresAt = new Date(Date.now() + REFRESH_EXPIRY_MS)
+
+  const result = await pool.query(
+    `UPDATE active_sessions
+     SET refresh_token_hash=$2,
+         ip_address=$3,
+         user_agent=$4,
+         expires_at=$5,
+         last_used_at=NOW()
+     WHERE refresh_token_hash=$1
+       AND expires_at>NOW()
+     RETURNING user_id`,
+    [
+      currentHash,
+      newHash,
+      ip,
+      userAgent,
+      expiresAt
+    ]
+  )
+
+  return result.rows[0] || null
+}
+
 export const findRefreshSession = async (refreshToken) => {
   const hash = hashToken(refreshToken);
   const res = await pool.query(
@@ -84,7 +111,7 @@ export const detectActiveSession = async (userId) => {
   return res.rows[0]
 };
 
-export default { 
-    signAccessToken, verifyAccessToken, createRefreshSession, findRefreshSession, deleteRefreshSession, 
-    comparePassword, hashPassword, revokeAccessToken, isRevoked, hashToken, detectActiveSession
+export default {
+  signAccessToken, verifyAccessToken, createRefreshSession, rotateRefreshSession, findRefreshSession, deleteRefreshSession,
+  comparePassword, hashPassword, revokeAccessToken, isRevoked, hashToken, detectActiveSession
 };

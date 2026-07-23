@@ -5,16 +5,27 @@ import catchAsync from '../utils/catchAsync.js'
 import { BadRequestError, ConflictError, NotFoundError, UnauthorizedError } from '../utils/AppError.js'
 import pool from '../config/db.js'
 
-const cookieOptions = {
+const refreshCookieOptions = {
     httpOnly: true,
     secure: process.env.NODE_ENV === 'production',
-    sameSite: 'strict',
-    maxAge: 7 * 24 * 60 * 60 * 1000 // 7 days
+    sameSite: 'strict'
+}
+
+const refreshCookieMaxAge = 7 * 24 * 60 * 60 * 1000
+
+const setRefreshCookie = (res, token) => {
+    res.cookie('refreshToken', token, {
+        ...refreshCookieOptions,
+        maxAge: refreshCookieMaxAge
+    })
+}
+
+const clearRefreshCookie = res => {
+    res.clearCookie('refreshToken', refreshCookieOptions)
 }
 
 const login = catchAsync(async (req, res) => {
-    const { email, password } = req.body
-    const override = req.body.override === true
+    const { email, password, override } = req.validated
     if (!email || !password)
         throw new BadRequestError('Email and password are required.')
 
@@ -31,9 +42,8 @@ const login = catchAsync(async (req, res) => {
         if (!valid) throw new UnauthorizedError('Invalid credentials. Please check your email and password.')
 
         const existingSession = await authService.detectActiveSession(user.user_id)
-        if (existingSession && !override) {
+        if (existingSession && !override)
             throw new ConflictError('An active session already exists for this user. Are you sure you want to override it?')
-        }
 
         // Generate dual tokens
         const jti = randomUUID()
@@ -49,8 +59,8 @@ const login = catchAsync(async (req, res) => {
         const refreshToken = randomUUID()
         await authService.createRefreshSession(user.user_id, refreshToken, req.ip, req.headers['user-agent'])
 
-        // Securely store refresh token in HttpOnly cookie
-        res.cookie('refreshToken', refreshToken, cookieOptions)
+        setRefreshCookie(res, refreshToken)
+        res.set('Cache-Control', 'no-store') // Prevent caching of sensitive data
 
         res.json({
             accessToken,
@@ -68,25 +78,30 @@ const login = catchAsync(async (req, res) => {
 })
 
 const refresh = catchAsync(async (req, res) => {
-    const refreshToken = req.cookies.refreshToken
-    if (!refreshToken) throw new UnauthorizedError('No refresh token provided.')
+    const currentRefreshToken = req.cookies.refreshToken
+    if (!currentRefreshToken) throw new UnauthorizedError('No refresh token provided.')
 
-    const session = await authService.findRefreshSession(refreshToken)
-    if (!session) throw new UnauthorizedError('Invalid or expired session.')
+    const newRefreshToken = randomUUID()
+    const rotatedSession = await authService.rotateRefreshSession(currentRefreshToken, newRefreshToken, req.ip, req.headers['user-agent'])
+
+    if (!rotatedSession) {
+        clearRefreshCookie(res)
+        throw new UnauthorizedError('Invalid or expired session.')
+    }
 
     // Bypass RLS to fetch user claims for new access token
     const client = await pool.connect()
     try {
         await client.query("SELECT set_config('app.is_admin', 'true', false)")
-        const user = await userModel.findById(session.user_id, client)
+        const user = await userModel.findById(rotatedSession.user_id, client)
         await client.query("RESET app.is_admin")
 
-        if (!user) throw new UnauthorizedError('User not found.')
-        
-        // Rotate refresh token
-        // const newRefreshToken = randomUUID()
-        // await authService.createRefreshSession(user.user_id, newRefreshToken, req.ip, req.headers['user-agent'])
-        // res.cookie('refreshToken', newRefreshToken, cookieOptions)
+        if (!user) {
+            await authService.deleteRefreshSession(newRefreshToken)
+            clearRefreshCookie(res)
+            throw new UnauthorizedError('Invalid or expired session.')
+        }
+
         // Generate a new access token with updated claims
         const newAccessToken = authService.signAccessToken({
             jti: randomUUID(),
@@ -96,6 +111,9 @@ const refresh = catchAsync(async (req, res) => {
             role_id: user.role_id,
             clinic_id: user.clinic_id
         })
+
+        setRefreshCookie(res, newRefreshToken)
+        res.set('Cache-Control', 'no-store') // Prevent caching of sensitive data
 
         res.json({ accessToken: newAccessToken })
     } finally {
@@ -107,10 +125,10 @@ const logout = catchAsync(async (req, res) => {
     const cookies = req.cookies
     if (!cookies.refreshToken) throw new BadRequestError('No refresh token provided.')
     const refreshToken = cookies.refreshToken
-    if (refreshToken) {
+    if (refreshToken)
         await authService.deleteRefreshSession(refreshToken)
-        res.clearCookie('refreshToken', cookieOptions)
-    }
+
+    clearRefreshCookie(res)
 
     if (req.user?.jti) {
         await authService.revokeAccessToken(req.user.jti, req.user.sub, new Date(req.user.exp * 1000))

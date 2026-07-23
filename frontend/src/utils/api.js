@@ -4,10 +4,38 @@ const BASE_URL = "/api"
 
 // TOKEN CACHING (in memory)
 let accessToken = null;
+let refreshPromise = null;
 
 // Helper to set the token for the current browser session only.
 export function setAuthToken(token) {
   accessToken = token;
+}
+
+async function refreshAccessToken() {
+  if (!refreshPromise) {
+    refreshPromise = (async () => {
+      const response = await fetch(`${BASE_URL}/auth/refresh`, {
+        method: "POST",
+        credentials: "include",
+        headers: { "Content-Type": "application/json" },
+      });
+
+      if (!response.ok)
+        throw new Error("Refresh token expired or invalid");
+
+      const data = await response.json();
+
+      if (!data.accessToken)
+        throw new Error("Refresh response did not include an access token");
+
+      setAuthToken(data.accessToken);
+      return data.accessToken;
+    })().finally(() => {
+      refreshPromise = null;
+    });
+  }
+
+  return refreshPromise;
 }
 
 
@@ -15,15 +43,15 @@ export function setAuthToken(token) {
 export async function fetchWithAuth(url, options = {}) {
   // Access tokens intentionally live only in memory. On a full reload, the
   // HttpOnly refresh cookie supplies a fresh one when needed.
-  let token = accessToken;
+  const requestToken = accessToken; // Capture the token at the time of the request
 
   const headers = {
     "Content-Type": "application/json",
     ...options.headers,
   };
 
-  if (token) {
-    headers["Authorization"] = `Bearer ${token}`;
+  if (requestToken) {
+    headers["Authorization"] = `Bearer ${requestToken}`;
   }
 
   let response;
@@ -37,35 +65,44 @@ export async function fetchWithAuth(url, options = {}) {
   }
 
   // 2. If status is not 401, return response
-  if (response.status !== 401) {
+  if (response.status !== 401)
     return response;
-  }
 
   // 3. We have a 401 – try to refresh the token
   try {
-    const refreshRes = await fetch(`${BASE_URL}/auth/refresh`, {
-      method: "POST",
-      credentials: "include",
-      headers: { "Content-Type": "application/json" },
-    });
+    // const refreshRes = await fetch(`${BASE_URL}/auth/refresh`, {
+    //   method: "POST",
+    //   credentials: "include",
+    //   headers: { "Content-Type": "application/json" },
+    // });
 
-    if (refreshRes.ok) {
-      const data = await refreshRes.json();
-      const newToken = data.accessToken;
-      // Update the in-memory token before retrying the original request.
-      setAuthToken(newToken);
-      token = newToken;
+    // if (refreshRes.ok) {
+    //   const data = await refreshRes.json();
+    //   const newToken = data.accessToken;
+    //   // Update the in-memory token before retrying the original request.
+    //   setAuthToken(newToken);
+    //   token = newToken;
 
-      // Update headers and retry original request
-      headers["Authorization"] = `Bearer ${token}`;
-      return await fetch(url, { ...options, headers });
-    } else {
-      throw new Error("Refresh token expired or invalid");
-    }
+    //   // Update headers and retry original request
+    //   headers["Authorization"] = `Bearer ${token}`;
+    //   return await fetch(url, { ...options, headers });
+    // } else {
+    //   throw new Error("Refresh token expired or invalid");
+    // }
+    let newToken = accessToken;
+    if (!newToken || newToken === requestToken)
+      newToken = await refreshAccessToken();
+
+    const retryHeaders = {
+      ...headers,
+      "Authorization": `Bearer ${newToken}`,
+    };
+
+    return await fetch(url, { ...options, headers: retryHeaders });
   } catch (error) {
     // 4. Refresh failed – user is truly unauthenticated
     setAuthToken(null);
-    return Promise.reject(error);
+    throw error
   }
 }
 

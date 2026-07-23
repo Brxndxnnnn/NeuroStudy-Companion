@@ -12,6 +12,7 @@ import mlRouter from './ml.routes.js'
 import authenticate from '../middleware/authenticate.js'
 import dbContext from '../middleware/dbContext.js'
 import clinicController from '../controllers/clinic.controller.js'
+import { activationLimiter, authenticatedApiLimiter } from '../middleware/rateLimiters.js'
 
 const router = Router()
 
@@ -43,20 +44,26 @@ const router = Router()
  */
 router.post(
     '/clinics/activate',
+    activationLimiter,
     clinicController.activateClinicDatabaseAccess
 )
 router.get('/health', async (req, res) => res.json({ status: 'ok' }))
 router.use('/auth', authRoutes)
-router.use('/users', authenticate, dbContext, usersRouter)
-router.use('/clinics', authenticate, dbContext, clinicsRouter)
-router.use('/sessions', authenticate, dbContext, sessionsRouter)
-router.use('/events', authenticate, dbContext, eventsRouter)
-router.use('/images', authenticate, dbContext, imagesRouter)
-router.use('/clients', authenticate, dbContext, clientsRouter)
-router.use('/questions', authenticate, dbContext, questionsRouter)
-router.use('/questionnaires', authenticate, dbContext, questionnairesRouter)
+// Everything below this line will run through `authenticate` and `authenticatedApiLimiter`
+router.use(authenticate)
+router.use(authenticatedApiLimiter)
 // No dbContext: this only proxies to ml_service, which holds its own connection as
 // a BYPASSRLS role. Opening a tenant-scoped backend connection here would be dead weight.
-router.use('/ml', authenticate, mlRouter)
+router.use('/ml', mlRouter)
+// Everything below this line will run through `dbContext` (in addition to authentication)
+router.use(dbContext)
+router.use('/users', usersRouter)
+router.use('/clinics', clinicsRouter)
+router.use('/sessions', sessionsRouter)
+router.use('/events', eventsRouter)
+router.use('/images', imagesRouter)
+router.use('/clients', clientsRouter)
+router.use('/questions', questionsRouter)
+router.use('/questionnaires', questionnairesRouter)
 
 export default router
