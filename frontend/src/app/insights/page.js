@@ -225,10 +225,16 @@ function ModelMetrics({ model }) {
           value={model.algo === "ridge" ? "Ridge regression" : model.algo === "random_forest" ? "Random forest" : model.algo}
           hint="Chosen for small datasets"
         />
+        {/* The regression's SAMPLE SIZE — not a count of what survived from any one
+            session. Framed as "evidence base" deliberately: the old "Learned from N
+            images" read as a data-loss report next to a 24-image session, when what it
+            actually says is how much independent material the accuracy figures below
+            rest on. It is cumulative across every session the model trained on, which
+            is why it matches no single session's image count. */}
         <Metric
-          label="Learned from"
-          value={`${model.n_distinct_images ?? "—"} images`}
-          hint={`${model.n_epochs ?? "—"} two-second windows · ${model.n_sessions ?? "—"} sessions`}
+          label="Evidence base"
+          value={`${model.n_distinct_images ?? "—"} distinct ratings`}
+          hint={`Sample size behind the accuracy below · ${model.n_epochs ?? "—"} windows across ${model.n_sessions ?? "—"} session${model.n_sessions === 1 ? "" : "s"}`}
         />
         <Metric
           label="Trained"
@@ -921,9 +927,9 @@ export default function InsightsPage() {
                                     <span className="block">{trainResult.message}</span>
                                     {trainResult.model && (
                                       <span className="mt-1 block font-normal">
-                                        Learned from{" "}
+                                        Evidence base:{" "}
                                         <strong className="font-semibold">
-                                          {trainResult.model.n_distinct_images} different images
+                                          {trainResult.model.n_distinct_images} distinct ratings
                                         </strong>{" "}
                                         across {trainResult.model.n_sessions} session
                                         {trainResult.model.n_sessions === 1 ? "" : "s"}.
@@ -1002,12 +1008,12 @@ export default function InsightsPage() {
                           <strong className="font-semibold text-ink-2">
                             {shownModel.client_id ? "personal" : "global"} model
                           </strong>{" "}
-                          (v{shownModel.model_version}), which learned from{" "}
+                          (v{shownModel.model_version}), built on an evidence base of{" "}
                           <strong className="font-semibold text-ink-2">
-                            {shownModel.n_distinct_images ?? "—"} different images
+                            {shownModel.n_distinct_images ?? "—"} distinct ratings
                           </strong>
-                          . That count is what limits accuracy — showing the same images again in
-                          another session adds recordings, not new material to learn from.
+                          . That sample size is what limits accuracy — showing the same images
+                          again in another session adds recordings, not new material to learn from.
                         </p>
                       )}
                       <TimeSeriesChart
