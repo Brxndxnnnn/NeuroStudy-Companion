@@ -19,10 +19,11 @@ OASIS-labelled images).
 │  NeuuroBridge (C# WPF)   │               │  nginx ── TLS, routing, update feed    │
 │  SenzeBand ──BLE──▶ app  │               │   ├── /            → frontend (Next.js)│
 │                          │   one-time    │   ├── /api/        → backend (Express) │
-│  activation dialog ──────┼──HTTPS───────▶│   ├── /ml/         → ml_service (FastAPI)
+│  activation dialog ──────┼──HTTPS───────▶│   │     └ /api/ml/ → ml_service (int.) │
 │                          │  /api/clinics/│   └── /bridge-updates/ → Velopack feed │
 │  EEG + band powers ──────┼──TLS 5432────▶│  db ── TimescaleDB (Postgres 17)       │
-│  (binary COPY, direct)   │               │  certbot ── Let's Encrypt renewals     │
+│  (binary COPY, direct)   │               │  ml ── FastAPI, NOT internet-exposed   │
+│                          │               │  certbot ── Let's Encrypt renewals     │
 └──────────────────────────┘               └────────────────────────────────────────┘
 ```
 
@@ -41,11 +42,13 @@ OASIS-labelled images).
    write path. A DB hiccup never blocks streaming — rows queue and flush on a timer.
 2. **The backend serves the frontend only.** The one sanctioned exception is one-time
    bridge **enrollment** (activation); after that the bridge never talks to it again.
-3. **Session lifecycle:** the bridge creates the session row (`unclaimed`, with a
-   pairing code) when the headset connects → the web claims it by pairing code →
-   recording auto-starts when the web flips `sync_status='recording'` → images and
-   events are recorded by the web → Stop flips the session to `completed`, after which
-   the ML service's feature jobs run. Details: [docs/session-data-flow.md](docs/session-data-flow.md).
+3. **Session lifecycle:** ownership is split, and each side sets only the transitions it
+   can vouch for. The **bridge** creates the row (`unclaimed`, with a pairing code) when
+   the headset connects → the **web** claims it by pairing code → the **web** flips
+   `sync_status='recording'` and the bridge auto-starts uploading → images and events are
+   recorded by the web → on Stop the **bridge** drains, flushes, and only then writes
+   `completed`. That ordering is the guarantee that every EEG row has landed before the ML
+   service touches the session. Details: [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
 
 ---
 
@@ -105,8 +108,11 @@ docker compose up --build          # db + backend + frontend + ml + nginx
 ```
 
 Everything is fronted by nginx at **http://localhost:8090** (`/` frontend,
-`/api/` backend + `/api-docs` Swagger, `/ml/` ml_service). Only the DB is reachable
-directly (`localhost:5433`, psql: `psql -h localhost -p 5433 -U neurostudy_user -d neurostudy`).
+`/api/` backend + `/api-docs` Swagger). `ml_service` is deliberately not routed by
+nginx — reach it through the authenticated backend at `/api/ml/...`, or hit the
+container directly during development (`docker compose exec ml ...`). Only the DB is
+reachable directly (`localhost:5433`, psql:
+`psql -h localhost -p 5433 -U $POSTGRES_USER -d neurostudy`).
 
 For faster iteration run the DB in Docker and the service you're working on locally:
 
@@ -178,19 +184,37 @@ A no-server local test of the full install → activate → update loop:
 
 ## Deploying the web stack
 
-Deploys are a `git reset --hard` on the droplet plus a compose up — see
-[docs/deploy.md](docs/deploy.md) for the full procedure and its rules (never edit
-tracked files on the droplet; `.env.docker` secrets and `/var/bridge-updates` live
-outside git and survive deploys).
+Go to the **Actions** tab, pick **"Deploy to production"**, and **Run workflow** against
+`main`. Merging to `main` does *not* auto-deploy — the manual trigger is the approval
+gate. For a rollback, run the same workflow against an earlier `v*` tag.
+
+The workflow applies migrations before starting the app code, rebuilds images, restarts
+nginx, health-checks five routes, and tags the release. Defined in
+[`.github/workflows/deploy-production.yml`](.github/workflows/deploy-production.yml);
+step-by-step breakdown in [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md#9-build-deploy-release).
+
+Manual fallback, only if Actions is unavailable or you're debugging a failed run:
 
 ```bash
 ssh root@139.59.126.77
 cd /opt/NeuroStudy-Companion
-git fetch origin && git reset --hard origin/main
-docker compose -f compose.yaml -f compose.prod.yaml up -d
+git fetch origin && git reset --hard origin/main     # NOT `git pull`
+
+docker compose -f compose.yaml -f compose.prod.yaml up -d --wait db
+COMPOSE_FILES="-f compose.yaml -f compose.prod.yaml" ./db/migrate.sh
+docker compose -f compose.yaml -f compose.prod.yaml up -d --build
+docker compose -f compose.yaml -f compose.prod.yaml restart nginx
 ```
 
-DB migrations (`db/migrations/*.sql`) are tracked in a `schema_migrations` table and applied automatically by `db/migrate.sh` as part of the deploy pipeline — see `docs/deploy.md`. For local dev, run `./db/migrate.sh` by hand after pulling new migration files.
+`--build` is not optional: `frontend` is a built image with no bind mount, so without it
+a frontend change silently does not deploy.
+
+**Never edit tracked files on the droplet** — anything that must survive a deploy has to
+be in git. `.env.docker` secrets and `/var/bridge-updates` live outside git by design.
+
+DB migrations (`db/migrations/*.sql`) are tracked in a `schema_migrations` table and
+applied forward-only by `db/migrate.sh`. For local dev, run `./db/migrate.sh` by hand
+after pulling new migration files.
 
 ---
 
@@ -215,11 +239,12 @@ DB migrations (`db/migrations/*.sql`) are tracked in a `schema_migrations` table
 
 ## Further documentation
 
-| Doc | What it covers |
-|---|---|
-| [docs/session-data-flow.md](docs/session-data-flow.md) | Session lifecycle, events timeline, clock sync, bridge/web ownership contract |
-| [docs/bridge-packaging-plan.md](docs/bridge-packaging-plan.md) | Installer/auto-update/activation design and its decision history |
-| [docs/deploy.md](docs/deploy.md) | Droplet deployment procedure and rules |
-| [docs/feature-jobs-and-image-sets.md](docs/feature-jobs-and-image-sets.md) | Post-session feature jobs, image sets |
-| [docs/ml-phase1-plan.md](docs/ml-phase1-plan.md) | ML Phase 1: training, promotion gating, inference, insights |
-| [docs/frontend-db-contract.md](docs/frontend-db-contract.md) | What the frontend reads/writes vs what the bridge owns |
+**[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) — the single system reference.** Session
+lifecycle, data model, service boundaries, the ML Phase 1 pipeline, security model,
+deploy pipeline, and the known open issues. Every claim cites the code that implements
+it.
+
+It is deliberately the *only* design document. Seven earlier docs — four of them plans
+written before the code existed — were deleted on 24 Jul 2026 because they described
+superseded designs and were being quoted as current. **Please don't add a second one:
+extend `ARCHITECTURE.md` and cite the file you changed.**

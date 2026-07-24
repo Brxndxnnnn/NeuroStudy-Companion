@@ -17,7 +17,7 @@ ml_service has no auth of its own and connects to the DB as a BYPASSRLS role, so
 is NOT exposed publicly. Every one of these endpoints is reached only through the
 backend's authenticated /api/ml/... proxy, which verifies the JWT and enforces
 per-clinic row-level security (session/client ownership) before forwarding here.
-See backend/src/routes/ml.routes.js and docs/ml-phase1-plan.md.
+See backend/src/routes/ml.routes.js and docs/ARCHITECTURE.md §6.
 """
 
 from fastapi import APIRouter, HTTPException

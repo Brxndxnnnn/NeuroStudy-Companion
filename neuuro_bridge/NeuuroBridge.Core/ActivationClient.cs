@@ -32,7 +32,7 @@ namespace NeuuroBridge
     /// <summary>
     /// First-run enrollment: POSTs the activation code to the backend and returns the
     /// clinic's credentials. This is the ONLY backend call the bridge ever makes — the
-    /// session data path stays direct-to-DB (see docs/bridge-packaging-plan.md §4).
+    /// session data path stays direct-to-DB (see docs/ARCHITECTURE.md §7).
     /// </summary>
     public static class ActivationClient
     {
