@@ -1,13 +1,14 @@
-"""Dev mock of the backend activation endpoint (docs/bridge-packaging-plan.md §4).
+"""Dev mock of the backend activation endpoint (docs/ARCHITECTURE.md §7).
 
-Mirrors Eugene's real /api/activate (path, envelope, error contract) so the bridge's
+Mirrors the real /api/clinics/activate (path, envelope, error contract) so the bridge's
 first-run activation flow can be exercised offline. Returns the local dev-compose
 Postgres credentials, so an "activated" bridge on a dev box writes to the same DB
 as always.
 
     python neuuro_bridge/tools/mock_activation_server.py  # listens on :8765
 
-Point the bridge at it via .env or env var:  ACTIVATION_URL=http://localhost:8765/api/activate
+Point the bridge at it via .env or env var:
+    ACTIVATION_URL=http://localhost:8765/api/clinics/activate
 
 Codes (server requires XXXX-XXXX-XXXX-XXXX, else 400):
   TEST-C0DE-0001-MOCK -> 200,  USED-C0DE-0000-MOCK -> 409,
