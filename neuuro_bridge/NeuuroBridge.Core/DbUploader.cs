@@ -89,7 +89,7 @@ namespace NeuuroBridge
         // The session is created "unclaimed"; the frontend's claim overwrites both at pairing
         // time. These rows are upserted idempotently so the FK is always satisfiable in dev,
         // even on a fresh DB without the dev seed. (Until the agreed nullable-column migration
-        // lands — see docs/session-data-flow.md "open contract points #1".)
+        // lands — see docs/ARCHITECTURE.md §3.)
         private const string PlaceholderClientId = "11111111-1111-1111-1111-111111111111";
         private const string PlaceholderUserId   = "22222222-2222-2222-2222-222222222222";
         // The placeholder client/user reference these so the NOT-NULL FKs

@@ -7,7 +7,7 @@ evaluation harness (which only cross-validates and throws its models away) into
 something inference can serve.
 
 Training is OFFLINE and OCCASIONAL — a weekly cron or an admin trigger — never
-per-session. See docs/ml-phase1-plan.md.
+per-session. See docs/ARCHITECTURE.md §6.
 """
 
 from __future__ import annotations
