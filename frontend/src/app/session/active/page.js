@@ -18,7 +18,13 @@ import { Card, Button, Label, Pill, Alert, Spinner, Field, Input } from "@/compo
 import PostSessionSurvey from "@/components/PostSessionSurvey";
 
 // How long each stimulus image stays on screen (ms).
-const IMAGE_DISPLAY_MS = 3000;
+//
+// 10 s is the REAL protocol timing, not 3 s. A training epoch is 2 s, so a 3 s
+// image left only 1 s of slack and yielded at most 3 epochs — and the headset
+// stalls for ~3.2 s at a time (11 such gaps in the 24 Jul session), so a single
+// stall wiped out an entire image. At 10 s one stall can never kill an image:
+// the 6.8 s that remain split into at most two runs, so one is always >= 3.4 s.
+const IMAGE_DISPLAY_MS = 10000;
 
 const PHASES = [
   { key: "connect", label: "Connect" },
