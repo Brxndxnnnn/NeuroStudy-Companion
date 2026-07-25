@@ -8,6 +8,19 @@ import {
 import { Button, Spinner, Alert } from "@/components/ui";
 import LikertSurvey, { allAnswered as allSurveyAnswered } from "@/components/LikertSurvey";
 
+// App-chrome strings (not part of the BFI-2 instrument — safe to translate directly;
+// the instrument text lives in LikertSurvey.js). English-fallback per key.
+const UI = {
+  title:        { en: "Post-session survey", ms: "Tinjauan selepas sesi", zh: "疗程后问卷" },
+  loading:      { en: "Loading survey…", ms: "Memuatkan tinjauan…", zh: "正在加载问卷…" },
+  none:         { en: "No survey questions available.", ms: "Tiada soalan tinjauan tersedia.", zh: "没有可用的问卷题目。" },
+  finish:       { en: "Finish survey", ms: "Selesaikan tinjauan", zh: "完成问卷" },
+  errIncomplete:{ en: "Please answer all questions before finishing.", ms: "Sila jawab semua soalan sebelum menyelesaikan.", zh: "请在完成前回答所有题目。" },
+  errSubmit:    { en: "Failed to submit survey. Please try again.", ms: "Gagal menghantar tinjauan. Sila cuba lagi.", zh: "提交问卷失败，请重试。" },
+  errNetwork:   { en: "Network error. Please try again.", ms: "Ralat rangkaian. Sila cuba lagi.", zh: "网络错误，请重试。" },
+};
+const tr = (key, lang) => UI[key][lang] || UI[key].en;
+
 /**
  * The BFI-style post-session survey: fetches the active questionnaire, lets
  * the technician switch language, and submits answers for `sessionId`.
@@ -31,15 +44,13 @@ export default function PostSessionSurvey({ sessionId, onSubmitted }) {
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState("");
 
-  const fetchQuestionsForSurvey = async (id, lang) => {
+  // Fetch once. The API returns every language's statement text in one payload
+  // (the backend defaults to all languages when none is requested), so switching
+  // language is a pure client-side re-render — no refetch, and answers are kept.
+  const fetchQuestionsForSurvey = async (id) => {
     try {
-      const res = await getQuestionnaireQuestions(id, lang);
-      if (res.ok) {
-        setQuestions(await res.json());
-        setAnswers({});
-      } else {
-        setQuestions([]);
-      }
+      const res = await getQuestionnaireQuestions(id);
+      setQuestions(res.ok ? await res.json() : []);
     } catch (err) {
       console.error("Error fetching survey questions:", err);
     }
@@ -55,7 +66,7 @@ export default function PostSessionSurvey({ sessionId, onSubmitted }) {
         if (qData.length > 0) {
           const firstId = qData[0].questionnaire_id || qData[0].id;
           setQuestionnaireId(firstId);
-          await fetchQuestionsForSurvey(firstId, language);
+          await fetchQuestionsForSurvey(firstId);
         }
       } catch (err) {
         console.error("Error loading survey:", err);
@@ -64,19 +75,17 @@ export default function PostSessionSurvey({ sessionId, onSubmitted }) {
       }
     };
     load();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  const changeLanguage = (lang) => {
-    setLanguage(lang);
-    if (questionnaireId) fetchQuestionsForSurvey(questionnaireId, lang);
-  };
+  // Language is display-only: the statements already carry every language, so a
+  // switch re-renders in place and NEVER touches the answers the technician entered.
+  const changeLanguage = (lang) => setLanguage(lang);
 
   const ready = allSurveyAnswered(questions, answers);
 
   const submit = async () => {
     if (!ready) {
-      setError("Please answer all questions before finishing.");
+      setError(tr("errIncomplete", language));
       return;
     }
     setError("");
@@ -89,13 +98,13 @@ export default function PostSessionSurvey({ sessionId, onSubmitted }) {
       const res = await submitQuestionnaireAnswers(sessionId, questionnaireId, payload);
       if (!res.ok) {
         console.error("Failed to submit survey", await res.text());
-        setError("Failed to submit survey. Please try again.");
+        setError(tr("errSubmit", language));
         return;
       }
       onSubmitted();
     } catch (err) {
       console.error("Error submitting survey:", err);
-      setError("Network error. Please try again.");
+      setError(tr("errNetwork", language));
     } finally {
       setSubmitting(false);
     }
@@ -104,7 +113,7 @@ export default function PostSessionSurvey({ sessionId, onSubmitted }) {
   return (
     <>
       <div className="flex justify-between items-center mb-6 pb-4 border-b border-border">
-        <h2 className="text-xl font-bold tracking-tight text-ink">Post-session survey</h2>
+        <h2 className="text-xl font-bold tracking-tight text-ink">{tr("title", language)}</h2>
         <div className="flex gap-1.5">
           {["en", "ms", "zh"].map((lang) => (
             <button
@@ -123,10 +132,10 @@ export default function PostSessionSurvey({ sessionId, onSubmitted }) {
       {loading ? (
         <div className="py-8 text-center">
           <Spinner size={22} className="text-accent" />
-          <p className="text-muted mt-3">Loading survey…</p>
+          <p className="text-muted mt-3">{tr("loading", language)}</p>
         </div>
       ) : questions.length === 0 ? (
-        <p className="py-8 text-center text-muted">No survey questions available.</p>
+        <p className="py-8 text-center text-muted">{tr("none", language)}</p>
       ) : (
         <>
           {error && <Alert tone="warn" className="mb-5">{error}</Alert>}
@@ -138,7 +147,7 @@ export default function PostSessionSurvey({ sessionId, onSubmitted }) {
           />
           <div className="flex justify-end pt-5 mt-6 border-t border-border">
             <Button onClick={submit} loading={submitting} disabled={!ready}>
-              Finish survey
+              {tr("finish", language)}
             </Button>
           </div>
         </>
