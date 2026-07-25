@@ -175,7 +175,11 @@ export async function getQuestionnaire(questionnaireId) {
   const res = await fetchWithAuth(`${BASE_URL}/questionnaires/${questionnaireId}`);
   return res;
 }
-export async function getQuestionnaireQuestions(questionnaireId, language = "en") {
+// Returns every language's statement text in one payload (the backend defaults to
+// all languages when none is requested). Language selection is handled client-side,
+// so this deliberately takes no language argument — requesting specific languages
+// would change the response shape and break the per-language lookup in LikertSurvey.
+export async function getQuestionnaireQuestions(questionnaireId) {
   const res = await fetchWithAuth(
     `${BASE_URL}/questionnaires/${questionnaireId}/questions`
   );
