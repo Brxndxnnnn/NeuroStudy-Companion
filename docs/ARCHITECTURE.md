@@ -314,25 +314,55 @@ real arrival time, a resync jumps the counter forward (`DbUploader.cs:694`), whi
 what produces a clean gap with exact 4 ms spacing on both sides. Resyncs are counted in
 `RawResyncs` and surfaced as `RawGapSeconds`.
 
-### ⚠ Open issue: ~3.2 s upstream frame stalls
+### RESOLVED: the "~3.2 s stalls" were an artefact of our own drift guard
 
-Measured 24 Jul 2026 across every session recorded to date. The EEG stream is a clean
-250 Hz punctuated by discrete stalls of **3.0–3.6 s**, roughly one every 13 s. In one
-2.5-minute session that was 11 stalls totalling 36.2 s — about **24% of the recording**.
+Recorded here because it was written up for a month as an unexplained hardware fault,
+and the reasoning is worth not repeating.
 
-What has been ruled out: BLE reconnects (none logged during the session), flush errors
-(zero), queue overflow (cap unreachable). `eeg_raw_samples` and `eeg_filtered_samples`
-show *identical* gap structure, so the loss is upstream of both callbacks, and device
-telemetry (battery, SpO2, heart rate, accelerometer) keeps arriving throughout. The
-bridge classifies it as `"upstream frame loss"` (`DbUploader.cs:945`) and reports it at
-session end (`MainWindow.xaml.cs:295`).
+**The symptom.** Discrete stalls of 3.0–3.6 s, roughly one every 13 s; ~24% of a
+recording missing. Raw and filtered showed identical gap structure; no BLE reconnects,
+no flush errors, no queue overflow; device telemetry kept arriving throughout.
 
-**Root cause is unresolved.** The tight clustering suggests a link-layer
-timeout-and-resume rather than interference, which would scatter across durations.
-Untested: onboard radio vs. dongle, band proximity, USB 3 interference on 2.4 GHz.
+**What it actually was.** Two independent problems stacked:
 
-These figures are already computed by the bridge and thrown away — they are not stored
-on the session row or visible in the web UI.
+1. *Real, continuous packet loss.* The SDK's own logs (`logs/`) show the device sends
+   645-byte packages at 5/s as ~40 BLE notifications of 80 bytes per second, and only
+   ~32 arrive. Each lost notification costs ~8× its size: the package it belonged to
+   arrives 80 bytes short and is discarded whole (534 such packages in one 18-minute
+   session), then the parser burns ~7 more notifications re-locking onto a header
+   (3,654 `Cannot find Header!` events). Losses are **1 second granular** — one missed
+   `filteredDataDelegate` callback is exactly 250 samples.
+2. *A drift guard that hid them.* `MaxDriftTicks` was 3 s — far larger than a single
+   1 s loss — so losses never tripped it individually. They accumulated, silently
+   **compressing** the timeline, until the running total crossed 3 s and discharged as
+   one lump. That is where "3.2 s every 13 s" came from: 3 s ÷ 24% loss = 12.5 s.
+
+**The proof.** Across all 18 completed sessions in production (27 Jul 2026), every
+recorded gap was ≥ 3.00 s and **not one was below it** — a distribution truncated
+exactly at a constant in our source. Hardware has no reason to know that number.
+
+**Why it mattered beyond the missing data.** Between discharges, samples either side of
+a missing second were written as if contiguous, so EEG ran up to 3 s out of alignment
+with the events table. Every downstream contiguity check was blind to it, because
+compressed samples are still uniformly 4 ms apart — so a share of every image's epochs
+carried the neighbouring stimulus's signal under the wrong label. Simulation against the
+measured loss rates puts that at ~47% of epochs per image, though only ~3% of *images*
+(the sample size that matters — see §6).
+
+**What changed.** Per-stream, env-overridable drift tolerances (700 ms filtered /
+1500 ms raw) so each loss lands as a real gap; a filtered-stream gap counter
+(previously only raw had one — the ML input was the one stream whose dropout nobody
+could measure); the trailing-gap seal extended to filtered; and the whole reconciliation
+persisted onto the session row by migration 014 instead of being computed and discarded.
+`sessions.timeline_version` separates pre-fix (compressed) from post-fix (honest) data —
+`queries.MIN_TIMELINE_VERSION` gates training on it.
+
+**Still open: the packet loss itself.** Mean 20% across all sessions, worst 67%, and no
+session was clean. `BleConnectionTuner` asks Windows for a faster connection interval
+(`ThroughputOptimized`), which is a *request* the peripheral may decline — unverified on
+hardware. Measure any attempt with `neuuro_bridge/tools/analyse_sdk_log.py`, which
+derives delivered-vs-elapsed seconds from the vendor log alone and needs no
+instrumentation. Untested: onboard radio vs. dongle, band proximity, 2.4 GHz contention.
 
 ### ⚠ Open issue: restricted stimulus range
 
