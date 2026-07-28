@@ -140,9 +140,56 @@ namespace NeuuroBridge
         private static readonly int[] SchemaChannelOrder = { FrameIdx.Fp1, FrameIdx.Fp2, FrameIdx.T3, FrameIdx.T4 };
 
         // How far real (arrival) time may lead the sample counter before the shortfall is treated as
-        // genuine upstream frame loss rather than ordinary BLE burst latency (~1–2 s observed).
-        // Shared by the raw and filtered drift guards and by SealTrailingGap.
-        private static readonly long MaxDriftTicks = 3 * TimeSpan.TicksPerSecond;
+        // genuine upstream frame loss rather than ordinary BLE burst latency.
+        //
+        // WHY THESE ARE NOW SUB-SECOND, AND WHY THEY DIFFER PER STREAM
+        // -----------------------------------------------------------
+        // This was one 3 s value shared by both streams. That is far LARGER than a single real
+        // loss event, so losses never tripped it individually — they ACCUMULATED, and the counter
+        // silently compressed the timeline until the running total crossed 3 s and discharged in
+        // one lump.
+        //
+        // Measured across all 18 completed sessions in production (27 Jul 2026, ~3,680 s of
+        // recording): every recorded gap was >= 3.00 s and NOT ONE was below it. That floor was
+        // this constant, not the hardware. Between discharges the samples either side of a missing
+        // second were written as if contiguous, so EEG ran up to 3 s out of alignment with the
+        // events table — invisible to every downstream contiguity check, because compressed
+        // samples are still uniformly 4 ms apart. Mean loss was 20 %; no session was clean.
+        //
+        // The FILTERED stream loses signal in whole SDK callbacks of exactly one second
+        // (250 samples/channel — 5 packets x 150 bytes/channel / 3 bytes per 24-bit sample), so a
+        // tolerance below 1 s makes each loss trip its own resync and land in the DB as a real 1 s
+        // gap. Its callbacks are near-metronomic (860 of 871 seconds carried exactly one, SDK logs
+        // 14 Jun), so 700 ms sits between the observed jitter and a genuine loss.
+        //
+        // The RAW stream arrives ~5x/s in uneven BLE bursts, where a burst alone can push arrival
+        // ahead of the counter with nothing lost. It keeps a wider tolerance: a spurious resync
+        // there would fabricate a gap in data that is actually intact. Raw is not the ML input
+        // (that is eeg_filtered_samples), so it is deliberately the conservative one.
+        //
+        // Both are env-overridable so a clinic can be retuned without a rebuild.
+        private static readonly long FiltDriftTicks = DriftTicksFromEnv("FILT_DRIFT_TOLERANCE_MS", 700);
+        private static readonly long RawDriftTicks = DriftTicksFromEnv("RAW_DRIFT_TOLERANCE_MS", 1500);
+
+        /// <summary>
+        /// Reads a drift tolerance in milliseconds from env/.env, falling back to
+        /// <paramref name="defaultMs"/>. Clamped to [100 ms, 10 s]: below 100 ms ordinary
+        /// scheduling jitter would fabricate gaps, and above 10 s the guard stops being one.
+        /// </summary>
+        private static long DriftTicksFromEnv(string key, int defaultMs)
+        {
+            int ms = defaultMs;
+            try
+            {
+                var raw = EnvConfig.FindDotEnvValue(key);
+                if (!string.IsNullOrWhiteSpace(raw) && int.TryParse(raw.Trim(), out int parsed))
+                    ms = parsed;
+            }
+            catch { /* configuration must never stop the bridge starting */ }
+            if (ms < 100) ms = 100;
+            if (ms > 10000) ms = 10000;
+            return ms * TimeSpan.TicksPerMillisecond;
+        }
 
         private const int FlushIntervalMs = 500;     // batch window for eeg_readings (~2 flushes/s)
         private const int MaxQueued       = 20000;    // bound each summary queue so a dead DB can't OOM us
@@ -180,6 +227,10 @@ namespace NeuuroBridge
         private long _filtBaseTicks;
         private long _filtSampleIndex;
         private long _filtResyncs;
+        // Samples skipped at filtered resyncs. The raw stream has always counted these
+        // (_rawGapSamples); the filtered stream did not, so the dropout in the stream ML
+        // actually trains on was the one figure nobody could measure.
+        private long _filtGapSamples;
         private TimeSpan _clockOffset = TimeSpan.Zero;  // DbNow = UtcNow + offset
         private long _eegRowsSent;
         private long _bandRowsSent;
@@ -193,6 +244,8 @@ namespace NeuuroBridge
         private volatile bool _disposed;
         private volatile bool _markCompletedOnDispose;
         private volatile string _lastError;
+        private DateTime _sealStopUtc;      // default(DateTime) = nothing to seal
+        private string _bridgeVersion;
 
         public DbUploader(string connString, Action<string> log)
         {
@@ -218,6 +271,12 @@ namespace NeuuroBridge
         /// <summary>Seconds of raw signal that never arrived over BLE (skipped at resyncs). This is
         /// upstream dropout, NOT rows lost between the bridge and DB — expected-row math subtracts it.</summary>
         public double RawGapSeconds => Interlocked.Read(ref _rawGapSamples) / (double)_sampleRate;
+        /// <summary>Seconds of FILTERED signal that never arrived (skipped at resyncs). This is the
+        /// stream ml_service trains on, so this — not <see cref="RawGapSeconds"/> — is the dropout
+        /// figure that bounds epoch yield.</summary>
+        public double FiltGapSeconds => Interlocked.Read(ref _filtGapSamples) / (double)_sampleRate;
+        /// <summary>Seconds of filtered EEG actually written (rows / sample rate).</summary>
+        public double FiltCoverageSeconds => FiltRowsSent / (double)_sampleRate;
         public string LastError  => _lastError;
 
         /// <summary>Approximate bytes shipped to the DB so far (binary-COPY wire sizes).</summary>
@@ -395,7 +454,15 @@ namespace NeuuroBridge
         /// a frontend polling sync_status never sees 'completed' before the last batch has landed.
         /// (Plain app shutdown disposes WITHOUT this, leaving the session in its prior state.)
         /// </summary>
-        public void RequestComplete() => _markCompletedOnDispose = true;
+        /// <param name="stopUtc">When recording stopped (local UTC), so <see cref="SealTrailingGap"/>
+        /// can run at the right point in disposal — see the ordering note in <see cref="Dispose"/>.</param>
+        /// <param name="bridgeVersion">Stamped onto the session row for diagnostics.</param>
+        public void RequestComplete(DateTime stopUtc, string bridgeVersion = null)
+        {
+            _markCompletedOnDispose = true;
+            _sealStopUtc = stopUtc;
+            _bridgeVersion = bridgeVersion;
+        }
 
         /// <summary>
         /// Reads this session's current <c>sync_status</c> for advisory display only — the frontend
@@ -602,7 +669,7 @@ namespace NeuuroBridge
         {
             if (_rawQ.IsEmpty) return 0;
             long periodTicks = TimeSpan.TicksPerSecond / _sampleRate;   // 40000 ticks = 4 ms @ 250 Hz (µs-aligned)
-            long maxDriftTicks = MaxDriftTicks;
+            long maxDriftTicks = RawDriftTicks;
             int n = 0;
             using (var w = _conn.BeginBinaryImport(
                 "COPY eeg_raw_samples (session_id, time, fp1, fp2, t3, t4) FROM STDIN (FORMAT BINARY)"))
@@ -670,7 +737,7 @@ namespace NeuuroBridge
         {
             if (_filtQ.IsEmpty) return 0;
             long periodTicks = TimeSpan.TicksPerSecond / _sampleRate;
-            long maxDriftTicks = MaxDriftTicks;
+            long maxDriftTicks = FiltDriftTicks;
             int n = 0;
             using (var w = _conn.BeginBinaryImport(
                 "COPY eeg_filtered_samples (session_id, time, fp1, fp2, t3, t4) FROM STDIN (FORMAT BINARY)"))
@@ -696,6 +763,7 @@ namespace NeuuroBridge
                         long resyncIndex = (long)Math.Round((double)(f.FrameEnd.Ticks - _filtBaseTicks) / periodTicks) - (spc - 1);
                         if (resyncIndex > _filtSampleIndex)
                         {
+                            Interlocked.Add(ref _filtGapSamples, resyncIndex - _filtSampleIndex);
                             _filtSampleIndex = resyncIndex;
                             Interlocked.Increment(ref _filtResyncs);
                         }
@@ -848,18 +916,100 @@ namespace NeuuroBridge
         {
             lock (_ioLock)
             {
-                if (!_rawAnchored || _rawSampleIndex <= 0) return;
-
                 long periodTicks = TimeSpan.TicksPerSecond / _sampleRate;
-                // _rawSampleIndex is the NEXT index to write, so the last sample written sits one back.
-                long lastSampleTicks = _rawBaseTicks + (_rawSampleIndex - 1) * periodTicks;
-                long trailingTicks = ToDbTime(stopUtc).Ticks - lastSampleTicks;
-                if (trailingTicks <= MaxDriftTicks) return;
+                long stopTicks = ToDbTime(stopUtc).Ticks;
 
-                Interlocked.Add(ref _rawGapSamples, trailingTicks / periodTicks);
-                Interlocked.Increment(ref _rawResyncs);   // it is a gap; the UI reports "Ns across N gap(s)"
-                _log($"Stream ended {trailingTicks / (double)TimeSpan.TicksPerSecond:F1}s before the session was stopped " +
-                     "— counted as Bluetooth dropout, not upload loss.");
+                // Raw stream.
+                if (_rawAnchored && _rawSampleIndex > 0)
+                {
+                    // _rawSampleIndex is the NEXT index to write, so the last sample written sits one back.
+                    long lastSampleTicks = _rawBaseTicks + (_rawSampleIndex - 1) * periodTicks;
+                    long trailingTicks = stopTicks - lastSampleTicks;
+                    if (trailingTicks > RawDriftTicks)
+                    {
+                        Interlocked.Add(ref _rawGapSamples, trailingTicks / periodTicks);
+                        Interlocked.Increment(ref _rawResyncs);   // it is a gap; the UI reports "Ns across N gap(s)"
+                        _log($"Raw stream ended {trailingTicks / (double)TimeSpan.TicksPerSecond:F1}s before the session " +
+                             "was stopped — counted as Bluetooth dropout, not upload loss.");
+                    }
+                }
+
+                // Filtered stream — same reasoning, its own anchor. Previously unsealed, so a
+                // trailing dropout was missing from the only stream ML reads.
+                if (_filtAnchored && _filtSampleIndex > 0)
+                {
+                    long lastSampleTicks = _filtBaseTicks + (_filtSampleIndex - 1) * periodTicks;
+                    long trailingTicks = stopTicks - lastSampleTicks;
+                    if (trailingTicks > FiltDriftTicks)
+                    {
+                        Interlocked.Add(ref _filtGapSamples, trailingTicks / periodTicks);
+                        Interlocked.Increment(ref _filtResyncs);
+                        _log($"Filtered stream ended {trailingTicks / (double)TimeSpan.TicksPerSecond:F1}s before the " +
+                             "session was stopped — counted as Bluetooth dropout, not upload loss.");
+                    }
+                }
+            }
+        }
+
+        /// <summary>
+        /// Writes this session's dropout reconciliation onto the sessions row. Caller must hold
+        /// <see cref="_ioLock"/>, and it must run AFTER the final flush so the row counts are final.
+        ///
+        /// These figures were previously computed and discarded — visible once in the WPF summary,
+        /// stored nowhere. Persisting them is what makes a low epoch yield explainable after the
+        /// fact instead of requiring the extraction to be re-run by hand.
+        ///
+        /// timeline_version = 2 says this session was written with the sub-second drift tolerance,
+        /// i.e. its gaps are real and its event alignment can be trusted. Best-effort: a failure is
+        /// logged, never thrown, because losing diagnostics must not endanger the recording itself.
+        /// </summary>
+        public void WriteSessionDiagnostics(string bridgeVersion)
+        {
+            try
+            {
+                EnsureOpen();
+                using (var cmd = new NpgsqlCommand(
+                    "UPDATE sessions SET " +
+                    "  timeline_version      = 2, " +
+                    "  eeg_seconds_delivered = @delivered, " +
+                    "  eeg_gap_seconds       = @filtgap, " +
+                    "  eeg_gap_count         = @filtresync, " +
+                    "  raw_gap_seconds       = @rawgap, " +
+                    "  raw_gap_count         = @rawresync, " +
+                    "  frames_dropped        = @dropped, " +
+                    "  bridge_version        = @version " +
+                    "WHERE session_id = @sid", _conn))
+                {
+                    cmd.Parameters.AddWithValue("sid", NpgsqlDbType.Uuid, _sessionId);
+                    cmd.Parameters.AddWithValue("delivered", NpgsqlDbType.Double, FiltCoverageSeconds);
+                    cmd.Parameters.AddWithValue("filtgap", NpgsqlDbType.Double, FiltGapSeconds);
+                    cmd.Parameters.AddWithValue("filtresync", NpgsqlDbType.Integer, (int)FiltResyncs);
+                    cmd.Parameters.AddWithValue("rawgap", NpgsqlDbType.Double, RawGapSeconds);
+                    cmd.Parameters.AddWithValue("rawresync", NpgsqlDbType.Integer, (int)RawResyncs);
+                    cmd.Parameters.AddWithValue("dropped", NpgsqlDbType.Bigint,
+                        Dropped + RawDropped + FiltDropped);
+                    cmd.Parameters.AddWithValue("version", NpgsqlDbType.Text,
+                        (object)bridgeVersion ?? DBNull.Value);
+
+                    if (cmd.ExecuteNonQuery() > 0)
+                    {
+                        _log($"Session diagnostics stored: {FiltCoverageSeconds:F1}s filtered EEG delivered, " +
+                             $"{FiltGapSeconds:F1}s lost across {FiltResyncs} gap(s).");
+                    }
+                    else
+                    {
+                        // Same ambiguity MarkRecordingStarted documents: under row-level security a
+                        // missing column grant yields 0 rows and no error. Say so rather than
+                        // logging a success that did not happen.
+                        _log("WARNING: session diagnostics UPDATE affected 0 rows — likely a missing " +
+                             "column-level UPDATE grant for the bridge DB role (see migration 014).");
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                _lastError = ex.Message;
+                _log("Session diagnostics write failed: " + ex.Message);
             }
         }
 
@@ -931,9 +1081,30 @@ namespace NeuuroBridge
             try { _flushTimer?.Dispose(); } catch { /* ignore */ }
             lock (_ioLock)
             {
-                try { Flush(); }   // final drain
+                // ORDER IS LOAD-BEARING, and all four steps must happen on this one open
+                // connection before it closes:
+                //   1. Flush            — the last EEG rows land, advancing the sample counters to
+                //                         the final frame that actually arrived.
+                //   2. SealTrailingGap  — measures the tail dropout FROM that counter position, so
+                //                         it has to follow the flush, not precede it.
+                //   3. Diagnostics      — reads the now-final counts, including the tail gap.
+                //   4. Mark completed   — the "all my rows are in" signal every downstream worker
+                //                         gates on. Last, so nothing observes it early.
+                try { Flush(); }
                 catch (Exception ex) { _log("Final flush error: " + ex.Message); }
-                if (_markCompletedOnDispose) MarkCompletedInternal();   // after the drain, before close
+
+                // Monitor is reentrant, so SealTrailingGap taking _ioLock again is safe here.
+                if (_sealStopUtc != default(DateTime))
+                {
+                    try { SealTrailingGap(_sealStopUtc); }
+                    catch (Exception ex) { _log("Trailing-gap seal failed: " + ex.Message); }
+                }
+
+                if (_markCompletedOnDispose)
+                {
+                    WriteSessionDiagnostics(_bridgeVersion);
+                    MarkCompletedInternal();
+                }
                 ResetConnection();
             }
             _log($"DB uploader stopped. Sent {EegRowsSent} eeg + {BandRowsSent} band + {RawRowsSent} raw + {FiltRowsSent} filt rows" +

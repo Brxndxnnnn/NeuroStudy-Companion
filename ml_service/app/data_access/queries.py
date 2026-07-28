@@ -20,6 +20,8 @@ All functions accept an open SQLAlchemy connection so the caller controls
 the transaction boundary. Returns plain list-of-dicts for easy downstream use.
 """
 
+import os
+
 from sqlalchemy import text
 
 
@@ -182,6 +184,22 @@ def fetch_labelled_image_events(conn, session_id: str) -> list[dict]:
     return [dict(r) for r in rows]
 
 
+# Minimum sessions.timeline_version accepted for training.
+#
+#   1 = the pre-fix bridge, whose drift guard absorbed sub-3-second losses and
+#       COMPRESSED the sample timeline. Its EEG is real but its event alignment is up
+#       to 3 s out, so a share of every image's epochs carries the neighbouring
+#       stimulus's signal under the wrong label (migration 014).
+#   2 = sub-second drift tolerance: gaps are real, alignment is trustworthy.
+#
+# Defaults to 1 — INCLUDE EVERYTHING — deliberately. Every session recorded before the
+# fix is version 1, so defaulting to 2 would drop the training set to zero the moment
+# this deploys and quietly stop the weekly cron producing models at all. Raise it to 2
+# via PHASE1_MIN_TIMELINE_VERSION once enough post-fix sessions have accumulated; the
+# mix is logged on every train so the decision is informed rather than guessed.
+MIN_TIMELINE_VERSION = int(os.getenv("PHASE1_MIN_TIMELINE_VERSION", "1"))
+
+
 def fetch_completed_session_ids(conn) -> list[str]:
     """
     Every session whose EEG is fully written and therefore safe to train on.
@@ -191,13 +209,16 @@ def fetch_completed_session_ids(conn) -> list[str]:
     It is the only signal that means "all my rows are in". Do not substitute an
     earlier one — the frontend finishing its stimulus sequence does not imply the
     bridge has finished writing.
+
+    Also gated on timeline_version — see MIN_TIMELINE_VERSION.
     """
     rows = conn.execute(text("""
         SELECT session_id
         FROM   sessions
         WHERE  sync_status = 'completed'
+          AND  COALESCE(timeline_version, 1) >= :minver
         ORDER  BY start_time ASC
-    """)).mappings().all()
+    """), {"minver": MIN_TIMELINE_VERSION}).mappings().all()
 
     return [str(r["session_id"]) for r in rows]
 
@@ -214,10 +235,30 @@ def fetch_client_session_ids(conn, client_id: str) -> list[str]:
         SELECT session_id
         FROM   sessions
         WHERE  sync_status = 'completed' AND client_id = :cid
+          AND  COALESCE(timeline_version, 1) >= :minver
         ORDER  BY start_time ASC
-    """), {"cid": client_id}).mappings().all()
+    """), {"cid": client_id, "minver": MIN_TIMELINE_VERSION}).mappings().all()
 
     return [str(r["session_id"]) for r in rows]
+
+
+def fetch_timeline_version_mix(conn, session_ids: list[str]) -> dict:
+    """
+    How many of these sessions came from a compressed vs. an honest timeline.
+
+    Reported on every train. A model fitted across BOTH populations is the worst case:
+    part of its data has correct labels and part does not, so its cross-validated score
+    describes neither. Surfacing the mix is what stops that going unnoticed.
+    """
+    if not session_ids:
+        return {}
+    rows = conn.execute(text("""
+        SELECT COALESCE(timeline_version, 1) AS v, count(*) AS n
+        FROM   sessions
+        WHERE  session_id = ANY(:ids)
+        GROUP  BY 1 ORDER BY 1
+    """), {"ids": session_ids}).mappings().all()
+    return {int(r["v"]): int(r["n"]) for r in rows}
 
 
 def fetch_session_client(conn, session_id: str) -> str | None:

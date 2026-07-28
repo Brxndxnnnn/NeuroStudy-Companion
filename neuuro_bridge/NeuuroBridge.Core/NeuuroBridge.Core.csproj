@@ -15,6 +15,20 @@
     <!-- PostgreSQL/TimescaleDB client. 6.0.x is the last line targeting netstandard2.0,
          so it runs on .NET Framework 4.8. -->
     <PackageReference Include="Npgsql" Version="6.0.13" />
+    <!-- WinRT metadata, so net48 can see Windows.Devices.Bluetooth and ask for a faster BLE
+         connection interval (BleConnectionTuner). The .winmd files under ref/ are compile-time
+         only — the types themselves come from the OS at runtime, so this adds nothing to the
+         installer beyond the small facade below. It does introduce a floor of Windows 10 1809
+         for the API; the README already requires 1903+. -->
+    <PackageReference Include="Microsoft.Windows.SDK.Contracts" Version="10.0.22621.2428" />
+    <!-- Supplies the awaiter that makes `await` work on a WinRT IAsyncOperation. Referenced
+         explicitly rather than relied on transitively, so the dependency is stated where it is
+         needed. NuGet resolves it from the .NET Framework itself on net48 (it is a framework
+         facade) and copies nothing to the output directory — that is the supported setup, not
+         an omission. Worth knowing when reading a build log: if this ever DID need shipping,
+         the failure mode is silent, because BleConnectionTuner swallows every exception and the
+         connection tuning would simply never happen. It logs both outcomes for that reason. -->
+    <PackageReference Include="System.Runtime.WindowsRuntime" Version="4.6.0" />
   </ItemGroup>
 
   <ItemGroup>
