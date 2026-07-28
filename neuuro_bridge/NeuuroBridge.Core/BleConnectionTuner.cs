@@ -149,17 +149,28 @@ namespace NeuuroBridge
             address = 0;
             if (string.IsNullOrWhiteSpace(text)) return false;
 
-            var cleaned = text.Trim().Replace(":", "").Replace("-", "").Replace(" ", "");
+            var trimmed = text.Trim();
+            // Separators and a 0x prefix are positive evidence of hex, so capture them BEFORE they
+            // are stripped — otherwise a separated all-numeric MAC ("00:11:22:33:44:55") would be
+            // indistinguishable from a decimal id once cleaned.
+            bool hadHexMarkup = trimmed.IndexOf(':') >= 0 || trimmed.IndexOf('-') >= 0
+                             || trimmed.StartsWith("0x", StringComparison.OrdinalIgnoreCase);
+
+            var cleaned = trimmed.Replace(":", "").Replace("-", "").Replace(" ", "");
             if (cleaned.StartsWith("0x", StringComparison.OrdinalIgnoreCase))
                 cleaned = cleaned.Substring(2);
             if (cleaned.Length == 0) return false;
 
-            // A 12-character all-hex string is a MAC. Anything all-decimal is the numeric form.
-            // Order matters: "227405302602318" is valid hex too, so decimal is tried FIRST for
-            // anything that is not exactly a 12-digit MAC, or a plain decimal id would be read as
-            // hex and silently address a different device.
-            bool looksLikeMac = cleaned.Length == 12 && IsHex(cleaned);
-            if (!looksLikeMac && ulong.TryParse(cleaned, NumberStyles.None, CultureInfo.InvariantCulture, out address))
+            // Interpret as hex ONLY on positive evidence: separators, a 0x prefix, or an a–f
+            // hex letter (which a decimal number can never contain). Everything else is the
+            // decimal numeric form and is parsed as decimal — the previous length-based rule
+            // treated any 12-digit string as a MAC, so a 12-digit DECIMAL id (BLE addresses whose
+            // leading byte is 0x00–0x03) was read as hex and silently addressed a different
+            // device. The only residual ambiguity is a bare, unseparated, all-numeric 12-char
+            // string; that is parsed as decimal, matching the SDK's own decimal encoding, and the
+            // caller anyway supplies the hex encoding as a second candidate.
+            bool isHex = hadHexMarkup || ContainsHexLetter(cleaned);
+            if (!isHex && ulong.TryParse(cleaned, NumberStyles.None, CultureInfo.InvariantCulture, out address))
                 return address != 0;
             if (IsHex(cleaned) &&
                 ulong.TryParse(cleaned, NumberStyles.HexNumber, CultureInfo.InvariantCulture, out address))
@@ -175,6 +186,16 @@ namespace NeuuroBridge
                 if (!((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F')))
                     return false;
             return true;
+        }
+
+        // An a–f/A–F hex letter that a decimal number can never contain — positive proof the
+        // string is a hex MAC rather than the decimal numeric id.
+        private static bool ContainsHexLetter(string s)
+        {
+            foreach (var c in s)
+                if ((c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F'))
+                    return true;
+            return false;
         }
     }
 }
