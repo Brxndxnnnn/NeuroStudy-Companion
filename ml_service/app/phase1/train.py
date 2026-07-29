@@ -44,6 +44,66 @@ MIN_IMAGES_TO_FIT = int(os.getenv("PHASE1_MIN_IMAGES", "2"))
 KEEP_ARTIFACTS = int(os.getenv("PHASE1_KEEP_ARTIFACTS", "5"))
 
 
+def _log_extraction(conn, reports, session_ids: list[str] | None) -> None:
+    """
+    Say why epochs were dropped, and which timeline the data came from.
+
+    build_dataset has always produced an ExtractionReport per session; train.py used to
+    assign it to `_` and throw it away. So the one place that could explain a low yield
+    — dead electrodes, gap-spanning windows, unlabelled or too-noisy images — reported
+    nothing, and diagnosing a thin training set meant re-running the extraction by hand.
+
+    Aggregated rather than per-session: a weekly cron over dozens of sessions should not
+    emit dozens of log blocks, but it must not stay silent either.
+    """
+    if not reports:
+        return
+
+    agg = {
+        "events": sum(r.events_total for r in reports),
+        "kept": sum(r.epochs_kept for r in reports),
+        "no_label": sum(r.events_no_label for r in reports),
+        "noisy_label": sum(r.events_label_too_noisy for r in reports),
+        "too_short": sum(r.events_too_short for r in reports),
+        "flat": sum(r.epochs_flat_channel for r in reports),
+        "artefact": sum(r.epochs_artefact for r in reports),
+        "gap": sum(r.epochs_gap for r in reports),
+    }
+    log.info(
+        "Extraction over %d session(s): %d epochs kept from %d image events. "
+        "Events skipped — %d unlabelled, %d label too noisy, %d too short. "
+        "Epochs dropped — %d flat channel, %d artefact, %d spanning an EEG gap.",
+        len(reports), agg["kept"], agg["events"],
+        agg["no_label"], agg["noisy_label"], agg["too_short"],
+        agg["flat"], agg["artefact"], agg["gap"],
+    )
+
+    dead = sorted({ch for r in reports for ch in r.dead_channels})
+    if dead:
+        log.warning(
+            "Dead electrodes in this training set: %s. Asymmetry features involving "
+            "them are noise, not signal.", dead,
+        )
+
+    # Which timeline produced this data — see queries.MIN_TIMELINE_VERSION.
+    try:
+        ids = session_ids or [str(r.session_id) for r in reports]
+        mix = queries.fetch_timeline_version_mix(conn, [str(s) for s in ids])
+        if mix:
+            log.info("Timeline versions in training set: %s (1 = pre-fix compressed, 2 = honest gaps).", mix)
+        if len(mix) > 1:
+            log.warning(
+                "Training set MIXES timeline versions %s. Version-1 sessions carry event "
+                "alignment up to 3 s out, so this model is fitted partly on mislabelled "
+                "epochs and its CV score describes neither population cleanly. Set "
+                "PHASE1_MIN_TIMELINE_VERSION=2 once enough post-fix sessions exist.",
+                sorted(mix),
+            )
+    except Exception:
+        # Diagnostics must never break a training run.
+        log.debug("Could not read timeline version mix.", exc_info=True)
+
+
 def _empty_metrics() -> tuple[dict, dict]:
     nan = {"valence": None, "arousal": None}
     return {"r2": dict(nan), "mae": dict(nan)}, {"r2": dict(nan)}
@@ -191,7 +251,8 @@ def train_and_save(
             log.info("No completed sessions for client %s — nothing to train.", client_id)
             return None
 
-    X, y, groups, sessions, _ = build_dataset(conn, session_ids, cfg, verbose=False)
+    X, y, groups, sessions, reports = build_dataset(conn, session_ids, cfg, verbose=False)
+    _log_extraction(conn, reports, session_ids)
     n_epochs = int(X.shape[0])
     n_images = int(len(np.unique(groups))) if n_epochs else 0
     n_sessions = int(len(np.unique(sessions))) if n_epochs else 0

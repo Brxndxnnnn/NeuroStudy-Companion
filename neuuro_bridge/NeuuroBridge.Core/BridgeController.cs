@@ -29,8 +29,21 @@ namespace NeuuroBridge
         // Where each electrode sits on the head (10-20 system), in ChannelLabels order.
         public static readonly string[] ChannelLocations = { "Left forehead", "Right forehead", "Right temple", "Left temple" };
 
+        /// <summary>
+        /// Version of the running app — the WPF assembly's csproj &lt;Version&gt;. Stamped onto the
+        /// session row so a stored dropout figure can be traced back to the build that produced it
+        /// (drift tolerances are configurable, so "which bridge wrote this?" is a real question).
+        /// Null under a test host with no entry assembly.
+        /// </summary>
+        public static string AppVersion =>
+            System.Reflection.Assembly.GetEntryAssembly()?.GetName()?.Version?.ToString();
+
         private readonly SenzeBandService _svc = SenzeBandService.Instance;
         private readonly EegProcessor _processor = new EegProcessor();
+        // Holds the faster-BLE-interval request for as long as a device is connected. Its log
+        // messages go to the same sink as everything else, so a refused request is visible in the
+        // session log rather than being silently absent.
+        private readonly BleConnectionTuner _bleTuner;
         private DbUploader _db;
 
         private readonly object _devLock = new object();
@@ -208,6 +221,13 @@ namespace NeuuroBridge
             }
         }
 
+        // A constructor exists only because a field initialiser cannot capture `this`, and the
+        // tuner needs to forward its messages to the Log event.
+        public BridgeController()
+        {
+            _bleTuner = new BleConnectionTuner(m => Log?.Invoke(m));
+        }
+
         // ── Lifecycle ────────────────────────────────────────────────────────
         /// <summary>Wires SDK events and initialises the SDK. Fires <see cref="Initialized"/> when ready.</summary>
         public void Initialize(string license)
@@ -231,6 +251,11 @@ namespace NeuuroBridge
                 _connAddress = addr; _connDeviceID = id;
                 lock (_devLock) { _devices.TryGetValue(id, out var d); _connDevice = d; }
                 Connected?.Invoke(addr, id);
+                // Ask Windows for a faster BLE interval before any streaming begins. The default
+                // ~30 ms interval carries ~32 of the ~40 notifications/s the headset wants to send,
+                // and the vendor SDK amplifies each dropped notification into ~0.4 s of lost EEG.
+                // Best-effort and off-thread — see BleConnectionTuner.
+                _bleTuner.RequestThroughputAsync(addr, id);
                 // Begin live preview immediately so the technician can fit the headset and watch the
                 // waveform BEFORE opening a DB session. Raw EEG unlocks once authentication completes;
                 // signal-quality/impedance flow even pre-auth. DB upload stays gated behind StartSession.
@@ -257,6 +282,8 @@ namespace NeuuroBridge
                 // same _db, same pairing code; the recording simply continues.
                 _connAddress = addr; _connDeviceID = id;
                 Log?.Invoke("[reconnect] link restored — resuming session");
+                // The old link's parameter request died with it; re-request against the new one.
+                _bleTuner.RequestThroughputAsync(addr, id);
                 StartStreaming();
                 Reconnected?.Invoke();
             };
@@ -284,6 +311,9 @@ namespace NeuuroBridge
                 StopSyncPoll();
                 StopProgressPoll();
                 StopSummaryPoll();
+                // The link is gone; drop the parameter request so Windows is not holding a fast
+                // interval open for a device that is no longer there.
+                _bleTuner.Release();
                 _prepared = false;
                 SetSyncStatus("");
                 lock (_stateLock) { _heartRate = null; _spo2 = null; }
@@ -337,6 +367,7 @@ namespace NeuuroBridge
             StopProgressPoll();      // progress tracking ends with the connection, not the recording
             StopSummaryPoll();
             StopStreaming();
+            _bleTuner.Release();
             _prepared = false;
             SetSyncStatus("");
             string addr = _connAddress;
@@ -467,12 +498,15 @@ namespace NeuuroBridge
             // Stop is the technician's explicit "complete session": flag the row so disposal flips
             // sessions.sync_status → 'completed' after the final data flush (unclaimed → claimed →
             // completed; the frontend owns the middle 'claimed' transition).
-            try { _db?.RequestComplete(); } catch { /* ignore */ }
+            //
+            // RecordingStopUtc and the app version go in here rather than being applied afterwards:
+            // Dispose now owns the whole closing sequence (flush → seal trailing gap → write
+            // diagnostics → mark completed) so every step runs on the one still-open connection and
+            // in an order that cannot be got wrong from out here. Sealing the tail used to be a
+            // separate call AFTER Dispose, which worked only because the connection happened to
+            // still be reusable — and left no window to persist the corrected figures at all.
+            try { _db?.RequestComplete(RecordingStopUtc, AppVersion); } catch { /* ignore */ }
             try { _db?.Dispose(); } catch { /* ignore */ }
-            // After Dispose — its final drain is what advances the sample counter to the last frame
-            // that actually arrived, which is the reference point a trailing gap is measured from.
-            // Before SessionStopped, so the end-of-session summary reads the corrected dropout figure.
-            try { _db?.SealTrailingGap(RecordingStopUtc); } catch { /* ignore */ }
             _prepared = false;               // next Start prepares a new session row + pairing code
             _recordingConfirmed = false;
             SetSyncStatus("completed");
@@ -920,6 +954,7 @@ namespace NeuuroBridge
             if (_draining) FinalizeStop();   // app shutting down — don't leave a grace timer dangling
             try { _svc.StopStream(); } catch { /* ignore */ }
             try { _db?.Dispose(); } catch { /* ignore */ }
+            try { _bleTuner.Dispose(); } catch { /* ignore */ }
             try { _svc.Shutdown(); } catch { /* ignore */ }
         }
     }

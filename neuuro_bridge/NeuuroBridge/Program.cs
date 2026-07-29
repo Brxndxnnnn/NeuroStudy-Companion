@@ -177,7 +177,10 @@ namespace NeuuroBridge
             //    (flag flips sync_status after the final flush — see DbUploader.RequestComplete).
             Print("\nStopping...");
             _svc.StopStream();
-            _db?.RequestComplete();
+            // DateTime.UtcNow is the stop instant: the console has no separate stop step, so
+            // exiting the menu IS the end of recording. Dispose then runs the full closing
+            // sequence (flush → seal the trailing gap → write diagnostics → mark completed).
+            _db?.RequestComplete(DateTime.UtcNow, BridgeController.AppVersion);
             _db?.Dispose();   // flush the final EEG/band batch, then mark completed, before exit
             _svc.Shutdown();
             Print("Done.");

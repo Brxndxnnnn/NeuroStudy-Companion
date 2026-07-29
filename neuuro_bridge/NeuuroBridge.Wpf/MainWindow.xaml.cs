@@ -294,13 +294,20 @@ namespace NeuuroBridge.Wpf
             string dropNote = db.RawGapSeconds >= 0.5
                 ? $" {db.RawGapSeconds:F1}s of Bluetooth signal dropout across {db.RawResyncs} gap(s) was not recorded by the headset."
                 : "";
+            // The filtered stream is what ml_service trains on, so its dropout — not the raw
+            // stream's — is what bounds epoch yield. Reported separately because the two streams
+            // anchor independently and carry different drift tolerances (see DbUploader).
+            string filtNote = db.FiltGapSeconds >= 0.5
+                ? $" Analysis stream: {db.FiltCoverageSeconds:F0}s of EEG captured, {db.FiltGapSeconds:F1}s lost " +
+                  $"across {db.FiltResyncs} gap(s) ({100.0 * db.FiltGapSeconds / Math.Max(1.0, secs):F0}% of the session)."
+                : "";
             // Normally zero — the stop-grace window (see BridgeController.StopGraceMs) drains the
             // in-flight BLE tail before the session closes. Only shows if that window wasn't enough.
             string tailNote = _ctl.TailLossSeconds >= 0.5
                 ? $" {_ctl.TailLossSeconds:F1}s of buffered signal was still in flight when the grace window closed and was not recorded."
                 : "";
             TxtDbSummary.Text = $"Session complete — uploaded {sent:N0} of ~{expected:N0} expected rows " +
-                                $"({pct:F1}% of received signal) · ≈{mb} MB over {FmtDur(secs)}.{dropNote}{tailNote}";
+                                $"({pct:F1}% of received signal) · ≈{mb} MB over {FmtDur(secs)}.{dropNote}{filtNote}{tailNote}";
             TxtDbSummary.Foreground = pct >= 98 ? Good : pct >= 90 ? Warn : Bad;
             TxtDbSummary.Visibility = Visibility.Visible;
             Log(TxtDbSummary.Text);
