@@ -91,11 +91,13 @@ jobs:
       # are Windows-only — so the action had to go, not the runner.
       - name: Publish the release set to the droplet feed
         shell: pwsh
+        timeout-minutes: 10   # a hung ssh must never burn the whole job again
         env:
           DROPLET_HOST: ${{ secrets.DROPLET_HOST }}
           DROPLET_USER: ${{ secrets.DROPLET_USER }}
           DROPLET_SSH_KEY: ${{ secrets.DROPLET_SSH_KEY }}
         run: |
+          $ErrorActionPreference = "Stop"
           $sshDir = Join-Path $env:USERPROFILE ".ssh"
           New-Item -ItemType Directory -Force -Path $sshDir | Out-Null
 
@@ -106,14 +108,24 @@ jobs:
           if (-not $key.EndsWith("`n")) { $key += "`n" }
           [System.IO.File]::WriteAllText($keyPath, $key, [System.Text.UTF8Encoding]::new($false))
 
+          # Shape check on the secret, printing NOTHING from the key itself. A secret
+          # pasted with literal "\n", or truncated, otherwise surfaces only as an
+          # authentication failure with no indication of why.
+          $firstLine = (Get-Content $keyPath -TotalCount 1)
+          if ($firstLine -notmatch '^-----BEGIN .*PRIVATE KEY-----$') {
+            throw "DROPLET_SSH_KEY does not start with a PEM header - check the secret is the full private key with real newlines."
+          }
+          Write-Host "Key looks well-formed: $firstLine ($((Get-Content $keyPath).Count) lines)"
+
           # Windows has no chmod; OpenSSH checks NTFS ACLs instead and refuses a key
-          # that any other principal can read.
+          # that any other principal can read - and on refusal it falls back to a
+          # PASSWORD prompt, which is one of the ways this step used to hang.
           icacls $keyPath /inheritance:r /grant:r "$($env:USERNAME):(R)" | Out-Null
 
-          # Pin the host key rather than disabling verification. First run TOFUs it, the
-          # same trust model the existing production deploy uses.
-          ssh-keyscan -H $env:DROPLET_HOST 2>$null | Out-File -Append -Encoding ascii (Join-Path $sshDir "known_hosts")
-
+          # No ssh-keyscan: publish.ps1 passes StrictHostKeyChecking=accept-new, which
+          # records an unknown host key without prompting and still refuses a CHANGED
+          # one. Pre-seeding known_hosts added a step that could fail silently (its
+          # stderr was suppressed) and then hang ssh on an interactive confirmation.
           powershell -ExecutionPolicy Bypass -File neuuro_bridge/packaging/publish.ps1 `
             -Target "$($env:DROPLET_USER)@$($env:DROPLET_HOST)" `
             -IdentityFile $keyPath
