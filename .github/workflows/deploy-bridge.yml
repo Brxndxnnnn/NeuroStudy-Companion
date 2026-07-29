@@ -80,16 +80,43 @@ jobs:
         shell: pwsh
         run: powershell -ExecutionPolicy Bypass -File neuuro_bridge/packaging/pack.ps1
 
+      # Uses the OpenSSH client built into the Windows runner and defers to
+      # packaging/publish.ps1, exactly as the pack step defers to pack.ps1 — so CI and a
+      # manual release run the same upload logic rather than two copies that can drift.
+      #
+      # This step previously used appleboy/scp-action, which is a DOCKER CONTAINER
+      # action. Container actions only run on Linux runners, so on this Windows job it
+      # failed with "Container action is only supported on Linux" before uploading
+      # anything. The job has to stay on Windows — the .NET Framework 4.8 build and vpk
+      # are Windows-only — so the action had to go, not the runner.
       - name: Publish the release set to the droplet feed
-        uses: appleboy/scp-action@v0.1.7
-        with:
-          host: ${{ secrets.DROPLET_HOST }}
-          username: ${{ secrets.DROPLET_USER }}
-          key: ${{ secrets.DROPLET_SSH_KEY }}
-          source: "neuuro_bridge/packaging/releases/*"
-          target: "/var/bridge-updates"
-          strip_components: 3
-          overwrite: true
+        shell: pwsh
+        env:
+          DROPLET_HOST: ${{ secrets.DROPLET_HOST }}
+          DROPLET_USER: ${{ secrets.DROPLET_USER }}
+          DROPLET_SSH_KEY: ${{ secrets.DROPLET_SSH_KEY }}
+        run: |
+          $sshDir = Join-Path $env:USERPROFILE ".ssh"
+          New-Item -ItemType Directory -Force -Path $sshDir | Out-Null
+
+          # The key must be LF-terminated: OpenSSH rejects a CRLF private key with
+          # "invalid format", and PowerShell redirection would otherwise write CRLF.
+          $keyPath = Join-Path $sshDir "droplet_key"
+          $key = $env:DROPLET_SSH_KEY -replace "`r`n", "`n"
+          if (-not $key.EndsWith("`n")) { $key += "`n" }
+          [System.IO.File]::WriteAllText($keyPath, $key, [System.Text.UTF8Encoding]::new($false))
+
+          # Windows has no chmod; OpenSSH checks NTFS ACLs instead and refuses a key
+          # that any other principal can read.
+          icacls $keyPath /inheritance:r /grant:r "$($env:USERNAME):(R)" | Out-Null
+
+          # Pin the host key rather than disabling verification. First run TOFUs it, the
+          # same trust model the existing production deploy uses.
+          ssh-keyscan -H $env:DROPLET_HOST 2>$null | Out-File -Append -Encoding ascii (Join-Path $sshDir "known_hosts")
+
+          powershell -ExecutionPolicy Bypass -File neuuro_bridge/packaging/publish.ps1 `
+            -Target "$($env:DROPLET_USER)@$($env:DROPLET_HOST)" `
+            -IdentityFile $keyPath
 
       - name: Summary
         shell: pwsh
