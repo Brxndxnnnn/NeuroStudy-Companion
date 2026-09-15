@@ -83,8 +83,17 @@ unclaimed ──▶ claimed ──▶ recording ──▶ completed
 |---|---|---|
 | `unclaimed` | bridge | Headset connected; row created with a pairing code, awaiting the web app |
 | `claimed` | web | Clinician entered the pairing code; session bound to a client |
-| `recording` | web | Stimulus sequence running; bridge streams EEG |
-| `completed` | bridge | Bridge finished its stop-grace drain and final flush |
+| `recording` | bridge | Technician pressed Start on the bridge; stimulus sequence running, bridge streams EEG |
+| `completed` | bridge (also written by web on end) | Bridge finished its stop-grace drain and final flush |
+
+**The bridge owns starting a session, not the website** (`BridgeController.StartSession
+→ DbUploader.MarkRecording`, `MainWindow.xaml.cs:BtnStartSession_Click`). The technician
+presses "Start Session" once the website shows the session as `claimed`; the button
+writes `sync_status='recording'` (+ `start_time`) directly, and the website only
+observes the transition by polling `GET /sessions/:id` for `bridge_recording_at` — it
+has no start endpoint of its own. Ending a session is unchanged: the website still
+writes `sync_status='completed'` and the bridge's sync poll reacts by draining and
+closing (`BridgeController.PollSyncStatus`).
 
 **`completed` is the only state that means "all my rows are in."** It is set after
 `BridgeController.FinalizeStop → DbUploader.Dispose`. Everything downstream —

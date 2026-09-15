@@ -6,7 +6,6 @@ import {
   getImages,
   getClinicStimulusSet,
   getQuestions,
-  startSession,
   getSession,
   endSession,
   createEvent,
@@ -35,7 +34,7 @@ const PHASES = [
 ];
 
 function phaseOf(step) {
-  if (step === "ready" || step === "connecting") return "connect";
+  if (step === "awaiting") return "connect";
   if (step === "complete") return "done";
   return step;
 }
@@ -73,8 +72,10 @@ function Stepper({ step }) {
 export default function ActiveSessionMockup() {
   const router = useRouter();
 
-  const [currentStep, setCurrentStep] = useState("ready");
-  const [isWaitingForBridge, setIsWaitingForBridge] = useState(false);
+  // The bridge now owns recording-start (client requirement #8): there is no button here,
+  // only a passive wait for the technician to press Start on the bridge — see the auto-poll
+  // effect below. "awaiting" replaces the old "ready"/"connecting" pair.
+  const [currentStep, setCurrentStep] = useState("awaiting");
   const [pollingError, setPollingError] = useState("");
 
   const [images, setImages] = useState([]);
@@ -322,57 +323,43 @@ export default function ActiveSessionMockup() {
     questions
   ])
 
-  // 6. START SESSION & POLL
-  const handleStartRecording = async () => {
-    setPollingError("");
-    setIsWaitingForBridge(true);
-    setCurrentStep("connecting");
-
+  // 6. AWAIT THE BRIDGE — the technician presses Start on the bridge itself, which writes
+  // sync_status='recording' + bridge_recording_at directly (see NeuuroBridge.Core.DbUploader
+  // .MarkRecording / .MarkRecordingStarted). This page has no start action of its own: it just
+  // calibrates the clock up front and polls until the bridge confirms it's actually recording.
+  // Unlike the old website-triggered flow, there is no timeout here — how long the technician
+  // takes to fit the headset and press Start is entirely up to them, not an error condition.
+  useEffect(() => {
     const sessionId = localStorage.getItem("currentSessionId");
     if (!sessionId || sessionId === "undefined") {
       setPollingError("Missing Session ID. Please pair again.");
-      setIsWaitingForBridge(false);
       return;
     }
 
-    try {
-      resetSessionClock();
-      const startRes = await startSession(sessionId);
-      if (!startRes.ok) throw new Error("Failed to initialize session on the server.");
+    resetSessionClock();
+    calibrateSessionClock()
+      .then((calibration) => console.info('Session clock calibrated', calibration))
+      .catch((error) => console.warn('Session clock calibration failed; browser time will be used', error));
 
-      try {
-        const calibration = await calibrateSessionClock()
-        console.info('Session clock calibrated', calibration)
-      } catch (error) {
-        console.warn('Session clock calibration failed; browser time will be used', error)
-      }
-
-      let attempts = 0;
-      const pollInterval = setInterval(async () => {
-        attempts++;
-        const checkRes = await getSession(sessionId);
-        if (checkRes.ok) {
-          const sessionData = await checkRes.json();
-          if (sessionData.bridge_recording_at !== null) {
-            clearInterval(pollInterval);
-            setIsWaitingForBridge(false);
-            // if (images.length > 0) logImageShown(images[0].image_id);
-            setCurrentImageIndex(0);
-            setCurrentStep("images");
-            return;
-          }
-        }
-        if (attempts >= 30) {
+    let cancelled = false;
+    const pollInterval = setInterval(async () => {
+      if (cancelled) return;
+      const checkRes = await getSession(sessionId);
+      if (checkRes.ok) {
+        const sessionData = await checkRes.json();
+        if (sessionData.bridge_recording_at !== null) {
           clearInterval(pollInterval);
-          setIsWaitingForBridge(false);
-          setPollingError("headset not recording — check the bridge PC");
+          setCurrentImageIndex(0);
+          setCurrentStep("images");
         }
-      }, 1000);
-    } catch (err) {
-      setIsWaitingForBridge(false);
-      setPollingError("Network error while connecting to the database.");
-    }
-  };
+      }
+    }, 1000);
+
+    return () => {
+      cancelled = true;
+      clearInterval(pollInterval);
+    };
+  }, []);
 
   // 7. MATH NAVIGATION
   const handleMathAnswerChange = (value) => {
@@ -417,32 +404,17 @@ export default function ActiveSessionMockup() {
   };
 
   // ── UI RENDER FUNCTIONS ──────────────────────────────────────
-  const renderReadyState = () => (
+  const renderAwaitingTechnician = () => (
     <Card className="max-w-2xl mx-auto p-10 text-center anim-pop">
-      <div className="mx-auto mb-6 grid h-16 w-16 place-items-center rounded-full bg-good-soft text-good-strong text-3xl">✓</div>
-      <h2 className="text-2xl font-bold tracking-tight text-ink mb-2">Session claimed</h2>
-      <p className="text-muted mb-8">The headset is paired. Start the session to begin recording.</p>
-      <Button size="lg" fullWidth onClick={handleStartRecording}>
-        Start session
-      </Button>
-    </Card>
-  );
-
-  const renderConnecting = () => (
-    <Card className="max-w-2xl mx-auto p-10 text-center anim-pop">
-      <h2 className="text-2xl font-bold tracking-tight text-ink mb-6">Waiting for the headset</h2>
-      {isWaitingForBridge ? (
-        <div className="flex flex-col items-center gap-4">
-          <Spinner size={40} className="text-accent" />
-          <p className="text-accent-strong font-semibold">Confirming the bridge has started recording…</p>
-        </div>
+      {pollingError ? (
+        <Alert tone="crit" className="uppercase tracking-wide">{pollingError}</Alert>
       ) : (
-        pollingError && (
-          <div className="flex flex-col items-center gap-5">
-            <Alert tone="crit" className="uppercase tracking-wide">{pollingError}</Alert>
-            <Button variant="subtle" onClick={() => setCurrentStep("ready")}>← Try again</Button>
-          </div>
-        )
+        <div className="flex flex-col items-center gap-4">
+          <div className="mx-auto grid h-16 w-16 place-items-center rounded-full bg-good-soft text-good-strong text-3xl">✓</div>
+          <h2 className="text-2xl font-bold tracking-tight text-ink mb-2">Session claimed</h2>
+          <p className="text-muted">Awaiting technician to start the session on the bridge.</p>
+          <Spinner size={40} className="text-accent mt-2"/>
+        </div>
       )}
     </Card>
   );
@@ -571,8 +543,7 @@ export default function ActiveSessionMockup() {
 
       <div className="flex-1 flex items-center justify-center px-5 py-10">
         <div className="w-full">
-          {currentStep === "ready" && renderReadyState()}
-          {currentStep === "connecting" && renderConnecting()}
+          {currentStep === "awaiting" && renderAwaitingTechnician()}
           {currentStep === "images" && renderImageStimuli()}
           {currentStep === "math" && renderMathTest()}
           {currentStep === "survey" && renderSurvey()}

@@ -137,35 +137,9 @@ router.patch(
     sessionController.pairSessions
 )
 
-/**
- * @openapi
- * /api/sessions/{session_id}/start:
- *   patch:
- *     summary: Start a session by setting its sync_status to "recording" and recording the start_time
- *     description: |
- *       This endpoint allows you to start a specific session. You must provide the session_id in the URL.
- * 
- *       **Note**: The `session_id` must be a valid UUID. If the provided ID does not exist in the database, an error will be returned.
- *     tags: [Sessions]
- *     security:
- *       - bearerAuth: []
- *     parameters:
- *       - in: path
- *         name: session_id
- *         required: true
- *     responses:
- *       200:
- *         description: Session successfully started
- *       400:
- *         description: Bad request (missing fields)
- *       404:
- *         description: Could not find session with the provided session_id
- */
-router.patch(
-    '/:session_id/start',
-    requirePermission(PERMS.SESSIONS_WRITE_OWN_CLINIC),
-    sessionController.startSession
-)
+// No /:session_id/start route: the bridge owns the recording-start transition (writes
+// sync_status='recording' + start_time itself via DbUploader.MarkRecording). The website
+// only observes it by polling GET /:session_id and showing "awaiting technician".
 
 /**
  * @openapi

@@ -76,11 +76,6 @@ const pairSessions = async (pairing_code, client_id, conducted_by, clinic_id, cl
     }
 }
 
-const startSession = async (session_id, client = pool) => {
-    const { rows } = await query(client, `UPDATE sessions SET sync_status = 'recording', start_time = NOW() WHERE session_id = $1 RETURNING *`, [session_id])
-    return rows[0] ?? null
-}
-
 const endSession = async (session_id, client = pool) => {
     const { rows } = await query(client, `UPDATE sessions SET sync_status = 'completed', end_time = NOW() WHERE session_id = $1 RETURNING *`, [session_id])
     return rows[0] ?? null
@@ -310,4 +305,4 @@ const getSessionFftBandPowerResults = async (session_id, client = pool) => {
     };
 };
 
-export default { findAll, findById, pairSessions, startSession, endSession, getSessionResult, backfillSessionResults, getSessionEEGResults, getSessionBandPowerResults, getEllipticBandStats, getSessionFftBandPowerResults }
+export default { findAll, findById, pairSessions, endSession, getSessionResult, backfillSessionResults, getSessionEEGResults, getSessionBandPowerResults, getEllipticBandStats, getSessionFftBandPowerResults }

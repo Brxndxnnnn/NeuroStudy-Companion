@@ -216,12 +216,8 @@ export async function pairSession(pairingCode, clientId) {
   });
   return res;
 }
-export async function startSession(sessionId) {
-  const res = await fetchWithAuth(`${BASE_URL}/sessions/${sessionId}/start`, {
-    method: "PATCH",
-  });
-  return res;
-}
+// No startSession(): the bridge owns the recording-start transition (writes
+// sync_status='recording' itself). The website only observes it via getSession polling.
 export async function endSession(sessionId) {
   const res = await fetchWithAuth(`${BASE_URL}/sessions/${sessionId}/end`, {
     method: "PATCH",

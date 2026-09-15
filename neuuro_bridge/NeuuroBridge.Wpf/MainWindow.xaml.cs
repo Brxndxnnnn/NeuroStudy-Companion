@@ -133,6 +133,13 @@ namespace NeuuroBridge.Wpf
             }
         }
 
+        private void BtnStartSession_Click(object sender, RoutedEventArgs e)
+        {
+            BtnStartSession.IsEnabled = false;   // re-armed by RefreshSessionHint for the NEXT claimed session
+            Log("Starting session…");
+            _ctl.StartSession();
+        }
+
         private void BtnStopSession_Click(object sender, RoutedEventArgs e)
         {
             BtnStopSession.IsEnabled = false;
@@ -209,6 +216,7 @@ namespace NeuuroBridge.Wpf
             BtnConnect.IsEnabled = CmbDevices.Items.Count > 0;
             BtnDisconnect.IsEnabled = false;
             BtnReauth.IsEnabled = false;
+            BtnStartSession.IsEnabled = false;
             BtnStopSession.IsEnabled = false;
             BtnCapture.IsEnabled = false;
             TxtPairHint.Visibility = Visibility.Collapsed;
@@ -599,14 +607,16 @@ namespace NeuuroBridge.Wpf
         private void SetConn(string text, Brush dot) { ConnPill.Text = text; ConnDot.Fill = dot; }
         private void SetAuth(string text, Brush dot) { TxtAuth.Text = text; AuthDot.Fill = dot; }
 
-        // While connected but not yet claimed by the website, show the "waiting to pair" hint.
-        // (Recording itself starts automatically via the sync-status handshake — no manual Start.)
+        // While connected but not yet claimed by the website, show the "waiting to pair" hint, and
+        // gate Start Session on the website having claimed the session (client requirement #8: the
+        // bridge starts recording itself once the technician presses this — see BtnStartSession_Click).
         private void RefreshSessionHint()
         {
             string s = _ctl.SyncStatus;
             bool waiting = _ctl.IsConnected && !_ctl.SessionActive
                            && (string.IsNullOrEmpty(s) || s == "unclaimed");
             TxtPairHint.Visibility = waiting ? Visibility.Visible : Visibility.Collapsed;
+            BtnStartSession.IsEnabled = _ctl.IsConnected && !_ctl.SessionActive && s == "claimed";
         }
     }
 }
