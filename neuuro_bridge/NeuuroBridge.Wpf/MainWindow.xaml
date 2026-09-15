@@ -211,7 +211,7 @@
                                      Margin="0,0,6,0" Visibility="Collapsed"/>
                             <TextBlock x:Name="TxtElapsed" Text="" Foreground="{StaticResource Bad}" FontWeight="SemiBold" FontFamily="Consolas" FontSize="14" VerticalAlignment="Center"/>
                         </DockPanel>
-                        <TextBlock Text="Recording starts and stops automatically with the session on the website."
+                        <TextBlock Text="Press Start Session once the website shows this session as claimed. The website ends the session; Stop below is a failsafe only."
                                    Foreground="{StaticResource Muted2}" FontSize="12" Margin="0,8,0,0" TextWrapping="Wrap"/>
                         <TextBlock x:Name="TxtPairHint" Text="Waiting to pair with website…"
                                    Foreground="{StaticResource Warn}" FontSize="12" Margin="0,4,0,0"
@@ -276,15 +276,21 @@
                     </StackPanel>
                 </Border>
 
-                <!-- Action stack: primary → destructive → utility. -->
+                <!-- Action stack: primary → destructive → secondary → utility. Start Session is now the
+                     technician's main call to action (client requirement #8: the bridge owns starting
+                     a session, not the website) — enabled only once the website shows the session as
+                     claimed (see RefreshSessionHint in MainWindow.xaml.cs). -->
                 <StackPanel Grid.Column="3" Margin="10,0,0,0" VerticalAlignment="Top">
-                    <Button x:Name="BtnCapture" Content="Start test recording" Click="BtnCapture_Click" IsEnabled="False"
+                    <Button x:Name="BtnStartSession" Content="Start Session" Click="BtnStartSession_Click" IsEnabled="False"
                             Background="{StaticResource Good}" Style="{StaticResource RailButton}"
-                            ToolTip="Record band data WITHOUT conducting a client session — for equipment testing and standalone data collection. Saves one CSV: raw ADC, raw µV, filtered µV, heart rate, SpO₂, attention, relaxation, mental workload and signal quality (independent of the database upload)."/>
-                    <TextBlock x:Name="TxtCapture" Text="idle" Foreground="{StaticResource Muted2}" FontSize="12" Margin="2,-4,0,10" HorizontalAlignment="Center"/>
+                            ToolTip="Begin recording for the claimed session. Enabled once the website shows the session as claimed."/>
                     <Button x:Name="BtnStopSession" Content="Stop session (failsafe)"
                             Click="BtnStopSession_Click" IsEnabled="False" Background="{StaticResource Bad}" Style="{StaticResource RailButton}"
                             ToolTip="Hardware-side abort: use only if the website cannot end the session (browser crash, network loss). Flushes and closes the upload; the band stays connected."/>
+                    <Button x:Name="BtnCapture" Content="Start test recording" Click="BtnCapture_Click" IsEnabled="False"
+                            Style="{StaticResource RailButtonSecondary}"
+                            ToolTip="Record band data WITHOUT conducting a client session — for equipment testing and standalone data collection. Saves one CSV: raw ADC, raw µV, filtered µV, heart rate, SpO₂, attention, relaxation, mental workload and signal quality (independent of the database upload)."/>
+                    <TextBlock x:Name="TxtCapture" Text="idle" Foreground="{StaticResource Muted2}" FontSize="12" Margin="2,-4,0,10" HorizontalAlignment="Center"/>
                     <Button x:Name="BtnToggleLog" Content="Show log ▼" Click="BtnToggleLog_Click"
                             Style="{StaticResource RailButtonSecondary}"/>
                 </StackPanel>

@@ -17,6 +17,7 @@ export default function StimulusModal({ event, onClose }) {
   }, [onClose]);
 
   const isImage = event.type === "image";
+  const isPhase = event.type === "phase";
   const averages = [
     { label: "Attention", value: event.avg_attention, digits: 2 },
     { label: "Relaxation", value: event.avg_relaxation, digits: 2 },
@@ -63,6 +64,10 @@ export default function StimulusModal({ event, onClose }) {
             ) : (
               <p className="py-14 text-muted text-sm">Image details unavailable for this event.</p>
             )}
+          </div>
+        ) : isPhase ? (
+          <div className="px-6 py-12 text-center">
+            <p className="text-ink text-sm">No stimulus was shown during this window — it&apos;s a countdown or baseline recording period from the standardised protocol.</p>
           </div>
         ) : (
           <div className="px-6 py-12 text-center">

@@ -17,20 +17,29 @@ const normalizeOccurredAt=value => {
     return parsed.toISOString()
 }
 
+// Protocol phase markers (countdowns + baseline eyes-open/eyes-closed periods) — kept in
+// sync with db/migrations/016_session_phase_markers.sql's chk_events_phase.
+const VALID_PHASES = [
+    'countdown_pre', 'baseline1_closed', 'countdown_b1', 'baseline1_open', 'countdown_images',
+    'countdown_post', 'baseline2_closed', 'countdown_b2', 'baseline2_open',
+]
+
 // ── POST /api/events ─────────────────────────────────────────────────────────────
 const createEvent = catchAsync(async (req, res) => {
-    const { session_id, image_id, question_id, occurred_at } = req.body
+    const { session_id, image_id, question_id, phase, occurred_at } = req.body
     if (!session_id)
         throw new BadRequestError('Missing required fields: session_id is required')
-    if (!image_id && !question_id)
-        throw new BadRequestError('Missing required fields: image_id or question_id is required')
-    // Only one of image_id or question_id should be provided
-    if (image_id && question_id)
-        throw new BadRequestError('Only one of image_id or question_id should be provided')
+    const provided = [image_id, question_id, phase].filter(Boolean)
+    if (provided.length === 0)
+        throw new BadRequestError('Missing required fields: one of image_id, question_id, or phase is required')
+    if (provided.length > 1)
+        throw new BadRequestError('Only one of image_id, question_id, or phase should be provided')
+    if (phase && !VALID_PHASES.includes(phase))
+        throw new BadRequestError(`Invalid phase value. Must be one of: ${VALID_PHASES.join(', ')}`)
     if (!occurred_at)
         throw new BadRequestError('Missing required field: occurred_at is required')
 
-    const event = await eventModel.create({ session_id, image_id, question_id, clinic_id: req.user.clinic_id, occurred_at: normalizeOccurredAt(occurred_at) }, req.dbClient)
+    const event = await eventModel.create({ session_id, image_id, question_id, phase, clinic_id: req.user.clinic_id, occurred_at: normalizeOccurredAt(occurred_at) }, req.dbClient)
     return res.status(201).json(event)
 })
 

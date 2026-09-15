@@ -570,6 +570,45 @@ namespace NeuuroBridge
             finally { Monitor.Exit(_ioLock); }
         }
 
+        /// <summary>
+        /// Flips sessions.sync_status to 'recording' and stamps start_time = now() (DB clock) — the
+        /// technician's "Start Session" press on the bridge is now what begins a session (client
+        /// requirement #8); the website no longer writes this transition, only observes it via its
+        /// own poll. Idempotent (guarded by IS DISTINCT FROM), non-blocking like the other advisory
+        /// writes here. Returns true once the row is confirmed 'recording' (already-recording counts).
+        /// </summary>
+        public bool MarkRecording()
+        {
+            if (_disposed || _sessionId == Guid.Empty) return false;
+            if (!Monitor.TryEnter(_ioLock)) return false;   // a flush holds the lock — try again next tick
+            try
+            {
+                EnsureOpen();
+                using (var cmd = new NpgsqlCommand(
+                    "UPDATE sessions SET sync_status = 'recording', start_time = now() " +
+                    "WHERE session_id = @sid AND sync_status IS DISTINCT FROM 'recording'", _conn))
+                {
+                    cmd.Parameters.AddWithValue("sid", NpgsqlDbType.Uuid, _sessionId);
+                    if (cmd.ExecuteNonQuery() > 0) return true;
+                }
+                // 0 rows is ambiguous: normally "already recording", but under row-level security a
+                // missing UPDATE policy ALSO yields 0 rows with no error — confirm before reporting success.
+                using (var cmd = new NpgsqlCommand(
+                    "SELECT sync_status = 'recording' FROM sessions WHERE session_id = @sid", _conn))
+                {
+                    cmd.Parameters.AddWithValue("sid", NpgsqlDbType.Uuid, _sessionId);
+                    var recording = cmd.ExecuteScalar();
+                    if (recording is bool b && b) return true;
+                    _lastError = "sync_status UPDATE to 'recording' affected 0 rows and it is still not 'recording' — " +
+                                 "likely a missing row-level-security UPDATE policy for the bridge DB role.";
+                    _log(_lastError);
+                    return false;
+                }
+            }
+            catch (Exception ex) { _lastError = ex.Message; return false; }
+            finally { Monitor.Exit(_ioLock); }
+        }
+
         public void EnqueueEeg(EegReadingRow row)
         {
             if (_disposed || !Streaming) return;
