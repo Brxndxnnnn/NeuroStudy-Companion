@@ -85,7 +85,7 @@ const getSessionResult = async (session_id, client = pool) => {
     const { rows } = await query(client,
         `WITH event_windows AS (
             SELECT
-                e.event_id, e.session_id, e.image_id, e.question_id, e.shown_at,
+                e.event_id, e.session_id, e.image_id, e.question_id, e.phase, e.shown_at,
                 -- Fall back to next event or session end if hidden_at is missing
                 COALESCE(
                     e.hidden_at,
@@ -102,14 +102,20 @@ const getSessionResult = async (session_id, client = pool) => {
             ew.sequence_no,
             ew.shown_at,
             ew.effective_hidden_at AS hidden_at,
-            CASE WHEN ew.image_id IS NOT NULL THEN 'image' ELSE 'question' END AS stimulus_type,
-            CASE 
+            CASE
+                WHEN ew.image_id IS NOT NULL THEN 'image'
+                WHEN ew.question_id IS NOT NULL THEN 'question'
+                ELSE 'phase'
+            END AS stimulus_type,
+            CASE
                 WHEN ew.effective_hidden_at IS NULL THEN NULL
                 ELSE EXTRACT(EPOCH FROM (ew.effective_hidden_at - ew.shown_at))::double precision
             END AS duration_s,
             -- Image & Question specific fields
             ew.image_id, i.filename, i.category, i.url,
             ew.question_id, q.question_no, q.prompt, q.difficulty,
+            -- Protocol phase marker (countdown/baseline) — NULL for image/question events
+            ew.phase,
             -- Aggregated statistics
             stats.avg_attention, stats.avg_relaxation, stats.avg_mental_workload,
             stats.avg_heart_rate, stats.avg_spo2, stats.sample_count
@@ -195,7 +201,7 @@ const getSessionEEGResults = async ({ session_id, sample_rate, start_time, end_t
     )
 
     const eventsTimingResult = await client.query(
-        `SELECT e.image_id, e.question_id, e.shown_at, e.hidden_at,
+        `SELECT e.image_id, e.question_id, e.phase, e.shown_at, e.hidden_at,
             EXTRACT(EPOCH FROM (e.shown_at - $2::timestamptz))::double precision AS shown_at_seconds,
             EXTRACT(EPOCH FROM (e.hidden_at - $2::timestamptz))::double precision AS hidden_at_seconds
         FROM events e

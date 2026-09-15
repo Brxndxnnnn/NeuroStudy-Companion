@@ -107,11 +107,25 @@ which stamps the calling role's clinic.
 ### Stimulus timeline
 
 The web app owns the stimulus sequence and writes `events` rows. Each image event
-carries `shown_at` and `hidden_at`; the events table enforces image XOR question
-(`chk_events_stimulus`, `005:69`). Mid-sequence there is no explicit hide — the next
-image's create closes the previous event server-side in the same request, so consecutive
-windows are contiguous by construction and cannot overlap under latency spikes
+carries `shown_at` and `hidden_at`; the events table enforces image XOR question XOR
+phase (`chk_events_stimulus`, `016:19` — originally image XOR question only, extended by
+migration 016). Mid-sequence there is no explicit hide — the next event's create closes
+the previous one server-side in the same request, so consecutive windows are contiguous
+by construction and cannot overlap under latency spikes
 (`frontend/src/app/session/active/page.js`).
+
+**The protocol is 13 steps, not 2** (client requirement #3): a 5s countdown, a 1 min
+eyes-closed baseline, a 3s countdown, a 1 min eyes-open baseline, and a 5s countdown lead
+into the OASIS images + math questions block; the same four (5s/1min/3s/1min, no trailing
+countdown) mirror it afterward, then recording stops. The nine countdown/baseline steps
+are `events` rows with `phase` set instead of `image_id`/`question_id`
+(`db/migrations/016_session_phase_markers.sql`, `chk_events_phase` for the fixed
+vocabulary) — not a separate table, so they share the same shown_at/hidden_at/auto-close
+mechanics and stay joinable through `eeg_readings`/`band_powers.current_event_id` exactly
+like image/question events. `frontend/src/utils/events.js:buildEventWindows` and the
+`/results` endpoint (`session.model.js:getSessionResult`) both derive a three-way
+`stimulus_type` (`image` | `question` | `phase`) — anything that assumed only two used to
+silently mislabel a phase marker as a question.
 
 Event timestamps are calibrated against server time via `GET /api/time` and captured
 with `requestAnimationFrame` (`frontend/src/utils/sessionClock.js`).

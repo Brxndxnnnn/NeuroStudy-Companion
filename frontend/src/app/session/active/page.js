@@ -25,16 +25,41 @@ import PostSessionSurvey from "@/components/PostSessionSurvey";
 // the 6.8 s that remain split into at most two runs, so one is always >= 3.4 s.
 const IMAGE_DISPLAY_MS = 10000;
 
+// The 13-step standardised protocol (client requirement #3): a countdown + two baseline
+// periods (eyes closed, then eyes open) flank the existing images -> math block on both
+// sides. Each entry drives the generic phase effect below (§4) — countdown_images and
+// baseline2_open are the two seams into/out of the pre-existing images/math steps.
+const PROTOCOL = [
+  { key: "countdown_pre", kind: "countdown", seconds: 5, next: "baseline1_closed" },
+  { key: "baseline1_closed", kind: "baseline", seconds: 60, eyesClosed: true, next: "countdown_b1" },
+  { key: "countdown_b1", kind: "countdown", seconds: 3, next: "baseline1_open" },
+  { key: "baseline1_open", kind: "baseline", seconds: 60, eyesClosed: false, next: "countdown_images" },
+  { key: "countdown_images", kind: "countdown", seconds: 5, next: "images" },
+  { key: "countdown_post", kind: "countdown", seconds: 5, next: "baseline2_closed" },
+  { key: "baseline2_closed", kind: "baseline", seconds: 60, eyesClosed: true, next: "countdown_b2" },
+  { key: "countdown_b2", kind: "countdown", seconds: 3, next: "baseline2_open" },
+  // No countdown after this one — recording stops here and the session ends (client spec).
+  { key: "baseline2_open", kind: "baseline", seconds: 60, eyesClosed: false, next: "survey" },
+];
+const PROTOCOL_BY_KEY = Object.fromEntries(PROTOCOL.map((p) => [p.key, p]));
+
+const PRE_IMAGE_PHASES = ["countdown_pre", "baseline1_closed", "countdown_b1", "baseline1_open", "countdown_images"];
+const POST_MATH_PHASES = ["countdown_post", "baseline2_closed", "countdown_b2", "baseline2_open"];
+
 const PHASES = [
   { key: "connect", label: "Connect" },
+  { key: "baseline1", label: "Baseline 1" },
   { key: "images", label: "Images" },
   { key: "math", label: "Math" },
+  { key: "baseline2", label: "Baseline 2" },
   { key: "survey", label: "Survey" },
   { key: "done", label: "Done" },
 ];
 
 function phaseOf(step) {
   if (step === "awaiting") return "connect";
+  if (PRE_IMAGE_PHASES.includes(step)) return "baseline1";
+  if (POST_MATH_PHASES.includes(step)) return "baseline2";
   if (step === "complete") return "done";
   return step;
 }
@@ -89,6 +114,8 @@ export default function ActiveSessionMockup() {
   const [mathInputEnabled, setMathInputEnabled] = useState(false);
   const currentMathEventIdRef = useRef(null);
   const [patientName, setPatientName] = useState("");
+  const [secondsLeft, setSecondsLeft] = useState(0);
+  const currentPhaseEventIdRef = useRef(null);
 
   // EVENT LOGGING HELPERS
   //
@@ -142,6 +169,25 @@ export default function ActiveSessionMockup() {
     logStimulusShown(currentMathEventIdRef, { question_id: questionId, occurred_at: occurredAt }, "Question");
   };
   const logQuestionHidden = occurredAt => logStimulusHidden(currentMathEventIdRef, "Question", occurredAt);
+  const logPhaseShown = (phase, occurredAt) => {
+    logStimulusShown(currentPhaseEventIdRef, { phase, occurred_at: occurredAt }, "Phase");
+  };
+  const logPhaseHidden = occurredAt => logStimulusHidden(currentPhaseEventIdRef, "Phase", occurredAt);
+
+  // Ends the session and hands off to the survey step. Declared up here (not down by the
+  // math-navigation handler that historically called it) because the protocol-phase effect
+  // below also calls it from inside a useEffect, which forward-referencing a later `const`
+  // is not allowed to do.
+  const endSessionAndGoToSurvey = async (hideRequest = Promise.resolve()) => {
+    try {
+      await hideRequest;
+      const sessionId = localStorage.getItem("currentSessionId");
+      const res = await endSession(sessionId);
+      if (!res.ok) throw new Error("Failed to end session");
+    } catch (err) {
+      console.error("Error ending session:", err);
+    }
+  };
 
   useEffect(() => {
     setPatientName(localStorage.getItem("currentClientName") || "");
@@ -323,6 +369,63 @@ export default function ActiveSessionMockup() {
     questions
   ])
 
+  // 5b. PROTOCOL PHASES (countdowns + baseline periods): one generic auto-advance effect
+  // for all nine, same requestAnimationFrame-based precision as the image auto-advance
+  // above — avoids setInterval drift and ties the phase boundary to the real session-clock
+  // timestamp. baseline2_open is the one phase whose "next" is "survey": that's where
+  // recording actually stops, so its hide is awaited before ending the session, exactly
+  // like the old last-question -> end transition used to be.
+  const phasePresentationRef = useRef(null);
+  const lastLoggedPhaseRef = useRef(null);
+  useEffect(() => {
+    const phase = PROTOCOL_BY_KEY[currentStep];
+    if (!phase) return;
+
+    let frameId;
+    const durationMs = phase.seconds * 1000;
+    const advance = async (frameTime) => {
+      const presentation = phasePresentationRef.current;
+      if (!presentation || presentation.key !== phase.key) {
+        frameId = requestAnimationFrame(advance);
+        return;
+      }
+      const elapsed = frameTime - presentation.frameTime;
+      setSecondsLeft(Math.max(0, Math.ceil((durationMs - elapsed) / 1000)));
+      if (elapsed < durationMs) {
+        frameId = requestAnimationFrame(advance);
+        return;
+      }
+
+      const occurredAt = getSessionTimestamp(frameTime);
+      if (phase.next === "survey") {
+        const hideRequest = logPhaseHidden(occurredAt);
+        setCurrentStep("survey");
+        await endSessionAndGoToSurvey(hideRequest);
+      } else {
+        logPhaseHidden(occurredAt);
+        setCurrentStep(phase.next);
+      }
+    };
+
+    frameId = requestAnimationFrame(advance);
+    return () => cancelAnimationFrame(frameId);
+  }, [currentStep]);
+
+  useLayoutEffect(() => {
+    const phase = PROTOCOL_BY_KEY[currentStep];
+    if (!phase) return;
+    if (lastLoggedPhaseRef.current === phase.key) return;
+
+    const frameId = requestAnimationFrame((frameTime) => {
+      if (lastLoggedPhaseRef.current === phase.key) return;
+      lastLoggedPhaseRef.current = phase.key;
+      phasePresentationRef.current = { key: phase.key, frameTime };
+      logPhaseShown(phase.key, getSessionTimestamp(frameTime));
+    });
+
+    return () => cancelAnimationFrame(frameId);
+  }, [currentStep]);
+
   // 6. AWAIT THE BRIDGE — the technician presses Start on the bridge itself, which writes
   // sync_status='recording' + bridge_recording_at directly (see NeuuroBridge.Core.DbUploader
   // .MarkRecording / .MarkRecordingStarted). This page has no start action of its own: it just
@@ -349,8 +452,7 @@ export default function ActiveSessionMockup() {
         const sessionData = await checkRes.json();
         if (sessionData.bridge_recording_at !== null) {
           clearInterval(pollInterval);
-          setCurrentImageIndex(0);
-          setCurrentStep("images");
+          setCurrentStep("countdown_pre");
         }
       }
     }, 1000);
@@ -382,24 +484,13 @@ export default function ActiveSessionMockup() {
       setCurrentMathIndex(currentMathIndex + 1)
       setMathInputEnabled(false);
     } else {
-      // Capture the user-visible transition immediately; do not keep the question
-      // on screen while its network request is in flight.
+      // Last question: math finishing does NOT end the session anymore — the protocol's
+      // second baseline block (countdown_post -> ... -> baseline2_open) still has to run
+      // first. No hide-and-await here: countdown_post's create auto-closes this event
+      // server-side, same as every other mid-sequence transition.
       const occurredAt = getSessionTimestamp();
-      const hideRequest = logQuestionHidden(occurredAt);
-      setCurrentStep("survey");
-      await endSessionAndGoToSurvey(hideRequest);
-    }
-  };
-
-  // 8. END SESSION
-  const endSessionAndGoToSurvey = async (hideRequest = Promise.resolve()) => {
-    try {
-      await hideRequest;
-      const sessionId = localStorage.getItem("currentSessionId");
-      const res = await endSession(sessionId);
-      if (!res.ok) throw new Error("Failed to end session");
-    } catch (err) {
-      console.error("Error ending session:", err);
+      logQuestionHidden(occurredAt);
+      setCurrentStep("countdown_post");
     }
   };
 
@@ -416,6 +507,29 @@ export default function ActiveSessionMockup() {
           <Spinner size={40} className="text-accent mt-2"/>
         </div>
       )}
+    </Card>
+  );
+
+  const renderCountdown = (phase) => (
+    <Card className="max-w-2xl mx-auto p-10 text-center anim-pop">
+      <Pill tone="crit" dot live className="mb-6">EEG recording</Pill>
+      <p className="text-muted mb-4">Get ready</p>
+      <div className="text-7xl font-bold tracking-tight text-accent tnum">{secondsLeft}</div>
+    </Card>
+  );
+
+  const renderBaseline = (phase) => (
+    <Card className="max-w-2xl mx-auto p-10 text-center anim-pop">
+      <Pill tone="crit" dot live className="mb-6">EEG recording</Pill>
+      <h2 className="text-2xl font-bold tracking-tight text-ink mb-2">
+        {phase.eyesClosed ? "Close your eyes" : "Open your eyes"}
+      </h2>
+      <p className="text-muted mb-6">
+        {phase.eyesClosed
+          ? "Relax and keep your eyes closed until this screen changes."
+          : "Keep your eyes open and look at the screen."}
+      </p>
+      <div className="text-5xl font-bold tracking-tight text-accent tnum">{secondsLeft}s</div>
     </Card>
   );
 
@@ -518,7 +632,8 @@ export default function ActiveSessionMockup() {
     </Card>
   );
 
-  const recording = currentStep === "images" || currentStep === "math";
+  const activePhase = PROTOCOL_BY_KEY[currentStep];
+  const recording = currentStep === "images" || currentStep === "math" || !!activePhase;
 
   return (
     <main className="min-h-screen bg-ground flex flex-col">
@@ -544,6 +659,7 @@ export default function ActiveSessionMockup() {
       <div className="flex-1 flex items-center justify-center px-5 py-10">
         <div className="w-full">
           {currentStep === "awaiting" && renderAwaitingTechnician()}
+          {activePhase && (activePhase.kind === "countdown" ? renderCountdown(activePhase) : renderBaseline(activePhase))}
           {currentStep === "images" && renderImageStimuli()}
           {currentStep === "math" && renderMathTest()}
           {currentStep === "survey" && renderSurvey()}

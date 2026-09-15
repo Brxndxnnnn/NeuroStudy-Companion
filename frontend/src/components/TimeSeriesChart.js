@@ -93,6 +93,7 @@ export default function TimeSeriesChart({
       if (!events.length) return undefined;
       const imgColor = v("--accent-soft");
       const qColor = v("--warn-soft");
+      const phaseColor = v("--good-soft");
       return {
         silent: false,
         label: { show: false, position: "insideTop", fontSize: 10, color: c.muted },
@@ -103,7 +104,7 @@ export default function TimeSeriesChart({
             xAxis: ev.from,
             name: ev.label,
             eventIndex: i,
-            itemStyle: { color: ev.type === "question" ? qColor : imgColor },
+            itemStyle: { color: ev.type === "question" ? qColor : ev.type === "phase" ? phaseColor : imgColor },
           },
           { xAxis: ev.to },
         ]),
