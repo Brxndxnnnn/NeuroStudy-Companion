@@ -21,28 +21,21 @@ const trustedEventTimeSql = parameter => `
         ELSE clock_timestamp()
     END
 `
-const create = async ({ session_id, image_id, question_id, clinic_id, occurred_at = null }, client = pool) => {
-    // Close any existing open events for the same session before creating a new one
-    // await query(client, `UPDATE events SET hidden_at = now() WHERE session_id = $1 AND hidden_at IS NULL`, [session_id])
-    // // Insert the new event into the events table
-    // let queryText = `INSERT INTO events (session_id, `
-    // if (image_id) queryText += `image_id, `
-    // if (question_id) queryText += `question_id, `
-    // queryText += `clinic_id, shown_at) VALUES ($1, $2, $3, now()) RETURNING *`
-    // const queryParams = [session_id, image_id ? image_id : question_id, clinic_id]
-    // const { rows } = await query(client, queryText, queryParams)
-
+const create = async ({ session_id, image_id, question_id, phase = null, clinic_id, occurred_at = null }, client = pool) => {
+    // Close any existing open events for the same session before creating a new one —
+    // type-agnostic (image, question, or phase all close each other the same way, so a
+    // countdown/baseline marker contiguously closes out the stimulus that preceded it).
     const { rows } = await query(client, `
         WITH event_time AS (
             SELECT
-                ${trustedEventTimeSql('$5')} AS occurred_at
+                ${trustedEventTimeSql('$6')} AS occurred_at
         ),
         closed_previous_event AS (
             UPDATE events AS existing
             SET hidden_at=event_time.occurred_at
             FROM event_time
             WHERE existing.session_id=$1::uuid
-              AND existing.clinic_id=$4::uuid
+              AND existing.clinic_id=$5::uuid
               AND existing.hidden_at IS NULL
             RETURNING existing.event_id
         )
@@ -50,6 +43,7 @@ const create = async ({ session_id, image_id, question_id, clinic_id, occurred_a
             session_id,
             image_id,
             question_id,
+            phase,
             clinic_id,
             shown_at
         )
@@ -57,7 +51,8 @@ const create = async ({ session_id, image_id, question_id, clinic_id, occurred_a
             $1::uuid,
             $2::uuid,
             $3::uuid,
-            $4::uuid,
+            $4::text,
+            $5::uuid,
             event_time.occurred_at
         FROM event_time
         RETURNING *
@@ -65,6 +60,7 @@ const create = async ({ session_id, image_id, question_id, clinic_id, occurred_a
         session_id,
         image_id,
         question_id,
+        phase,
         clinic_id,
         occurred_at
     ])

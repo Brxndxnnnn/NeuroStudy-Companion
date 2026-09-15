@@ -60,16 +60,6 @@ const pairSessions = catchAsync(async (req, res) => {
     return res.status(200).json(session)
 })
 
-// ── PATCH /api/sessions/:session_id/start ────────────────────────────────────────────
-const startSession = catchAsync(async (req, res) => {
-    const { session_id } = req.params;
-    const session = await sessionModel.startSession(session_id, req.dbClient);
-    if (!session)
-        throw new NotFoundError('Session not found');
-
-    return res.json(session);
-});
-
 // ── PATCH /api/sessions/:session_id/end ────────────────────────────────────────────
 const endSession = catchAsync(async (req, res) => {
     const { session_id } = req.params;
@@ -198,4 +188,4 @@ const getSessionFftBandPowerResults = catchAsync(async (req, res) => {
     return res.json(results)
 })
 
-export default { listSessions, getSessionById, pairSessions, startSession, endSession, getSessionResult, getSessionEEGResults, getSessionBandPowerResults, getSessionEllipticBandStats, getSessionFftBandPowerResults }
+export default { listSessions, getSessionById, pairSessions, endSession, getSessionResult, getSessionEEGResults, getSessionBandPowerResults, getSessionEllipticBandStats, getSessionFftBandPowerResults }

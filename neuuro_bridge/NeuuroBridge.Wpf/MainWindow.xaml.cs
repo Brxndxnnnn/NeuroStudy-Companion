@@ -2,8 +2,11 @@ using System;
 using System.Collections.Generic;
 using System.Linq;
 using System.Windows;
+using System.Windows.Controls;
 using System.Windows.Documents;
 using System.Windows.Media;
+using System.Windows.Media.Animation;
+using System.Windows.Shapes;
 using System.Windows.Threading;
 
 namespace NeuuroBridge.Wpf
@@ -17,6 +20,8 @@ namespace NeuuroBridge.Wpf
         // Signal-quality accumulation over the recording window (local only, never uploaded):
         // one tick per 500 ms refresh while recording, bucketed good/fair/poor.
         private int _qGoodTicks, _qFairTicks, _qPoorTicks;
+
+        private bool _logOpen;
 
         private static readonly Brush Good = (Brush)new BrushConverter().ConvertFromString("#22C55E");
         private static readonly Brush Warn = (Brush)new BrushConverter().ConvertFromString("#F59E0B");
@@ -52,6 +57,9 @@ namespace NeuuroBridge.Wpf
 
             _refresh.Tick += (_, __) => RefreshLiveState();
             _refresh.Start();
+
+            string version = BridgeController.AppVersion;
+            TxtAppVersion.Text = string.IsNullOrEmpty(version) ? "" : "v" + version;
 
             string license = EnvConfig.ResolveLicense();
             if (string.IsNullOrWhiteSpace(license))
@@ -125,10 +133,28 @@ namespace NeuuroBridge.Wpf
             }
         }
 
+        private void BtnStartSession_Click(object sender, RoutedEventArgs e)
+        {
+            BtnStartSession.IsEnabled = false;   // re-armed by RefreshSessionHint for the NEXT claimed session
+            Log("Starting session…");
+            _ctl.StartSession();
+        }
+
         private void BtnStopSession_Click(object sender, RoutedEventArgs e)
         {
             BtnStopSession.IsEnabled = false;
             _ctl.StopSession();   // drains in-flight BLE frames briefly, then flushes + closes upload; device stays connected
+        }
+
+        private void BtnToggleLog_Click(object sender, RoutedEventArgs e)
+        {
+            _logOpen = !_logOpen;
+            BtnToggleLog.Content = _logOpen ? "Hide log ▲" : "Show log ▼";
+            var anim = new DoubleAnimation(_logOpen ? 120 : 0, TimeSpan.FromMilliseconds(180))
+            {
+                EasingFunction = new QuadraticEase()
+            };
+            LogPanel.BeginAnimation(HeightProperty, anim);
         }
 
         private void BtnCapture_Click(object sender, RoutedEventArgs e)
@@ -190,6 +216,7 @@ namespace NeuuroBridge.Wpf
             BtnConnect.IsEnabled = CmbDevices.Items.Count > 0;
             BtnDisconnect.IsEnabled = false;
             BtnReauth.IsEnabled = false;
+            BtnStartSession.IsEnabled = false;
             BtnStopSession.IsEnabled = false;
             BtnCapture.IsEnabled = false;
             TxtPairHint.Visibility = Visibility.Collapsed;
@@ -439,8 +466,7 @@ namespace NeuuroBridge.Wpf
             }
             TxtSignal.Text = s.SignalReady == null ? "(no data)" : s.SignalReady.Value ? "READY" : "settling…";
             TxtBattery.Text = s.Battery == null ? "(no data)" : s.Battery + "%";
-            TxtHeartRate.Text = s.HeartRate == null ? "—" : s.HeartRate.Value + " bpm";
-            TxtSpo2.Text = s.Spo2 == null ? "—" : s.Spo2.Value + " %";
+            LivePanel.SetVitals(s.HeartRate, s.Spo2);
 
             var rows = new List<string>();
             for (int ch = 0; ch < BridgeController.ChannelCount; ch++)
@@ -466,38 +492,69 @@ namespace NeuuroBridge.Wpf
             // yellow while images are on screen and goes green when math questions start).
             var pg = _ctl.Progress;
             bool prepared = _ctl.IsPrepared;
-            SetStep(DotPgPair, TxtPgPair,
+            SetStep(DotPgPair, NumPgPair, TxtPgPair, LinePgPair,
                 pg.Claimed ? StepState.Done : prepared ? StepState.Active : StepState.Pending);
-            SetStep(DotPgRec, TxtPgRec,
+            SetStep(DotPgRec, NumPgRec, TxtPgRec, LinePgRec,
                 pg.RecordingConfirmed ? StepState.Done : pg.Claimed ? StepState.Active : StepState.Pending);
-            SetStep(DotPgImg, TxtPgImg,
+            SetStep(DotPgImg, NumPgImg, TxtPgImg, LinePgImg,
                 pg.ImagesShown && (pg.QuestionsShown || pg.Ended) ? StepState.Done :
                 pg.ImagesShown ? StepState.Active : StepState.Pending);
-            SetStep(DotPgMath, TxtPgMath,
+            SetStep(DotPgMath, NumPgMath, TxtPgMath, LinePgMath,
                 pg.QuestionsShown && pg.Ended ? StepState.Done :
                 pg.QuestionsShown ? StepState.Active : StepState.Pending);
-            SetStep(DotPgEnd, TxtPgEnd,
+            SetStep(DotPgEnd, NumPgEnd, TxtPgEnd, LinePgEnd,
                 pg.Ended ? StepState.Done : StepState.Pending);
-            SetStep(DotPgSurvey, TxtPgSurvey,
+            SetStep(DotPgSurvey, NumPgSurvey, TxtPgSurvey, null,
                 pg.SurveySubmitted ? StepState.Done : pg.Ended ? StepState.Active : StepState.Pending);
         }
 
         private enum StepState { Pending, Active, Done }
 
-        private static void SetStep(System.Windows.Shapes.Ellipse dot, System.Windows.Controls.TextBlock label, StepState state)
+        // Marker colours per state (done = filled Good + ✓, active = AccentSoft fill / Accent
+        // border+numeral, todo = Panel2 fill / PanelEdge border) — see the design handoff. Brushes
+        // are per-element SolidColorBrush instances declared inline in XAML (not shared
+        // StaticResources), so each can be eased independently without touching its neighbours.
+        private static readonly Color DoneBg = Color.FromRgb(0x22, 0xC5, 0x5E);
+        private static readonly Color DoneFg = Color.FromRgb(0x0B, 0x12, 0x1C);
+        private static readonly Color ActiveBg = Color.FromRgb(0x1E, 0x2A, 0x3C);
+        private static readonly Color ActiveFg = Color.FromRgb(0x3B, 0x82, 0xF6);
+        private static readonly Color TodoBg = Color.FromRgb(0x12, 0x1A, 0x26);
+        private static readonly Color TodoBorder = Color.FromRgb(0x26, 0x34, 0x4A);
+        private static readonly Color TodoFg = Color.FromRgb(0x6B, 0x7A, 0x90);
+
+        private static void SetStep(Border marker, System.Windows.Controls.TextBlock numeral,
+            System.Windows.Controls.TextBlock label, Rectangle lineOut, StepState state)
         {
-            dot.Fill = state == StepState.Done ? Good : state == StepState.Active ? Warn : Mut;
+            Color bg, border, fg;
+            switch (state)
+            {
+                case StepState.Done: bg = DoneBg; border = DoneBg; fg = DoneFg; break;
+                case StepState.Active: bg = ActiveBg; border = ActiveFg; fg = ActiveFg; break;
+                default: bg = TodoBg; border = TodoBorder; fg = TodoFg; break;
+            }
+            AnimateBrush(marker.Background, bg);
+            AnimateBrush(marker.BorderBrush, border);
+            AnimateBrush(numeral.Foreground, fg);
+            numeral.Text = state == StepState.Done ? "✓" : (string)numeral.Tag;
             label.Opacity = state == StepState.Pending ? 0.55 : 1.0;
+            if (lineOut != null)
+                AnimateBrush(lineOut.Fill, state == StepState.Done ? DoneBg : TodoBorder);
+        }
+
+        private static void AnimateBrush(Brush brush, Color to, int ms = 260)
+        {
+            if (brush is SolidColorBrush scb)
+                scb.BeginAnimation(SolidColorBrush.ColorProperty, new ColorAnimation(to, TimeSpan.FromMilliseconds(ms)));
         }
 
         private void ResetProgressSteps()
         {
-            SetStep(DotPgPair, TxtPgPair, StepState.Pending);
-            SetStep(DotPgRec, TxtPgRec, StepState.Pending);
-            SetStep(DotPgImg, TxtPgImg, StepState.Pending);
-            SetStep(DotPgMath, TxtPgMath, StepState.Pending);
-            SetStep(DotPgEnd, TxtPgEnd, StepState.Pending);
-            SetStep(DotPgSurvey, TxtPgSurvey, StepState.Pending);
+            SetStep(DotPgPair, NumPgPair, TxtPgPair, LinePgPair, StepState.Pending);
+            SetStep(DotPgRec, NumPgRec, TxtPgRec, LinePgRec, StepState.Pending);
+            SetStep(DotPgImg, NumPgImg, TxtPgImg, LinePgImg, StepState.Pending);
+            SetStep(DotPgMath, NumPgMath, TxtPgMath, LinePgMath, StepState.Pending);
+            SetStep(DotPgEnd, NumPgEnd, TxtPgEnd, LinePgEnd, StepState.Pending);
+            SetStep(DotPgSurvey, NumPgSurvey, TxtPgSurvey, null, StepState.Pending);
         }
 
         private void RefreshDeviceList()
@@ -550,14 +607,16 @@ namespace NeuuroBridge.Wpf
         private void SetConn(string text, Brush dot) { ConnPill.Text = text; ConnDot.Fill = dot; }
         private void SetAuth(string text, Brush dot) { TxtAuth.Text = text; AuthDot.Fill = dot; }
 
-        // While connected but not yet claimed by the website, show the "waiting to pair" hint.
-        // (Recording itself starts automatically via the sync-status handshake — no manual Start.)
+        // While connected but not yet claimed by the website, show the "waiting to pair" hint, and
+        // gate Start Session on the website having claimed the session (client requirement #8: the
+        // bridge starts recording itself once the technician presses this — see BtnStartSession_Click).
         private void RefreshSessionHint()
         {
             string s = _ctl.SyncStatus;
             bool waiting = _ctl.IsConnected && !_ctl.SessionActive
                            && (string.IsNullOrEmpty(s) || s == "unclaimed");
             TxtPairHint.Visibility = waiting ? Visibility.Visible : Visibility.Collapsed;
+            BtnStartSession.IsEnabled = _ctl.IsConnected && !_ctl.SessionActive && s == "claimed";
         }
     }
 }

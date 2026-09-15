@@ -54,6 +54,7 @@ namespace NeuuroBridge
         private bool _streaming;
         private bool _prepared;                 // unclaimed session row + pairing code exist (created on connect)
         private bool _recordingConfirmed;       // bridge_recording_at written for the active session (handshake ack)
+        private bool _recordingAnnounced;       // sync_status flipped to 'recording' for the active session
         private Timer _syncPoll;                // advisory poll of sessions.sync_status (read-only + lifecycle react)
         private Timer _progressPoll;            // advisory poll of web-side progress; outlives the recording (survey lands after)
         private Timer _summaryPoll;             // independent 2 Hz eeg_readings snapshot (see StartSummaryPoll)
@@ -409,6 +410,7 @@ namespace NeuuroBridge
             if (_prepared) return;
             _prepared = true;
             _recordingConfirmed = false;
+            _recordingAnnounced = false;
             GenerateSession(_connAddress);   // local + instant: session_id + pairing code + created time
             SetSyncStatus("unclaimed");      // optimistic; the poll confirms/updates from the DB
             Progress = default(SessionProgress);   // fresh session — clear the last session's checklist
@@ -446,8 +448,12 @@ namespace NeuuroBridge
         /// <summary>
         /// Begins recording/upload for the prepared session — flips on the EEG/band/raw write gate.
         /// The session row + pairing code already exist from connect; this just opens the recording
-        /// window. Preparation is retried here only if it never ran. Returns whether DB upload is live
-        /// (false = recording locally only, e.g. DB unreachable).
+        /// window. Preparation is retried here only if it never ran. This is the technician's "Start
+        /// Session" press (client requirement #8: the bridge owns this transition, not the website) —
+        /// makes a best-effort immediate write of sync_status='recording' via DbUploader.MarkRecording,
+        /// with PollSyncStatus retrying every tick until it's confirmed (same pattern as
+        /// bridge_recording_at/_recordingConfirmed below). Returns whether DB upload is live (false =
+        /// recording locally only, e.g. DB unreachable).
         /// </summary>
         public bool StartSession()
         {
@@ -458,6 +464,7 @@ namespace NeuuroBridge
             Interlocked.Exchange(ref _tailLostSamples, 0);
             SessionActive = true;
             StartSummaryPoll();
+            if (_db != null && _db.MarkRecording()) _recordingAnnounced = true;
             SessionStarted?.Invoke();
             return _db != null && _db.Streaming;
         }
@@ -509,6 +516,7 @@ namespace NeuuroBridge
             try { _db?.Dispose(); } catch { /* ignore */ }
             _prepared = false;               // next Start prepares a new session row + pairing code
             _recordingConfirmed = false;
+            _recordingAnnounced = false;
             SetSyncStatus("completed");
             SessionStopped?.Invoke();
         }
@@ -575,27 +583,27 @@ namespace NeuuroBridge
             if (string.IsNullOrEmpty(s)) return;
             SetSyncStatus(s);
 
-            // Coordinated-start handshake (request → confirm). The frontend drives the lifecycle by
-            // writing sync_status; the bridge reacts here. This is advisory display PLUS control, but
-            // it still never gates the raw write path (that's behind SessionActive, set below).
-            if (s == "recording" && !SessionActive)
+            // Coordinated-END handshake only — the website still owns ending a session (writes
+            // sync_status='completed'); the bridge reacts by draining and closing locally so both
+            // sides stop together. Starting is the OPPOSITE direction now (client requirement #8):
+            // the technician presses Start here, StartSession() writes 'recording' itself, and the
+            // website just observes it — there is no "web wrote recording, auto-start" branch anymore.
+            if (s == "completed" && SessionActive)
             {
-                // Web pressed "Start session" → auto-begin recording on this machine. No technician click.
-                Log?.Invoke("[handshake] frontend requested recording → auto-starting session");
-                StartSession();
-            }
-            else if (s == "completed" && SessionActive)
-            {
-                // Web ended the session → flush + close locally so both sides stop together.
                 Log?.Invoke("[handshake] frontend ended session → auto-stopping session");
                 StopSession();
                 return;                       // poll is torn down by StopSession; nothing left to confirm
             }
 
+            // Retry the two Start confirmations every tick until each lands — non-blocking writes,
+            // so a slow/contended flush just means "try again next second," not a stall.
+            if (SessionActive && !_recordingAnnounced && _db != null)
+            {
+                if (_db.MarkRecording()) _recordingAnnounced = true;
+            }
             // Confirm to the frontend that EEG is actually flowing, once the upload is live. Idempotent
-            // (DbUploader only writes bridge_recording_at while it's still NULL). Covers BOTH the auto
-            // path above and a manual GUI Start — the web gates its first image on this timestamp, so it
-            // can never show a stimulus before the bridge is recording. Retried each tick until it lands.
+            // (DbUploader only writes bridge_recording_at while it's still NULL) — the web gates its
+            // first image on this timestamp, so it can never show a stimulus before the bridge records.
             if (SessionActive && !_recordingConfirmed && _db != null && _db.Streaming)
             {
                 if (_db.MarkRecordingStarted()) _recordingConfirmed = true;
