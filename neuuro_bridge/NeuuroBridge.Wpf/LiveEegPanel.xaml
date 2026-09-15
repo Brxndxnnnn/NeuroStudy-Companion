@@ -48,30 +48,75 @@
                 </Setter.Value>
             </Setter>
         </Style>
+
+        <!-- Small pill button used for the "Jump to live" affordance once a tab has been scrubbed
+             away from the live edge. Reuses the app-wide rounded Button template, just smaller. -->
+        <Style x:Key="JumpToLive" TargetType="Button">
+            <Setter Property="Content" Value="● Jump to live"/>
+            <Setter Property="FontSize" Value="11"/>
+            <Setter Property="Padding" Value="10,5"/>
+            <Setter Property="Background" Value="{StaticResource Accent}"/>
+            <Setter Property="Foreground" Value="White"/>
+            <Setter Property="BorderThickness" Value="0"/>
+            <Setter Property="Cursor" Value="Hand"/>
+            <Setter Property="HorizontalAlignment" Value="Right"/>
+            <Setter Property="VerticalAlignment" Value="Top"/>
+            <Setter Property="Margin" Value="0,10,10,0"/>
+            <Setter Property="Visibility" Value="Collapsed"/>
+            <Setter Property="Template">
+                <Setter.Value>
+                    <ControlTemplate TargetType="Button">
+                        <Border Background="{TemplateBinding Background}" CornerRadius="12" Padding="{TemplateBinding Padding}">
+                            <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center"/>
+                        </Border>
+                    </ControlTemplate>
+                </Setter.Value>
+            </Setter>
+        </Style>
     </UserControl.Resources>
 
-    <TabControl Style="{StaticResource ChartTabs}">
-        <TabItem Header="EEG Waves" Style="{StaticResource ChartTabItem}">
-            <Border Background="#0B121C" CornerRadius="6" ClipToBounds="True" Margin="0,8,0,0">
-                <sp:WpfPlot x:Name="EegPlot"/>
-            </Border>
-        </TabItem>
-        <TabItem Header="Frequency Bands" Style="{StaticResource ChartTabItem}">
-            <Grid Margin="0,8,0,0">
-                <Grid.RowDefinitions>
-                    <RowDefinition Height="Auto"/>
-                    <RowDefinition Height="*"/>
-                </Grid.RowDefinitions>
-                <StackPanel x:Name="BandChannelBar" Grid.Row="0" Orientation="Horizontal" Margin="0,0,0,6"/>
-                <Border Grid.Row="1" Background="#0B121C" CornerRadius="6" ClipToBounds="True">
-                    <sp:WpfPlot x:Name="BandPlot"/>
-                </Border>
-            </Grid>
-        </TabItem>
-        <TabItem Header="Mental States" Style="{StaticResource ChartTabItem}">
-            <Border Background="#0B121C" CornerRadius="6" ClipToBounds="True" Margin="0,8,0,0">
-                <sp:WpfPlot x:Name="CogPlot"/>
-            </Border>
-        </TabItem>
-    </TabControl>
+    <Grid>
+        <TabControl x:Name="Tabs" Style="{StaticResource ChartTabs}" SelectionChanged="Tabs_SelectionChanged">
+            <TabItem Header="EEG Waves" Style="{StaticResource ChartTabItem}">
+                <Grid Margin="0,8,0,0">
+                    <Border Background="#0B121C" CornerRadius="6" ClipToBounds="True">
+                        <sp:WpfPlot x:Name="EegPlot"/>
+                    </Border>
+                    <Button x:Name="BtnEegLive" Style="{StaticResource JumpToLive}"/>
+                </Grid>
+            </TabItem>
+            <TabItem Header="Frequency Bands" Style="{StaticResource ChartTabItem}">
+                <Grid Margin="0,8,0,0">
+                    <Grid.RowDefinitions>
+                        <RowDefinition Height="Auto"/>
+                        <RowDefinition Height="*"/>
+                    </Grid.RowDefinitions>
+                    <StackPanel x:Name="BandChannelBar" Grid.Row="0" Orientation="Horizontal" Margin="0,0,0,6"/>
+                    <Grid Grid.Row="1">
+                        <Border Background="#0B121C" CornerRadius="6" ClipToBounds="True">
+                            <sp:WpfPlot x:Name="BandPlot"/>
+                        </Border>
+                        <Button x:Name="BtnBandLive" Style="{StaticResource JumpToLive}"/>
+                    </Grid>
+                </Grid>
+            </TabItem>
+            <TabItem Header="Mental States" Style="{StaticResource ChartTabItem}">
+                <Grid Margin="0,8,0,0">
+                    <Border Background="#0B121C" CornerRadius="6" ClipToBounds="True">
+                        <sp:WpfPlot x:Name="CogPlot"/>
+                    </Border>
+                    <Button x:Name="BtnCogLive" Style="{StaticResource JumpToLive}"/>
+                </Grid>
+            </TabItem>
+        </TabControl>
+
+        <!-- HR/SpO2 readouts: same header row as the tabs, without reaching into the TabControl's
+             own ControlTemplate (x:Name inside a template isn't reachable from code-behind here). -->
+        <StackPanel Orientation="Horizontal" HorizontalAlignment="Right" VerticalAlignment="Top" Margin="0,3,4,0" IsHitTestVisible="False">
+            <TextBlock Text="HR" Foreground="#92A2B8" FontSize="11" VerticalAlignment="Center"/>
+            <TextBlock x:Name="TxtHeartRate" Text="—" Foreground="#E6EDF6" FontFamily="Consolas" FontWeight="Bold" FontSize="13" Margin="6,0,16,0" VerticalAlignment="Center"/>
+            <TextBlock Text="SpO₂" Foreground="#92A2B8" FontSize="11" VerticalAlignment="Center"/>
+            <TextBlock x:Name="TxtSpo2" Text="—" Foreground="#E6EDF6" FontFamily="Consolas" FontWeight="Bold" FontSize="13" Margin="6,0,0,0" VerticalAlignment="Center"/>
+        </StackPanel>
+    </Grid>
 </UserControl>
