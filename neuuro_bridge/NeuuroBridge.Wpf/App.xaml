@@ -16,6 +16,10 @@
         <SolidColorBrush x:Key="Warn"      Color="#F59E0B"/>
         <SolidColorBrush x:Key="Bad"       Color="#EF4444"/>
 
+        <!-- Redesign tokens (bridge UI/UX pass) -->
+        <SolidColorBrush x:Key="Panel2"     Color="#121A26"/>
+        <SolidColorBrush x:Key="AccentSoft" Color="#1E2A3C"/>
+
         <Style TargetType="Button">
             <Setter Property="Background" Value="{StaticResource Accent}"/>
             <Setter Property="Foreground" Value="White"/>
@@ -70,6 +74,40 @@
             <Setter Property="FontSize" Value="11"/>
             <Setter Property="FontWeight" Value="SemiBold"/>
             <Setter Property="Margin" Value="0,0,0,8"/>
+        </Style>
+
+        <!-- Bottom status-rail card: darker than the standard Card, generous padding — this rail
+             carries operational info a technician reads at a glance (see MainWindow.xaml). -->
+        <Style x:Key="StatusCard" TargetType="Border">
+            <Setter Property="Background" Value="{StaticResource Panel2}"/>
+            <Setter Property="BorderBrush" Value="{StaticResource PanelEdge}"/>
+            <Setter Property="BorderThickness" Value="1"/>
+            <Setter Property="CornerRadius" Value="8"/>
+            <Setter Property="Padding" Value="18,20"/>
+            <Setter Property="Margin" Value="0,0,10,0"/>
+        </Style>
+
+        <!-- Compact button variants for the header row, which has far less vertical room than a card. -->
+        <Style x:Key="HeaderButton" TargetType="Button" BasedOn="{StaticResource {x:Type Button}}">
+            <Setter Property="FontSize" Value="12"/>
+            <Setter Property="Padding" Value="10,5"/>
+            <Setter Property="Margin" Value="0,0,6,0"/>
+        </Style>
+        <Style x:Key="HeaderButtonSecondary" TargetType="Button" BasedOn="{StaticResource Secondary}">
+            <Setter Property="FontSize" Value="12"/>
+            <Setter Property="Padding" Value="10,5"/>
+            <Setter Property="Margin" Value="0,0,6,0"/>
+        </Style>
+
+        <!-- Rail button stack: primary/destructive/utility, ~13px text, ~11px vertical padding. -->
+        <Style x:Key="RailButton" TargetType="Button" BasedOn="{StaticResource {x:Type Button}}">
+            <Setter Property="FontSize" Value="13"/>
+            <Setter Property="Padding" Value="14,11"/>
+            <Setter Property="Margin" Value="0,0,0,8"/>
+            <Setter Property="HorizontalContentAlignment" Value="Center"/>
+        </Style>
+        <Style x:Key="RailButtonSecondary" TargetType="Button" BasedOn="{StaticResource RailButton}">
+            <Setter Property="Background" Value="{StaticResource PanelEdge}"/>
         </Style>
     </Application.Resources>
 </Application>
