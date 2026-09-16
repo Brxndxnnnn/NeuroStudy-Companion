@@ -75,6 +75,11 @@ namespace NeuuroBridge
         public bool QuestionsShown;        // ≥1 math-question event exists
         public bool Ended;                 // sync_status = 'completed'
         public bool SurveySubmitted;       // ≥1 questionnaire response row exists
+        // ≥1 post-math protocol phase event exists (client requirement #3's second baseline
+        // block: countdown_post -> baseline2_closed -> countdown_b2 -> baseline2_open). Lets the
+        // stepper show "Baseline 2" as active instead of jumping straight from Math to Done —
+        // see db/migrations/016_session_phase_markers.sql for the phase vocabulary.
+        public bool Baseline2Shown;
     }
 
     /// <summary>
@@ -507,7 +512,9 @@ namespace NeuuroBridge
                         "SELECT s.sync_status, s.bridge_recording_at IS NOT NULL, " +
                         "EXISTS(SELECT 1 FROM events e WHERE e.session_id = s.session_id AND e.image_id IS NOT NULL), " +
                         "EXISTS(SELECT 1 FROM events e WHERE e.session_id = s.session_id AND e.question_id IS NOT NULL), " +
-                        "EXISTS(SELECT 1 FROM session_questionnaire_responses r WHERE r.session_id = s.session_id) " +
+                        "EXISTS(SELECT 1 FROM session_questionnaire_responses r WHERE r.session_id = s.session_id), " +
+                        "EXISTS(SELECT 1 FROM events e WHERE e.session_id = s.session_id AND e.phase IN " +
+                        "('countdown_post','baseline2_closed','countdown_b2','baseline2_open')) " +
                         "FROM sessions s WHERE s.session_id = @sid", conn))
                     {
                         cmd.Parameters.AddWithValue("sid", NpgsqlDbType.Uuid, sessionId);
@@ -519,6 +526,7 @@ namespace NeuuroBridge
                             p.ImagesShown = rd.GetBoolean(2);
                             p.QuestionsShown = rd.GetBoolean(3);
                             p.SurveySubmitted = rd.GetBoolean(4);
+                            p.Baseline2Shown = rd.GetBoolean(5);
                             p.Claimed = p.SyncStatus == "claimed" || p.SyncStatus == "recording" || p.SyncStatus == "completed";
                             p.Ended = p.SyncStatus == "completed";
                             p.Known = true;
