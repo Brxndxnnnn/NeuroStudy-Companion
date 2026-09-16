@@ -494,16 +494,22 @@ namespace NeuuroBridge.Wpf
             bool prepared = _ctl.IsPrepared;
             SetStep(DotPgPair, NumPgPair, TxtPgPair, LinePgPair,
                 pg.Claimed ? StepState.Done : prepared ? StepState.Active : StepState.Pending);
+            // "Baseline 1" covers claim through the whole first countdown/baseline block —
+            // it isn't done until the first image actually appears (recording-confirmed alone
+            // used to mark the old "Recording" step done in ~1s, which under the 13-step
+            // protocol would show it complete while baseline 1 still had ~2.5 minutes left).
             SetStep(DotPgRec, NumPgRec, TxtPgRec, LinePgRec,
-                pg.RecordingConfirmed ? StepState.Done : pg.Claimed ? StepState.Active : StepState.Pending);
+                pg.ImagesShown ? StepState.Done : pg.Claimed ? StepState.Active : StepState.Pending);
             SetStep(DotPgImg, NumPgImg, TxtPgImg, LinePgImg,
                 pg.ImagesShown && (pg.QuestionsShown || pg.Ended) ? StepState.Done :
                 pg.ImagesShown ? StepState.Active : StepState.Pending);
             SetStep(DotPgMath, NumPgMath, TxtPgMath, LinePgMath,
                 pg.QuestionsShown && pg.Ended ? StepState.Done :
                 pg.QuestionsShown ? StepState.Active : StepState.Pending);
+            // "Baseline 2" — active once the post-math phase block starts, done once the bridge
+            // actually stops recording (see BridgeController.PollSyncStatus / Baseline2Shown).
             SetStep(DotPgEnd, NumPgEnd, TxtPgEnd, LinePgEnd,
-                pg.Ended ? StepState.Done : StepState.Pending);
+                pg.Ended ? StepState.Done : pg.Baseline2Shown ? StepState.Active : StepState.Pending);
             SetStep(DotPgSurvey, NumPgSurvey, TxtPgSurvey, null,
                 pg.SurveySubmitted ? StepState.Done : pg.Ended ? StepState.Active : StepState.Pending);
         }

@@ -57,7 +57,7 @@
         </Border>
 
         <!-- ══════════════════════ SESSION STEPPER ══════════════════════ -->
-        <!-- Pair → Recording → Images → Math → Session end → Survey saved.
+        <!-- Pair → Baseline 1 → Images → Math → Baseline 2 → Survey saved.
              Dot/label x:Names are unchanged from the old vertical checklist (DotPgX / TxtPgX) so
              RefreshLiveState's progress logic in MainWindow.xaml.cs did not need to change — only
              SetStep's rendering did (Border+numeral+connecting line instead of a plain Ellipse). -->
@@ -100,7 +100,7 @@
                         <TextBlock.Foreground><SolidColorBrush Color="#6B7A90"/></TextBlock.Foreground>
                     </TextBlock>
                 </Border>
-                <TextBlock Grid.Row="1" Grid.Column="2" x:Name="TxtPgRec" Text="Recording" FontSize="12" FontWeight="SemiBold" Opacity="0.55" HorizontalAlignment="Center" Margin="0,7,0,0"/>
+                <TextBlock Grid.Row="1" Grid.Column="2" x:Name="TxtPgRec" Text="Baseline 1" FontSize="12" FontWeight="SemiBold" Opacity="0.55" HorizontalAlignment="Center" Margin="0,7,0,0"/>
                 <Rectangle Grid.Row="0" Grid.Column="3" x:Name="LinePgRec" Height="2" VerticalAlignment="Center" Margin="4,0">
                     <Rectangle.Fill><SolidColorBrush Color="#26344A"/></Rectangle.Fill>
                 </Rectangle>
@@ -136,7 +136,7 @@
                         <TextBlock.Foreground><SolidColorBrush Color="#6B7A90"/></TextBlock.Foreground>
                     </TextBlock>
                 </Border>
-                <TextBlock Grid.Row="1" Grid.Column="8" x:Name="TxtPgEnd" Text="Session end" FontSize="12" FontWeight="SemiBold" Opacity="0.55" HorizontalAlignment="Center" Margin="0,7,0,0"/>
+                <TextBlock Grid.Row="1" Grid.Column="8" x:Name="TxtPgEnd" Text="Baseline 2" FontSize="12" FontWeight="SemiBold" Opacity="0.55" HorizontalAlignment="Center" Margin="0,7,0,0"/>
                 <Rectangle Grid.Row="0" Grid.Column="9" x:Name="LinePgEnd" Height="2" VerticalAlignment="Center" Margin="4,0">
                     <Rectangle.Fill><SolidColorBrush Color="#26344A"/></Rectangle.Fill>
                 </Rectangle>

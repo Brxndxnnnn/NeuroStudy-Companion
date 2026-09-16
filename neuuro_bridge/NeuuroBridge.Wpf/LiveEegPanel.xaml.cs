@@ -98,7 +98,14 @@ namespace NeuuroBridge.Wpf
             public double DragStartX;
             public int DragStartOffset;
             public bool Dragging;
+            public bool DragEngaged;   // drag threshold cleared — see DragThresholdPx
         }
+
+        // A click's mouse-down-then-up almost never lands on the exact same pixel, so without a
+        // threshold, EVERY click on the chart (not just an intentional drag) nudged the scrub
+        // offset by a sample or two and silently froze the live view — the chart looked "stuck /
+        // out of view" with no visible cause, since the tiny offset gave no obvious jump.
+        private const double DragThresholdPx = 6;
 
         private readonly Track _eegTrack = new Track { IntervalMs = 50 };
         private readonly Track _bandTrack = new Track { IntervalMs = 1000 };
@@ -591,6 +598,7 @@ namespace NeuuroBridge.Wpf
             ctrl.PreviewMouseLeftButtonDown += (s, e) =>
             {
                 track.Dragging = true;
+                track.DragEngaged = false;
                 track.DragStartX = e.GetPosition(ctrl).X;
                 track.DragStartOffset = track.ScrubOffset;
                 ctrl.CaptureMouse();
@@ -599,6 +607,13 @@ namespace NeuuroBridge.Wpf
             {
                 if (!track.Dragging) return;
                 double dx = e.GetPosition(ctrl).X - track.DragStartX;
+                // Require real, deliberate movement before this counts as a scrub — otherwise an
+                // ordinary click (mouse-down/up rarely land on the exact same pixel) reads as a drag.
+                if (!track.DragEngaged)
+                {
+                    if (Math.Abs(dx) < DragThresholdPx) return;
+                    track.DragEngaged = true;
+                }
                 double pxPerSample = Math.Max(0.5, ctrl.ActualWidth / capacity);
                 int deltaSamples = (int)Math.Round(dx / pxPerSample);
                 // Dragging the content right (positive dx) should reveal OLDER data, i.e. increase offset.
@@ -608,6 +623,9 @@ namespace NeuuroBridge.Wpf
             ctrl.PreviewMouseLeftButtonUp += (s, e) => { track.Dragging = false; ctrl.ReleaseMouseCapture(); };
             ctrl.PreviewMouseWheel += (s, e) =>
             {
+                // Ctrl+wheel to scrub, like zoom shortcuts elsewhere — plain scrolling with the mouse
+                // just resting over the (now full-bleed) chart must never silently freeze the live view.
+                if ((Keyboard.Modifiers & ModifierKeys.Control) == 0) return;
                 int step = Math.Max(1, capacity / 20);
                 var btn = track == _eegTrack ? BtnEegLive : track == _bandTrack ? BtnBandLive : BtnCogLive;
                 SetScrubOffset(track, track.ScrubOffset - Math.Sign(e.Delta) * step, capacity, rebuild, btn, MaxOffsetFor(track));
