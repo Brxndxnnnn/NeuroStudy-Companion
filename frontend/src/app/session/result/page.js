@@ -1,5 +1,5 @@
 "use client";
-import { useState, useEffect, useMemo, useCallback } from "react";
+import { useState, useEffect, useMemo, useCallback, useRef } from "react";
 import { useRouter } from "next/navigation";
 import {
   getSession,
@@ -16,6 +16,8 @@ import EegStripChart from "@/components/EegStripChart";
 import TimeSeriesChart from "@/components/TimeSeriesChart";
 import BandProfileChart from "@/components/BandProfileChart";
 import StimulusModal from "@/components/StimulusModal";
+
+import { useReactToPrint } from "react-to-print";
 
 const CHANNELS = [
   { key: "fp1_left_front", prefix: "fp1", label: "Fp1", color: "--ch-fp1" },
@@ -246,6 +248,9 @@ function fmtDuration(sec) {
 
 export default function SessionResults() {
   const router = useRouter();
+
+  const reportRef = useRef(null);
+
   const [samples, setSamples] = useState([]);
   const [bandRows, setBandRows] = useState([]);   // SDK band_powers — now only mental state + vitals
   const [fftBandRows, setFftBandRows] = useState([]); // our FFT band powers — the Frequency bands chart
@@ -304,6 +309,11 @@ export default function SessionResults() {
   // "stacked" = one strip per channel, or a single channel prefix to isolate
   // one trace.
   const [eegView, setEegView] = useState("stacked");
+
+  const handleDownloadPdf = useReactToPrint({
+    contentRef: reportRef,
+    documentTitle: patientName ? `${patientName}_Session_Report` : "Session_Report",
+  });
 
   useEffect(() => {
     const load = async () => {
@@ -829,7 +839,7 @@ export default function SessionResults() {
         right={<Button variant="ghost" size="sm" onClick={() => router.push("/history")}>Done</Button>}
       />
 
-      <div className="max-w-6xl mx-auto w-full px-5 sm:px-8 py-8 space-y-6">
+      <div ref={reportRef} className="max-w-6xl mx-auto w-full px-5 sm:px-8 py-8 space-y-6">
         <div className="flex flex-wrap items-end justify-between gap-4">
           <div>
             <h1 className="text-[26px] font-bold tracking-tight text-ink">Session results</h1>
@@ -837,11 +847,17 @@ export default function SessionResults() {
               {patientName ? `${patientName} · ` : ""}Filtered EEG · {fmtDuration(duration)}
             </p>
           </div>
-          {samples.length > 0 && (
-            <Pill tone="neutral">
-              {samples.length.toLocaleString()} samples · viewing {fmtDuration(windowLen)}
-            </Pill>
-          )}
+          <div className="flex items-center gap-3">
+            <Button variant="subtle" onClick={handleDownloadPdf}>
+              Download PDF
+            </Button>
+            
+            {samples.length > 0 && (
+              <Pill tone="neutral">
+                {samples.length.toLocaleString()} samples · viewing {fmtDuration(windowLen)}
+              </Pill>
+            )}
+          </div>
         </div>
 
         {isLoading ? (
@@ -1696,6 +1712,8 @@ export default function SessionResults() {
             )}
           </>
         )}
+
+        <PrintDataTables samples={samples} fftBandRows={fftBandRows} bandRows={bandRows} ellipticRows={ellipticRows} />
       </div>
 
       {selectedEvent != null && events[selectedEvent] && (
@@ -1726,6 +1744,140 @@ function VitalTile({ label, color, value, unit, min, max }) {
         <span className="text-[12px] font-normal text-muted"> {unit}</span>
       </div>
       <StatLine label="Range" value={`${min} – ${max} ${unit}`} />
+    </div>
+  );
+}
+function PrintDataTables({ samples, fftBandRows, bandRows, ellipticRows }) {
+  const eegData = samples?.filter((s, i) => Math.floor(s.t_seconds) === s.t_seconds || i % 250 === 0) || [];
+  const freqData = fftBandRows?.filter((s, i) => Math.floor(s.t_seconds) === s.t_seconds || i % 5 === 0) || [];
+  const vitalsData = bandRows?.filter((s, i) => Math.floor(s.t_seconds) === s.t_seconds || i % 5 === 0) || [];
+  // Elliptic windows are typically calculated every 0.5s or 1s. We filter for whole seconds.
+  const ellipticData = ellipticRows?.filter((s, i) => i % 2 === 0) || [];
+  return (
+    <div className="hidden print:block mt-12 space-y-12 text-[10px]">
+      
+      {/* 1. Filtered EEG Table */}
+      {eegData.length > 0 && (
+        <div className="print:break-before-page">
+          <h2 className="text-lg font-bold mb-4 border-b-2 border-slate-800 pb-1">Appendix A: Filtered EEG (µV)</h2>
+          <table className="w-full text-left border-collapse">
+            <thead>
+              <tr className="border-b border-slate-400">
+                <th className="py-2">Time (s)</th>
+                <th>Fp1</th>
+                <th>Fp2</th>
+                <th>T3</th>
+                <th>T4</th>
+              </tr>
+            </thead>
+            <tbody>
+              {eegData.map((row, idx) => (
+                <tr key={idx} className="border-b border-slate-200">
+                  <td className="py-1 font-mono">{row.t_seconds?.toFixed(1)}</td>
+                  <td className="font-mono">{row.fp1_left_front?.toFixed(3) || "—"}</td>
+                  <td className="font-mono">{row.fp2_right_front?.toFixed(3) || "—"}</td>
+                  <td className="font-mono">{row.t3_left_temporal?.toFixed(3) || "—"}</td>
+                  <td className="font-mono">{row.t4_right_temporal?.toFixed(3) || "—"}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+
+      {/* 2. Frequency Bands Table (Showing Fp1 as primary) */}
+      {freqData.length > 0 && (
+        <div className="print:break-before-page">
+          <h2 className="text-lg font-bold mb-4 border-b-2 border-slate-800 pb-1">Appendix B: Frequency Bands Power (Fp1)</h2>
+          <table className="w-full text-left border-collapse">
+            <thead>
+              <tr className="border-b border-slate-400">
+                <th className="py-2">Time (s)</th>
+                <th>Delta</th>
+                <th>Theta</th>
+                <th>Alpha</th>
+                <th>Beta</th>
+                <th>Gamma</th>
+              </tr>
+            </thead>
+            <tbody>
+              {freqData.map((row, idx) => (
+                <tr key={idx} className="border-b border-slate-200">
+                  <td className="py-1 font-mono">{row.t_seconds?.toFixed(1)}</td>
+                  <td className="font-mono">{row.fp1_delta?.toFixed(1) || "—"}</td>
+                  <td className="font-mono">{row.fp1_theta?.toFixed(1) || "—"}</td>
+                  <td className="font-mono">{row.fp1_alpha?.toFixed(1) || "—"}</td>
+                  <td className="font-mono">{row.fp1_beta?.toFixed(1) || "—"}</td>
+                  <td className="font-mono">{row.fp1_gamma?.toFixed(1) || "—"}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+
+      {/* 4. Band Strength (Elliptic) Table */}
+      {ellipticData.length > 0 && (
+        <div className="print:break-before-page">
+          <h2 className="text-lg font-bold mb-4 border-b-2 border-slate-800 pb-1">Appendix C: Band Strength Amplitude - Fp1 SD (µV)</h2>
+          <table className="w-full text-left border-collapse">
+            <thead>
+              <tr className="border-b border-slate-400">
+                <th className="py-2">Time (s)</th>
+                <th>Delta</th>
+                <th>Theta</th>
+                <th>Alpha</th>
+                <th>Beta</th>
+                <th>Gamma</th>
+              </tr>
+            </thead>
+            <tbody>
+              {ellipticData.map((row, idx) => (
+                <tr key={idx} className="border-b border-slate-200">
+                  <td className="py-1 font-mono">{row.t_seconds?.toFixed(1)}</td>
+                  <td className="font-mono">{row.fp1_delta_std?.toFixed(2) || "—"}</td>
+                  <td className="font-mono">{row.fp1_theta_std?.toFixed(2) || "—"}</td>
+                  <td className="font-mono">{row.fp1_alpha_std?.toFixed(2) || "—"}</td>
+                  <td className="font-mono">{row.fp1_beta_std?.toFixed(2) || "—"}</td>
+                  <td className="font-mono">{row.fp1_gamma_std?.toFixed(2) || "—"}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+
+      {/* 3. Mental State & Vitals Table */}
+      {vitalsData.length > 0 && (
+        <div className="print:break-before-page">
+          <h2 className="text-lg font-bold mb-4 border-b-2 border-slate-800 pb-1">Appendix D: Mental State & Vitals</h2>
+          <table className="w-full text-left border-collapse">
+            <thead>
+              <tr className="border-b border-slate-400">
+                <th className="py-2">Time (s)</th>
+                <th>Attention</th>
+                <th>Relaxation</th>
+                <th>Workload</th>
+                <th>Heart Rate (bpm)</th>
+                <th>SpO₂ (%)</th>
+              </tr>
+            </thead>
+            <tbody>
+              {vitalsData.map((row, idx) => (
+                <tr key={idx} className="border-b border-slate-200">
+                  <td className="py-1 font-mono">{row.t_seconds?.toFixed(1)}</td>
+                  <td className="font-mono">{row.attention?.toFixed(2) || "—"}</td>
+                  <td className="font-mono">{row.relaxation?.toFixed(2) || "—"}</td>
+                  <td className="font-mono">{row.mental_workload?.toFixed(2) || "—"}</td>
+                  <td className="font-mono">{row.heart_rate?.toFixed(0) || "—"}</td>
+                  <td className="font-mono">{row.spo2?.toFixed(0) || "—"}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+      
     </div>
   );
 }
