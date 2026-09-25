@@ -1,12 +1,14 @@
 import sessionModel from '../models/session.model.js'
 import catchAsync from '../utils/catchAsync.js'
-import { BadRequestError, NotFoundError, AppError } from '../utils/AppError.js'
+import { BadRequestError, NotFoundError, PermissionDeniedError, AppError } from '../utils/AppError.js'
 import fs from 'fs'
 
 // ── GET /api/sessions ──────────────────────────────────────────────────────────
 const listSessions = catchAsync(async (req, res) => {
-    const clinic_id = req.user.role === 'admin' ? req.query.clinic_id : req.user.clinic_id // from JWT for technician, undefined for admin
-    const { sync_status, start_date, end_date } = req.query
+    const clinic_id = ['admin', 'superadmin'].includes(req.user.role) ? req.query.clinic_id : req.user.clinic_id // from JWT for technician, undefined for admins
+    const { sync_status, start_date, end_date, search } = req.query
+    const page = Number(req.query.page ?? 1)
+    const page_size = Number(req.query.page_size ?? 20)
     const validStatuses = ['unclaimed', 'claimed', 'recording', 'completed'];
     if (sync_status && !validStatuses.includes(sync_status))
         throw new BadRequestError(`Invalid sync_status value. Must be one of: ${validStatuses.join(', ')}`)
@@ -14,8 +16,21 @@ const listSessions = catchAsync(async (req, res) => {
         throw new BadRequestError('Invalid start_date value. Must be a valid date string.')
     if (end_date && isNaN(Date.parse(end_date)))
         throw new BadRequestError('Invalid end_date value. Must be a valid date string.')
-    const sessions = await sessionModel.findAll({ clinic_id, sync_status, start_date, end_date }, req.dbClient)
-    return res.json(sessions)
+    if (!Number.isInteger(page) || page < 1)
+        throw new BadRequestError('Invalid page value. It must be a positive integer.')
+    if (!Number.isInteger(page_size) || page_size < 1 || page_size > 100)
+        throw new BadRequestError('Invalid page_size value. It must be an integer between 1 and 100.')
+
+    const result = await sessionModel.findAll({
+        clinic_id,
+        sync_status,
+        start_date,
+        end_date,
+        search: search?.trim() || undefined,
+        page,
+        page_size
+    }, req.dbClient)
+    return res.json(result)
 })
 
 // ── GET /api/sessions/:session_id ─────────────────────────────────────────────
@@ -83,6 +98,24 @@ const endSession = catchAsync(async (req, res) => {
         response.warning = backfillWarning;
 
     return res.json(response);
+})
+
+// -- DELETE /api/sessions/:session_id ------------------------------------------------
+// Session foreign keys are deliberately configured with ON DELETE CASCADE, so deleting
+// the session is sufficient to remove its dependent session data atomically.
+const deleteSession = catchAsync(async (req, res) => {
+    if (req.user.role !== 'admin' && req.user.role !== 'superadmin')
+        throw new PermissionDeniedError('Only administrators can delete sessions.')
+
+    const { session_id } = req.params
+    if (!session_id)
+        throw new BadRequestError('Missing required field: session_id is required')
+
+    const deletedSession = await sessionModel.deleteById(session_id, req.dbClient)
+    if (!deletedSession)
+        throw new NotFoundError('Session not found')
+
+    return res.status(200).json({ message: 'Session deleted successfully.', session_id: deletedSession.session_id })
 })
 
 // ── GET /api/sessions/:session_id/results ────────────────────────────────────────────
@@ -188,4 +221,4 @@ const getSessionFftBandPowerResults = catchAsync(async (req, res) => {
     return res.json(results)
 })
 
-export default { listSessions, getSessionById, pairSessions, endSession, getSessionResult, getSessionEEGResults, getSessionBandPowerResults, getSessionEllipticBandStats, getSessionFftBandPowerResults }
+export default { listSessions, getSessionById, pairSessions, endSession, deleteSession, getSessionResult, getSessionEEGResults, getSessionBandPowerResults, getSessionEllipticBandStats, getSessionFftBandPowerResults }

@@ -201,9 +201,16 @@ export async function submitQuestionnaireAnswers(sessionId, questionnaireId, ans
 
 
 // SESSIONS
-export async function getSessions() {
-  const res = await fetchWithAuth(`${BASE_URL}/sessions`);
+export async function getSessions(params = {}) {
+  const query = new URLSearchParams(
+    Object.entries(params).filter(([, value]) => value !== undefined && value !== null && value !== "")
+  );
+  const suffix = query.toString() ? `?${query}` : "";
+  const res = await fetchWithAuth(`${BASE_URL}/sessions${suffix}`);
   return res;
+}
+export async function deleteSession(sessionId) {
+  return fetchWithAuth(`${BASE_URL}/sessions/${sessionId}`, { method: "DELETE" });
 }
 export async function getSession(sessionId) {
   const res = await fetchWithAuth(`${BASE_URL}/sessions/${sessionId}`);

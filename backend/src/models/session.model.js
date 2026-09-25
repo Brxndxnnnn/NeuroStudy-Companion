@@ -1,35 +1,68 @@
 import pool from '../config/db.js'
 import query from '../utils/query.js'
 
-const findAll = async ({ clinic_id = undefined, sync_status, start_date, end_date }, client = pool) => {
-    let sql = `SELECT s.session_id, s.sync_status, s.bridge_recording_at, s.device_id, s.paired_at, s.start_time, s.end_time,
-            s.client_id, c.name AS client_name, s.conducted_by, u.display_name AS technician_name FROM sessions s
+const findAll = async ({ clinic_id = undefined, sync_status, start_date, end_date, search, page, page_size }, client = pool) => {
+    const selectSql = `SELECT s.session_id, s.sync_status, s.bridge_recording_at, s.device_id, s.paired_at, s.start_time, s.end_time,
+            s.client_id, c.name AS client_name, s.conducted_by, u.display_name AS technician_name, cl.name AS clinic_name FROM sessions s
             LEFT JOIN clients c ON s.client_id = c.client_id
-            LEFT JOIN users u ON s.conducted_by = u.user_id`;
+            LEFT JOIN users u ON s.conducted_by = u.user_id
+            LEFT JOIN clinics cl ON s.clinic_id = cl.clinic_id`;
 
     const values = [];
 
+    // Begin with a neutral predicate so any combination of the optional filters
+    // is valid for administrators viewing sessions across all clinics.
+    let whereSql = ' WHERE 1 = 1';
+
     if (clinic_id !== undefined) {
-        sql += ` WHERE s.clinic_id = $${values.length + 1}`;
+        whereSql += ` AND s.clinic_id = $${values.length + 1}`;
         values.push(clinic_id);
     }
     if (sync_status !== undefined) {
-        sql += ` AND s.sync_status = $${values.length + 1}`;
+        whereSql += ` AND s.sync_status = $${values.length + 1}`;
         values.push(sync_status);
     }
     if (start_date !== undefined) {
-        sql += ` AND s.start_time >= $${values.length + 1}`;
+        whereSql += ` AND s.start_time >= $${values.length + 1}`;
         values.push(start_date);
     }
     if (end_date !== undefined) {
-        sql += ` AND s.start_time <= $${values.length + 1}`;
+        whereSql += ` AND s.start_time <= $${values.length + 1}`;
         values.push(end_date);
     }
+    if (search !== undefined) {
+        const searchValue = `%${search}%`;
+        whereSql += ` AND (s.session_id::text ILIKE $${values.length + 1}
+            OR s.sync_status ILIKE $${values.length + 1}
+            OR s.device_id ILIKE $${values.length + 1}
+            OR c.name ILIKE $${values.length + 1}
+            OR u.display_name ILIKE $${values.length + 1})`;
+        values.push(searchValue);
+    }
 
-    sql += ` ORDER BY s.start_time DESC NULLS LAST, s.session_id DESC`;
+    const countSql = `SELECT s.sync_status, COUNT(*)::integer AS count FROM sessions s
+        LEFT JOIN clients c ON s.client_id = c.client_id
+        LEFT JOIN users u ON s.conducted_by = u.user_id${whereSql}
+        GROUP BY s.sync_status`;
+    const { rows: statusCounts } = await query(client, countSql, values);
 
-    const { rows } = await query(client, sql, values);
-    return rows;
+    const countByStatus = Object.fromEntries(statusCounts.map(({ sync_status: status, count }) => [status, count]));
+    const sql = `${selectSql}${whereSql} ORDER BY s.start_time DESC NULLS LAST, s.session_id DESC
+        LIMIT $${values.length + 1} OFFSET $${values.length + 2}`;
+    const offset = (page - 1) * page_size;
+    const { rows } = await query(client, sql, [...values, page_size, offset]);
+    const total = Object.values(countByStatus).reduce((sum, count) => sum + count, 0);
+
+    return {
+        sessions: rows,
+        pagination: {
+            page,
+            page_size,
+            total,
+            total_pages: Math.max(1, Math.ceil(total / page_size))
+        },
+        status_counts: countByStatus
+    };
 }
 
 const findById = async (session_id, client = pool) => {
@@ -78,6 +111,15 @@ const pairSessions = async (pairing_code, client_id, conducted_by, clinic_id, cl
 
 const endSession = async (session_id, client = pool) => {
     const { rows } = await query(client, `UPDATE sessions SET sync_status = 'completed', end_time = NOW() WHERE session_id = $1 RETURNING *`, [session_id])
+    return rows[0] ?? null
+}
+
+const deleteById = async (session_id, client = pool) => {
+    const { rows } = await query(
+        client,
+        'DELETE FROM sessions WHERE session_id = $1 RETURNING session_id',
+        [session_id]
+    )
     return rows[0] ?? null
 }
 
@@ -311,4 +353,4 @@ const getSessionFftBandPowerResults = async (session_id, client = pool) => {
     };
 };
 
-export default { findAll, findById, pairSessions, endSession, getSessionResult, backfillSessionResults, getSessionEEGResults, getSessionBandPowerResults, getEllipticBandStats, getSessionFftBandPowerResults }
+export default { findAll, findById, pairSessions, endSession, deleteById, getSessionResult, backfillSessionResults, getSessionEEGResults, getSessionBandPowerResults, getEllipticBandStats, getSessionFftBandPowerResults }

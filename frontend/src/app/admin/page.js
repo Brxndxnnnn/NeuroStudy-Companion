@@ -13,6 +13,8 @@ import {
   getClinicsDatabaseAccessOverview,
   revokeClinicDatabaseAccess,
   grantClinicDatabaseAccess,
+  getSessions,
+  deleteSession,
 } from "@/utils/api";
 import {
   PageContainer,
@@ -55,6 +57,13 @@ export default function AdminDashboard() {
   const [databaseAccessLoading, setDatabaseAccessLoading] = useState(false);
   const [pendingDatabaseAction, setPendingDatabaseAction] = useState(null);
   const [issuedDatabaseAccess, setIssuedDatabaseAccess] = useState(null);
+  const [sessions, setSessions] = useState([]);
+  const [sessionsLoading, setSessionsLoading] = useState(false);
+  const [sessionSearch, setSessionSearch] = useState("");
+  const [sessionFilters, setSessionFilters] = useState({ clinic_id: "", sync_status: "", start_date: "", end_date: "" });
+  const [sessionPagination, setSessionPagination] = useState({ page: 1, page_size: 20, total: 0, total_pages: 1 });
+  const [sessionStatusCounts, setSessionStatusCounts] = useState({});
+  const [sessionDeleteTarget, setSessionDeleteTarget] = useState(null);
 
   // One clinic list feeds both the create-user Clinic picker and the user
   // table's clinic-name lookup — no reason for two separate fetches of the
@@ -147,6 +156,29 @@ export default function AdminDashboard() {
     }
   };
 
+  const fetchSessions = async (filters = sessionFilters, page = 1, search = sessionSearch) => {
+    setSessionsLoading(true);
+    setErrorMessage("");
+    try {
+      const response = await getSessions({ ...filters, search: search.trim(), page, page_size: sessionPagination.page_size });
+      if (response.ok) {
+        const data = await response.json();
+        setSessions(Array.isArray(data) ? data : data.sessions || data.data || []);
+        setSessionPagination(data.pagination || { page: 1, page_size: sessionPagination.page_size, total: 0, total_pages: 1 });
+        setSessionStatusCounts(data.status_counts || {});
+      } else if (response.status === 401 || response.status === 403) {
+        router.push("/login");
+      } else {
+        const data = await response.json().catch(() => ({}));
+        setErrorMessage(data.message || "Failed to retrieve sessions.");
+      }
+    } catch {
+      setErrorMessage("Network error: could not retrieve sessions.");
+    } finally {
+      setSessionsLoading(false);
+    }
+  };
+
   useEffect(() => {
     if (isAuthLoading) return;
     if (!isAuthenticated) {
@@ -160,6 +192,7 @@ export default function AdminDashboard() {
 
   useEffect(() => {
     if (activeTab === "database") fetchDatabaseAccess();
+    if (activeTab === "sessions") fetchSessions();
   }, [activeTab]);
 
   const openCreateModal = () => {
@@ -282,6 +315,27 @@ export default function AdminDashboard() {
     }
   };
 
+  const confirmDeleteSession = async () => {
+    if (!sessionDeleteTarget) return;
+
+    setErrorMessage("");
+    setSuccessMessage("");
+    try {
+      const response = await deleteSession(sessionDeleteTarget.session_id);
+      if (response.ok) {
+        setSuccessMessage("Session deleted successfully.");
+        await fetchSessions(sessionFilters, sessionPagination.page);
+      } else {
+        const data = await response.json().catch(() => ({}));
+        setErrorMessage(data.message || "The server could not delete the session.");
+      }
+    } catch {
+      setErrorMessage("Network error while deleting the session.");
+    } finally {
+      setSessionDeleteTarget(null);
+    }
+  };
+
   return (
     <main className="min-h-screen bg-ground">
       <TopNav />
@@ -304,6 +358,7 @@ export default function AdminDashboard() {
           <TabButton id="overview" activeTab={activeTab} onSelect={setActiveTab}>Overview</TabButton>
           <TabButton id="manage" activeTab={activeTab} onSelect={setActiveTab}>Manage users &amp; access</TabButton>
           <TabButton id="database" activeTab={activeTab} onSelect={setActiveTab}>Manage Database Access</TabButton>
+          <TabButton id="sessions" activeTab={activeTab} onSelect={setActiveTab}>Manage sessions</TabButton>
         </div>
 
         {/* OVERVIEW */}
@@ -401,6 +456,93 @@ export default function AdminDashboard() {
                 </div>
               </Card>
             )}
+          </div>
+        )}
+
+        {/* MANAGE SESSIONS */}
+        {activeTab === "sessions" && (
+          <div className="anim-fade space-y-5">
+            <Card className="p-6">
+              <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-[minmax(190px,1.4fr)_minmax(130px,0.8fr)_minmax(160px,1fr)_minmax(145px,0.8fr)_minmax(145px,0.8fr)_auto] xl:items-end">
+                <div>
+                  <Field label="Search sessions" htmlFor="session-search">
+                    <Input id="session-search" value={sessionSearch} onChange={(event) => setSessionSearch(event.target.value)} placeholder="Session, client, technician, device" />
+                  </Field>
+                </div>
+                <div>
+                  <Field label="Status" htmlFor="session-status">
+                    <Select id="session-status" value={sessionFilters.sync_status} onChange={(event) => setSessionFilters((current) => ({ ...current, sync_status: event.target.value }))}>
+                      <option value="">All statuses</option>
+                      <option value="unclaimed">Unclaimed</option>
+                      <option value="claimed">Claimed</option>
+                      <option value="recording">Recording</option>
+                      <option value="completed">Completed</option>
+                    </Select>
+                  </Field>
+                </div>
+                <div>
+                  <Field label="Clinic" htmlFor="session-clinic">
+                    <Select id="session-clinic" value={sessionFilters.clinic_id} onChange={(event) => setSessionFilters((current) => ({ ...current, clinic_id: event.target.value }))}>
+                      <option value="">All clinics</option>
+                      {clinicOptions.map((clinic) => <option key={clinic.clinic_id} value={clinic.clinic_id}>{clinic.name || clinic.clinic_id}</option>)}
+                    </Select>
+                  </Field>
+                </div>
+                <div>
+                  <Field label="Started after" htmlFor="session-start-date">
+                    <Input id="session-start-date" type="date" value={sessionFilters.start_date} onChange={(event) => setSessionFilters((current) => ({ ...current, start_date: event.target.value }))} />
+                  </Field>
+                </div>
+                <div>
+                  <Field label="Started before" htmlFor="session-end-date">
+                    <Input id="session-end-date" type="date" value={sessionFilters.end_date} onChange={(event) => setSessionFilters((current) => ({ ...current, end_date: event.target.value }))} />
+                  </Field>
+                </div>
+                <div className="flex gap-2">
+                  <Button onClick={() => fetchSessions(sessionFilters, 1)}>Apply filters</Button>
+                  <Button variant="ghost" onClick={() => {
+                    const emptyFilters = { clinic_id: "", sync_status: "", start_date: "", end_date: "" };
+                    setSessionFilters(emptyFilters);
+                    setSessionSearch("");
+                    fetchSessions(emptyFilters, 1, "");
+                  }}>Reset</Button>
+                </div>
+              </div>
+            </Card>
+
+            <div className="flex flex-wrap items-center gap-2 px-1 text-sm text-muted">
+              <span className="mr-1 font-semibold text-ink">Session status</span>
+              {['unclaimed', 'claimed', 'recording', 'completed'].map((status) => (
+                <span key={status} className="inline-flex items-center gap-1.5 rounded-full border border-border bg-surface px-3 py-1">
+                  <span className="capitalize text-ink-2">{status}</span>
+                  <span className="font-mono text-xs font-semibold text-ink">{sessionStatusCounts[status] || 0}</span>
+                </span>
+              ))}
+            </div>
+
+            <Card className="overflow-hidden">
+              <div className="px-6 py-5 border-b border-border">
+                <h2 className="text-[15px] font-bold tracking-tight text-ink">Sessions</h2>
+                <p className="text-[12.5px] text-muted mt-0.5">Deleting a session permanently removes its related session data.</p>
+              </div>
+              {sessionsLoading ? (
+                <div className="p-12 text-center text-muted"><Spinner size={18} className="mr-2 align-[-3px] text-accent" /> Loading sessions...</div>
+              ) : sessions.length === 0 ? (
+                <div className="p-12 text-center text-muted">No sessions match the current search and filters.</div>
+              ) : (
+                <>
+                  <SessionTable sessions={sessions} onDelete={setSessionDeleteTarget} />
+                  <div className="flex flex-col gap-3 border-t border-border px-6 py-4 text-sm sm:flex-row sm:items-center sm:justify-between">
+                    <span className="text-muted">Showing {sessions.length} of {sessionPagination.total} sessions</span>
+                    <div className="flex items-center gap-3">
+                      <Button variant="ghost" size="sm" disabled={sessionPagination.page <= 1} onClick={() => fetchSessions(sessionFilters, sessionPagination.page - 1)}>Previous</Button>
+                      <span className="font-mono text-xs text-muted">Page {sessionPagination.page} of {sessionPagination.total_pages}</span>
+                      <Button variant="ghost" size="sm" disabled={sessionPagination.page >= sessionPagination.total_pages} onClick={() => fetchSessions(sessionFilters, sessionPagination.page + 1)}>Next</Button>
+                    </div>
+                  </div>
+                </>
+              )}
+            </Card>
           </div>
         )}
       </PageContainer>
@@ -502,6 +644,17 @@ export default function AdminDashboard() {
           onConfirm={confirmDatabaseAction}
         />
       )}
+
+      {sessionDeleteTarget && (
+        <ConfirmationModal
+          title="Delete session permanently?"
+          description={`This will permanently delete the ${sessionDeleteTarget.sync_status || "selected"} session for ${sessionDeleteTarget.client_name || "an unassigned client"}, including its related session data. This cannot be undone.`}
+          confirmLabel="Delete session"
+          tone="danger"
+          onCancel={() => setSessionDeleteTarget(null)}
+          onConfirm={confirmDeleteSession}
+        />
+      )}
     </main>
   );
 }
@@ -554,6 +707,42 @@ function UserTable({ users, onEdit, onDelete, readOnly = false, clinicOptions = 
                   </div>
                 </td>
               )}
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </div>
+  );
+}
+
+function SessionTable({ sessions, onDelete }) {
+  return (
+    <div className="overflow-x-auto">
+      <table className="w-full min-w-[920px] text-left">
+        <thead>
+          <tr className="border-b border-border">
+            <th className="px-6 py-3 font-mono text-[10px] uppercase tracking-[0.1em] text-muted font-semibold">Session</th>
+            <th className="px-6 py-3 font-mono text-[10px] uppercase tracking-[0.1em] text-muted font-semibold">Clinic</th>
+            <th className="px-6 py-3 font-mono text-[10px] uppercase tracking-[0.1em] text-muted font-semibold">Client</th>
+            <th className="px-6 py-3 font-mono text-[10px] uppercase tracking-[0.1em] text-muted font-semibold">Technician</th>
+            <th className="px-6 py-3 font-mono text-[10px] uppercase tracking-[0.1em] text-muted font-semibold">Status</th>
+            <th className="px-6 py-3 font-mono text-[10px] uppercase tracking-[0.1em] text-muted font-semibold">Started</th>
+            <th className="px-6 py-3 font-mono text-[10px] uppercase tracking-[0.1em] text-muted font-semibold text-right">Action</th>
+          </tr>
+        </thead>
+        <tbody>
+          {sessions.map((session) => (
+            <tr key={session.session_id} className="border-b border-border last:border-0 hover:bg-inset/50 transition-colors">
+              <td className="px-6 py-4">
+                <div className="font-mono text-xs text-ink">{session.session_id}</div>
+                {session.device_id && <div className="mt-0.5 text-xs text-muted">Device: {session.device_id}</div>}
+              </td>
+              <td className="px-6 py-4 text-sm text-ink-2">{session.clinic_name || "Unassigned"}</td>
+              <td className="px-6 py-4 text-sm text-ink-2">{session.client_name || "Unassigned"}</td>
+              <td className="px-6 py-4 text-sm text-ink-2">{session.technician_name || "Unassigned"}</td>
+              <td className="px-6 py-4"><Pill tone={session.sync_status === "completed" ? "good" : "warn"}>{session.sync_status || "unknown"}</Pill></td>
+              <td className="px-6 py-4 text-sm text-ink-2">{formatDateTime(session.start_time)}</td>
+              <td className="px-6 py-4 text-right"><Button variant="danger" size="sm" onClick={() => onDelete(session)}>Delete</Button></td>
             </tr>
           ))}
         </tbody>
