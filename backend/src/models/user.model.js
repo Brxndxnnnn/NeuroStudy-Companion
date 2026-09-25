@@ -16,7 +16,7 @@ const findByEmail = async (email, client = pool) => {
 const findById = async (user_id, client = pool) => {
     const { rows } = await query(client,
         `SELECT u.user_id, u.email, u.display_name, u.clinic_id, u.role_id, u.created_at, u.assigned_by,
-                r.name AS role_name
+                r.name AS role
         FROM users u
         JOIN roles r ON u.role_id = r.role_id
         WHERE u.user_id = $1`,
