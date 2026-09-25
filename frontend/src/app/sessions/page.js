@@ -64,7 +64,8 @@ export default function SessionsPage() {
       try {
         const res = await getSessions();
         if (!res.ok) throw new Error("fetch");
-        setSessions(await res.json());
+        const data = await res.json();
+        setSessions(Array.isArray(data) ? data : data.sessions || []);
       } catch (err) {
         setError("Failed to load sessions from the database.");
       } finally {
