@@ -9,6 +9,7 @@ import clientsRouter from './clients.routes.js'
 import questionsRouter from './questions.routes.js'
 import questionnairesRouter from './questionnaires.routes.js'
 import mlRouter from './ml.routes.js'
+import siteSettingsRouter from './siteSettings.routes.js'
 import authenticate from '../middleware/authenticate.js'
 import dbContext from '../middleware/dbContext.js'
 import clinicController from '../controllers/clinic.controller.js'
@@ -63,6 +64,7 @@ router.use('/ml', mlRouter)
 router.use(dbContext)
 router.use('/users', usersRouter)
 router.use('/clinics', clinicsRouter)
+router.use('/site-settings', siteSettingsRouter)
 router.use('/sessions', sessionsRouter)
 router.use('/events', eventsRouter)
 router.use('/images', imagesRouter)

@@ -72,6 +72,7 @@ const findById = async (session_id, client = pool) => {
             s.sync_status,
             s.bridge_recording_at,
             s.device_id,
+            s.image_display_interval_seconds,
             s.paired_at,
             s.start_time,
             s.end_time,
