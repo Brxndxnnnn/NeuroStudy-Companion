@@ -446,6 +446,15 @@ export async function getClinic(clinicId) {
   const res = await fetchWithAuth(`${BASE_URL}/clinics/${clinicId}`);
   return res;
 }
+export async function getImageDisplayInterval() {
+  return fetchWithAuth(`${BASE_URL}/site-settings`);
+}
+export async function updateImageDisplayInterval(imageDisplayIntervalSeconds) {
+  return fetchWithAuth(`${BASE_URL}/site-settings`, {
+    method: "PUT",
+    body: JSON.stringify({ image_display_interval_seconds: imageDisplayIntervalSeconds }),
+  });
+}
 export async function getClinicsDatabaseAccessOverview() {
   return fetchWithAuth(`${BASE_URL}/clinics/database-access`);
 }

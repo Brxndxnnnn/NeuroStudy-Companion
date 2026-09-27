@@ -15,6 +15,8 @@ import {
   grantClinicDatabaseAccess,
   getSessions,
   deleteSession,
+  getImageDisplayInterval,
+  updateImageDisplayInterval,
 } from "@/utils/api";
 import {
   PageContainer,
@@ -64,6 +66,8 @@ export default function AdminDashboard() {
   const [sessionPagination, setSessionPagination] = useState({ page: 1, page_size: 20, total: 0, total_pages: 1 });
   const [sessionStatusCounts, setSessionStatusCounts] = useState({});
   const [sessionDeleteTarget, setSessionDeleteTarget] = useState(null);
+  const [imageDisplayInterval, setImageDisplayInterval] = useState("10");
+  const [imageDisplayIntervalLoading, setImageDisplayIntervalLoading] = useState(false);
 
   // One clinic list feeds both the create-user Clinic picker and the user
   // table's clinic-name lookup — no reason for two separate fetches of the
@@ -179,6 +183,25 @@ export default function AdminDashboard() {
     }
   };
 
+  const fetchImageDisplayInterval = async () => {
+    setImageDisplayIntervalLoading(true);
+    try {
+      const response = await getImageDisplayInterval();
+      if (response.ok) {
+        const data = await response.json();
+        setImageDisplayInterval(String(data.image_display_interval_seconds ?? 10));
+      } else if (response.status === 401 || response.status === 403) {
+        router.push("/login");
+      } else {
+        setErrorMessage("Failed to retrieve the site-wide image display interval.");
+      }
+    } catch {
+      setErrorMessage("Network error: could not retrieve the site-wide image display interval.");
+    } finally {
+      setImageDisplayIntervalLoading(false);
+    }
+  };
+
   useEffect(() => {
     if (isAuthLoading) return;
     if (!isAuthenticated) {
@@ -192,7 +215,10 @@ export default function AdminDashboard() {
 
   useEffect(() => {
     if (activeTab === "database") fetchDatabaseAccess();
-    if (activeTab === "sessions") fetchSessions();
+    if (activeTab === "sessions") {
+      fetchSessions();
+      fetchImageDisplayInterval();
+    }
   }, [activeTab]);
 
   const openCreateModal = () => {
@@ -336,6 +362,32 @@ export default function AdminDashboard() {
     }
   };
 
+  const saveImageDisplayInterval = async () => {
+    const seconds = Number(imageDisplayInterval);
+    if (!Number.isInteger(seconds) || seconds < 1 || seconds > 60) {
+      setErrorMessage("Image display interval must be a whole number from 1 to 60 seconds.");
+      return;
+    }
+
+    setErrorMessage("");
+    setSuccessMessage("");
+    setImageDisplayIntervalLoading(true);
+    try {
+      const response = await updateImageDisplayInterval(seconds);
+      const data = await response.json().catch(() => ({}));
+      if (response.ok) {
+        setImageDisplayInterval(String(data.image_display_interval_seconds));
+        setSuccessMessage("Site-wide image display interval saved. It will apply to newly paired sessions.");
+      } else {
+        setErrorMessage(data.message || "The server rejected the image display interval.");
+      }
+    } catch {
+      setErrorMessage("Network error while saving the site-wide image display interval.");
+    } finally {
+      setImageDisplayIntervalLoading(false);
+    }
+  };
+
   return (
     <main className="min-h-screen bg-ground">
       <TopNav />
@@ -462,6 +514,23 @@ export default function AdminDashboard() {
         {/* MANAGE SESSIONS */}
         {activeTab === "sessions" && (
           <div className="anim-fade space-y-5">
+            <Card className="p-6">
+              <div className="flex flex-col gap-4 sm:flex-row sm:items-end sm:justify-between">
+                <div className="max-w-xl">
+                  <h2 className="text-[15px] font-bold tracking-tight text-ink">Inter-image display interval</h2>
+                  <p className="mt-0.5 text-[12.5px] text-muted">This site-wide setting applies to every newly paired session, across all clinics. Existing and active sessions keep their saved interval.</p>
+                </div>
+                <div className="flex w-full items-end gap-2 sm:w-auto">
+                  <div className="w-full sm:w-40">
+                    <Field label="Seconds" htmlFor="image-display-interval">
+                      <Input id="image-display-interval" type="number" min="1" max="60" step="1" value={imageDisplayInterval} disabled={imageDisplayIntervalLoading} onChange={(event) => setImageDisplayInterval(event.target.value)} />
+                    </Field>
+                  </div>
+                  <Button loading={imageDisplayIntervalLoading} onClick={saveImageDisplayInterval}>Save interval</Button>
+                </div>
+              </div>
+            </Card>
+
             <Card className="p-6">
               <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-[minmax(190px,1.4fr)_minmax(130px,0.8fr)_minmax(160px,1fr)_minmax(145px,0.8fr)_minmax(145px,0.8fr)_auto] xl:items-end">
                 <div>

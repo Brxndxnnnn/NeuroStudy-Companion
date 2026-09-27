@@ -107,7 +107,7 @@ const refresh = catchAsync(async (req, res) => {
             jti: randomUUID(),
             sub: user.user_id,
             email: user.email,
-            role: user.role_name,
+            role: user.role,
             role_id: user.role_id,
             clinic_id: user.clinic_id
         })
