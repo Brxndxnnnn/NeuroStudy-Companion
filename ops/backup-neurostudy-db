@@ -1,0 +1,172 @@
+#!/usr/bin/env bash
+set -Eeuo pipefail
+umask 077
+
+readonly PROJECT_DIR='/opt/NeuroStudy-Companion'
+readonly ENV_FILE='/root/.config/neurostudy-backup.env'
+readonly S3CMD_CONFIG='/root/.s3cfg'
+
+log() {
+  printf '%s %s\n' "$(date -u +'%Y-%m-%dT%H:%M:%SZ')" "$*"
+}
+
+fail() {
+  log "ERROR: $*"
+  exit 1
+}
+
+[[ -r "$ENV_FILE" ]] ||
+  fail "Backup environment file is missing or unreadable: $ENV_FILE"
+
+[[ -r "$S3CMD_CONFIG" ]] ||
+  fail "s3cmd configuration is missing or unreadable: $S3CMD_CONFIG"
+
+# shellcheck disable=SC1090
+source "$ENV_FILE"
+
+: "${SPACES_BUCKET:?SPACES_BUCKET is required}"
+: "${SPACES_PREFIX:?SPACES_PREFIX is required}"
+: "${LOCAL_BACKUP_DIR:?LOCAL_BACKUP_DIR is required}"
+: "${LOCAL_RETENTION_DAYS:?LOCAL_RETENTION_DAYS is required}"
+
+[[ -d "$PROJECT_DIR" ]] ||
+  fail "Project directory does not exist: $PROJECT_DIR"
+
+mkdir -p "$LOCAL_BACKUP_DIR"
+
+# Prevent two backup runs from overlapping.
+exec 9>"$LOCAL_BACKUP_DIR/.backup.lock"
+
+if ! flock -n 9; then
+  fail 'Another database backup is already running'
+fi
+
+readonly TIMESTAMP="$(date -u +'%Y-%m-%dT%H-%M-%SZ')"
+readonly WORK_DIR="$(mktemp -d "$LOCAL_BACKUP_DIR/.work.XXXXXX")"
+readonly DATABASE_DUMP="$WORK_DIR/neurostudy-$TIMESTAMP.dump"
+readonly GLOBALS_DUMP="$WORK_DIR/postgres-globals-$TIMESTAMP.sql.gz"
+readonly MANIFEST_FILE="$WORK_DIR/manifest-$TIMESTAMP.txt"
+readonly CHECKSUM_FILE="$WORK_DIR/SHA256SUMS"
+readonly REMOTE_PATH="s3://$SPACES_BUCKET/$SPACES_PREFIX/$TIMESTAMP"
+
+cleanup() {
+  rm -rf "${WORK_DIR:-}"
+  rm -rf "${VERIFY_DIR:-}"
+}
+
+trap cleanup EXIT
+trap 'fail "Backup failed at line $LINENO"' ERR
+
+cd "$PROJECT_DIR"
+
+readonly COMPOSE=(
+  /usr/bin/docker compose
+  -f compose.yaml
+  -f compose.prod.yaml
+)
+
+log 'Checking database container status'
+
+"${COMPOSE[@]}" exec -T db \
+  pg_isready \
+  --username="${POSTGRES_USER:-neurostudy_user}" \
+  --dbname="${POSTGRES_DB:-neurostudy}" \
+  >/dev/null
+
+log 'Creating custom-format database dump'
+
+"${COMPOSE[@]}" exec -T db sh -eu -c '
+  exec pg_dump \
+    --username="$POSTGRES_USER" \
+    --dbname="$POSTGRES_DB" \
+    --format=custom \
+    --compress=6 \
+    --no-owner \
+    --no-acl
+' >"$DATABASE_DUMP"
+
+[[ -s "$DATABASE_DUMP" ]] ||
+  fail 'Database dump is empty'
+
+log 'Validating database dump archive'
+
+"${COMPOSE[@]}" exec -T db \
+  pg_restore --list \
+  <"$DATABASE_DUMP" \
+  >/dev/null
+
+log 'Backing up PostgreSQL roles and global grants'
+
+"${COMPOSE[@]}" exec -T db sh -eu -c '
+  exec pg_dumpall \
+    --username="$POSTGRES_USER" \
+    --database="$POSTGRES_DB" \
+    --globals-only \
+    --no-role-passwords
+' | gzip -9 >"$GLOBALS_DUMP"
+
+[[ -s "$GLOBALS_DUMP" ]] ||
+  fail 'PostgreSQL globals dump is empty'
+
+gzip -t "$GLOBALS_DUMP"
+
+cat >"$MANIFEST_FILE" <<EOF
+created_at_utc=$TIMESTAMP
+database=neurostudy
+database_dump=$(basename "$DATABASE_DUMP")
+globals_dump=$(basename "$GLOBALS_DUMP")
+git_commit=$(git rev-parse HEAD 2>/dev/null || printf 'unknown')
+postgres_image=$("${COMPOSE[@]}" images -q db 2>/dev/null || printf 'unknown')
+EOF
+
+(
+  cd "$WORK_DIR"
+  sha256sum \
+    "$(basename "$DATABASE_DUMP")" \
+    "$(basename "$GLOBALS_DUMP")" \
+    "$(basename "$MANIFEST_FILE")" \
+    >"$CHECKSUM_FILE"
+)
+
+log "Uploading backup to $REMOTE_PATH"
+
+s3cmd \
+  --config="$S3CMD_CONFIG" \
+  put \
+  --no-progress \
+  "$DATABASE_DUMP" \
+  "$GLOBALS_DUMP" \
+  "$MANIFEST_FILE" \
+  "$CHECKSUM_FILE" \
+  "$REMOTE_PATH/"
+
+log 'Verifying uploaded checksum object'
+
+readonly VERIFY_DIR="$(mktemp -d "$LOCAL_BACKUP_DIR/.verify.XXXXXX")"
+
+s3cmd \
+  --config="$S3CMD_CONFIG" \
+  get \
+  --force \
+  "$REMOTE_PATH/SHA256SUMS" \
+  "$VERIFY_DIR/SHA256SUMS" \
+  >/dev/null
+
+if ! cmp -s \
+  "$CHECKSUM_FILE" \
+  "$VERIFY_DIR/SHA256SUMS"
+then
+  fail 'Uploaded checksum file does not match the local checksum file'
+fi
+
+log 'Removing expired local temporary backup files'
+
+find "$LOCAL_BACKUP_DIR" \
+  -mindepth 1 \
+  -maxdepth 1 \
+  -type d \
+  -name '.work.*' \
+  -mtime "+$LOCAL_RETENTION_DAYS" \
+  -exec rm -rf -- {} +
+
+log "Backup completed successfully: $REMOTE_PATH"
