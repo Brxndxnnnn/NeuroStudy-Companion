@@ -58,7 +58,10 @@ namespace NeuuroBridge
         private Timer _syncPoll;                // advisory poll of sessions.sync_status (read-only + lifecycle react)
         private Timer _progressPoll;            // advisory poll of web-side progress; outlives the recording (survey lands after)
         private Timer _summaryPoll;             // independent 2 Hz eeg_readings snapshot (see StartSummaryPoll)
+        private Timer _eventsPoll;              // advisory poll of new session events (image/question/baseline markers)
         private int _progressBusy;              // 1 while a progress read is in flight (skip overlapping ticks)
+        private int _eventsBusy;                // 1 while an events read is in flight (skip overlapping ticks)
+        private DateTime _lastEventPollUtc;      // cursor: only fetch events with shown_at after this
         private string _dbConnString;           // cached for the progress poll (avoids re-reading .env every tick)
         private Guid _sessionGuid;
         private bool _draining;                 // Stop clicked; still accepting in-flight raw/filt/band frames (see StopGraceMs)
@@ -86,6 +89,14 @@ namespace NeuuroBridge
         private float[,] _sdkAbdt;
         private float _sdkAttention = float.NaN, _sdkRelaxation = float.NaN, _sdkMentalWorkload = float.NaN;
         private BandPowers[] _fftPowers;
+        // band_powers' primary key includes time. DbNow (DateTime.UtcNow) has coarse OS-timer
+        // resolution (commonly ~15ms on Windows) — fine at the old ~1 Hz cadence, but the overlapping
+        // FFT window (EegProcessor.FftStep) can complete more than one window from a single incoming
+        // burst, firing OnBandPowers back-to-back with no real time elapsing between calls. Two such
+        // calls can land in the same clock tick and collide on insert (23505 duplicate key). Track the
+        // last timestamp actually used and force strict forward progress instead of trusting the OS
+        // clock to always distinguish consecutive calls.
+        private DateTime _lastBandDbTime;
         private bool? _signalReady;
         private bool[] _channels;
         private float[] _impedance;
@@ -144,6 +155,7 @@ namespace NeuuroBridge
         public event Action SessionStopped;
         public event Action<RawEegFrame> RawFrame;           // every raw frame (for waveform charts)
         public event Action<BandPowers[]> FftBandPowers;     // ~1/s FFT result
+        public event Action<List<SessionEventMarker>> SessionEvents;  // new image/question/baseline markers, advisory
         public event Action SdkCognitiveChanged;             // attention/relaxation/mwl/ABDT updated
         public event Action SignalStateChanged;              // signalReady/channels/impedance/battery
 
@@ -312,6 +324,7 @@ namespace NeuuroBridge
                 StopSyncPoll();
                 StopProgressPoll();
                 StopSummaryPoll();
+                StopEventsPoll();
                 // The link is gone; drop the parameter request so Windows is not holding a fast
                 // interval open for a device that is no longer there.
                 _bleTuner.Release();
@@ -367,6 +380,7 @@ namespace NeuuroBridge
             StopSyncPoll();          // StopSession only stops it if recording; stop here for the preview-only case
             StopProgressPoll();      // progress tracking ends with the connection, not the recording
             StopSummaryPoll();
+            StopEventsPoll();
             StopStreaming();
             _bleTuner.Release();
             _prepared = false;
@@ -431,7 +445,7 @@ namespace NeuuroBridge
                 {
                     try
                     {
-                        if (StartDbUpload()) { StartSyncPoll(); StartProgressPoll(); return; }
+                        if (StartDbUpload()) { StartSyncPoll(); StartProgressPoll(); StartEventsPoll(); return; }
                         Log?.Invoke($"[db] prepare attempt {i}/{attempts} failed (DB unreachable) — retrying…");
                     }
                     catch (Exception ex) { Log?.Invoke($"[db] prepare attempt {i}/{attempts} error: {ex.Message}"); }
@@ -666,6 +680,38 @@ namespace NeuuroBridge
             finally { Interlocked.Exchange(ref _progressBusy, 0); }
         }
 
+        // ── Events poll: advisory read of new session events (image/question shown, baseline/countdown
+        //    phase markers) for live-chart annotation. Own pooled connection, same reasoning as the
+        //    progress poll. Cursor-based (shown_at > last seen) so each tick only fetches what's new. ──
+        private void StartEventsPoll()
+        {
+            if (_eventsPoll != null) return;
+            _lastEventPollUtc = SessionStartUtc > default(DateTime) ? SessionStartUtc.AddSeconds(-1) : DateTime.UtcNow.AddSeconds(-1);
+            _eventsPoll = new Timer(_ => PollEvents(), null, 1000, 1000);
+        }
+
+        private void StopEventsPoll()
+        {
+            try { _eventsPoll?.Dispose(); } catch { /* ignore */ }
+            _eventsPoll = null;
+        }
+
+        private void PollEvents()
+        {
+            if (Interlocked.Exchange(ref _eventsBusy, 1) == 1) return;   // previous read still in flight
+            try
+            {
+                if (_sessionGuid == Guid.Empty || _dbConnString == null) return;
+                var found = DbUploader.TryReadNewEvents(_dbConnString, _sessionGuid, _lastEventPollUtc);
+                if (found.Count == 0) return;
+                foreach (var m in found)
+                    if (m.ShownAtUtc > _lastEventPollUtc) _lastEventPollUtc = m.ShownAtUtc;
+                SessionEvents?.Invoke(found);
+            }
+            catch { /* advisory only */ }
+            finally { Interlocked.Exchange(ref _eventsBusy, 0); }
+        }
+
         private static string BuildPairingCode(string bleAddress, DateTime utc)
         {
             using (var sha = SHA256.Create())
@@ -772,9 +818,17 @@ namespace NeuuroBridge
                 ready = _signalReady; channels = _channels; live = _channelLive;
                 hr = _heartRate; spo2 = _spo2;
             }
+            // Force strict forward progress — see _lastBandDbTime. The expected inter-row spacing
+            // (1 / BandRowsPerSecond) is the right fallback step when the OS clock doesn't resolve
+            // two back-to-back calls: it's exactly how far apart these windows really are.
+            DateTime t = db.DbNow;
+            if (t <= _lastBandDbTime)
+                t = _lastBandDbTime.AddSeconds(1.0 / DbUploader.BandRowsPerSecond);
+            _lastBandDbTime = t;
+
             db.EnqueueBand(new BandPowerRow
             {
-                Time = db.DbNow,
+                Time = t,
                 Attention = att,
                 Relaxation = rel,
                 MentalWorkload = mwl,
@@ -959,6 +1013,7 @@ namespace NeuuroBridge
             StopSyncPoll();
             StopProgressPoll();
             StopSummaryPoll();
+            StopEventsPoll();
             if (_draining) FinalizeStop();   // app shutting down — don't leave a grace timer dangling
             try { _svc.StopStream(); } catch { /* ignore */ }
             try { _db?.Dispose(); } catch { /* ignore */ }
