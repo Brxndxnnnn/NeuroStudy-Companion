@@ -1,4 +1,6 @@
 import sessionModel from '../models/session.model.js'
+import reportService from '../services/report.service.js'
+import { buildSessionReportPdf } from '../pdf/sessionReport.pdf.js'
 import catchAsync from '../utils/catchAsync.js'
 import { BadRequestError, NotFoundError, AppError } from '../utils/AppError.js'
 import fs from 'fs'
@@ -188,4 +190,22 @@ const getSessionFftBandPowerResults = catchAsync(async (req, res) => {
     return res.json(results)
 })
 
-export default { listSessions, getSessionById, pairSessions, endSession, getSessionResult, getSessionEEGResults, getSessionBandPowerResults, getSessionEllipticBandStats, getSessionFftBandPowerResults }
+// ── GET /api/sessions/:session_id/report.pdf ────────────────────────────────────────────
+// ITP2 requirement #6 — "Generate PDF" clinical report. Data assembly (phase-window slicing,
+// per-channel spectra, band-power averaging) lives in report.service.js; drawing lives in
+// pdf/sessionReport.pdf.js. This handler just wires the two together and streams the result.
+const getSessionReportPdf = catchAsync(async (req, res) => {
+    const { session_id } = req.params
+    if (!session_id)
+        throw new BadRequestError('Missing required field: session_id is required')
+
+    const data = await reportService.buildSessionReportData(session_id, req.dbClient)
+    const doc = buildSessionReportPdf(data)
+
+    res.setHeader('Content-Type', 'application/pdf')
+    res.setHeader('Content-Disposition', `attachment; filename="session-report-${session_id}.pdf"`)
+    doc.pipe(res)
+    doc.end()
+})
+
+export default { listSessions, getSessionById, pairSessions, endSession, getSessionResult, getSessionEEGResults, getSessionBandPowerResults, getSessionEllipticBandStats, getSessionFftBandPowerResults, getSessionReportPdf }
