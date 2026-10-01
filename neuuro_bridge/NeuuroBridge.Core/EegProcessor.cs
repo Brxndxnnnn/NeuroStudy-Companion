@@ -17,20 +17,30 @@ namespace NeuuroBridge
 
     /// <summary>
     /// Buffers filtered EEG frames and computes per-channel band powers via a
-    /// Cooley-Tukey radix-2 FFT. Fires OnBandPowers every FftSize samples (~1 s).
+    /// Cooley-Tukey radix-2 FFT, using a sliding OVERLAPPING window: each window is still a full
+    /// FftSize samples (so frequency resolution, binHz = SampleRate/FftSize = 1.0 Hz, is unchanged),
+    /// but only FftStep of those samples are new — the rest carry over from the previous window.
+    /// Fires OnBandPowers every FftStep samples (~SampleRate/FftStep ≈ 3.9/s) instead of every
+    /// FftSize, giving band powers roughly every ~256ms instead of every ~1s without requiring the
+    /// underlying signal to change any faster than it physically does — this is the same
+    /// overlapping-window technique the ML pipeline's elliptic/Welch features already use
+    /// (2s window / 0.5s step) for the same "smoother without inventing anything" reason.
     /// Independent of the Neeuro SDK's own analysis pipeline.
     /// </summary>
     public class EegProcessor
     {
         public const int SampleRate  = 256;
-        public const int FftSize     = 256;   // 1-second window; binHz = SampleRate/FftSize = 1.0 Hz
+        public const int FftSize     = 256;   // window length; binHz = SampleRate/FftSize = 1.0 Hz
+        public const int FftStep     = 64;    // slide amount; new-output rate = SampleRate/FftStep
         public const int ChannelCount = 4;
 
         private readonly object   _lock = new object();
         private readonly float[][] _buf;
         private readonly int[]     _pos;
 
-        /// <summary>Fires once per complete 1-second window; array is [ChannelCount] in channel order (Fp1, Fp2, T4, T3).</summary>
+        /// <summary>Fires every FftStep new samples (~SampleRate/FftStep windows/s); array is
+        /// [ChannelCount] in channel order (Fp1, Fp2, T4, T3). Consecutive windows overlap — see
+        /// the class summary — so consecutive BandPowers are correlated, not independent samples.</summary>
         public event Action<BandPowers[]> OnBandPowers;
 
         public EegProcessor()
@@ -77,7 +87,12 @@ namespace NeuuroBridge
                         for (int ch = 0; ch < ChannelCount; ch++)
                         {
                             snapshot[ch] = (float[])_buf[ch].Clone();
-                            _pos[ch] = 0;
+                            // Slide forward by FftStep instead of resetting to 0: keep the trailing
+                            // (FftSize-FftStep) samples so the next window overlaps this one — see
+                            // the class summary. _pos[ch] lands at FftSize-FftStep, so the next
+                            // window only needs FftStep new samples to complete.
+                            Array.Copy(_buf[ch], FftStep, _buf[ch], 0, FftSize - FftStep);
+                            _pos[ch] = FftSize - FftStep;
                         }
                         (snapshots ?? (snapshots = new List<float[][]>())).Add(snapshot);
                     }

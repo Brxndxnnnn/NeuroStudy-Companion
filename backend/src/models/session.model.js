@@ -78,6 +78,9 @@ const findById = async (session_id, client = pool) => {
             s.end_time,
             s.client_id,
             c.name AS client_name,
+            c.dob AS client_dob,
+            c.gender AS client_gender,
+            s.sample_rate,
             s.conducted_by,
             u.display_name AS technician_name,
             -- Status of the elliptic feature job (ml_service computes it after the
@@ -354,4 +357,18 @@ const getSessionFftBandPowerResults = async (session_id, client = pool) => {
     };
 };
 
-export default { findAll, findById, pairSessions, endSession, deleteById, getSessionResult, backfillSessionResults, getSessionEEGResults, getSessionBandPowerResults, getEllipticBandStats, getSessionFftBandPowerResults }
+// Protocol phase markers only (baseline/countdown — see db/migrations/016_session_phase_markers.sql),
+// ordered by when they actually fired. Used by the PDF report to slice each baseline/cognitive-task
+// block out of the raw EEG and band-power data — image/question events (phase IS NULL) aren't phases
+// and are excluded here on purpose.
+const getSessionPhaseEvents = async (session_id, client = pool) => {
+    const { rows } = await query(client,
+        `SELECT event_id, phase, shown_at, hidden_at
+         FROM events
+         WHERE session_id = $1::uuid AND phase IS NOT NULL
+         ORDER BY shown_at ASC, event_id ASC`, [session_id]
+    )
+    return rows
+}
+
+export default { findAll, findById, pairSessions, endSession, deleteById, getSessionResult, backfillSessionResults, getSessionEEGResults, getSessionBandPowerResults, getEllipticBandStats, getSessionFftBandPowerResults, getSessionPhaseEvents }

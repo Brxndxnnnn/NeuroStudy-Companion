@@ -445,4 +445,37 @@ router.get(
     sessionController.getSessionFftBandPowerResults
 )
 
+/**
+ * @openapi
+ * /api/sessions/{session_id}/report.pdf:
+ *  get:
+ *    summary: Generate and download the session's clinical PDF report
+ *    description: |
+ *      Renders a PDF report for the session (ITP2 requirement #6): patient header, then one
+ *      section per EEG-state phase (Baseline 1/2 Eyes Closed/Open, Cognitive Task) with a raw
+ *      waveform snapshot, an alpha-band POWER table, per-channel Power-vs-Frequency spectra, and
+ *      an absolute band-power table — scoped to our 4 real electrodes (Fp1/Fp2/T3/T4).
+ *
+ *      **Note**: The `session_id` must be a valid UUID.
+ *    tags: [Sessions]
+ *    security:
+ *      - bearerAuth: []
+ *    parameters:
+ *      - in: path
+ *        name: session_id
+ *        required: true
+ *    responses:
+ *      200:
+ *        description: PDF report generated successfully
+ *        content:
+ *          application/pdf: {}
+ *      404:
+ *        description: Could not find session with the provided session_id
+ */
+router.get(
+    '/:session_id/report.pdf',
+    requirePermission(PERMS.SESSIONS_READ_OWN_CLINIC),
+    sessionController.getSessionReportPdf
+)
+
 export default router
