@@ -25,6 +25,9 @@ const PERMS = Object.freeze({
   CLINICS_READ_ALL:  'clinics:read:all',
   CLINICS_WRITE_ALL: 'clinics:write:all',
 
+  // Site settings
+  SITE_SETTINGS_MANAGE_ALL: 'site_settings:manage:all',
+
   // Events
   EVENTS_READ_OWN_CLINIC: 'events:read:own_clinic',
   EVENTS_READ_ALL:        'events:read:all',

@@ -16,14 +16,16 @@ import { SessionTopBar } from "@/components/TopNav";
 import { Card, Button, Label, Pill, Alert, Spinner, Field, Input } from "@/components/ui";
 import PostSessionSurvey from "@/components/PostSessionSurvey";
 
-// How long each stimulus image stays on screen (ms).
+// Fallback for legacy sessions and before the session snapshot is loaded. The
+// historical 10-second rationale below explains the default; it is not an
+// enforced duration for newly paired sessions.
 //
 // 10 s is the REAL protocol timing, not 3 s. A training epoch is 2 s, so a 3 s
 // image left only 1 s of slack and yielded at most 3 epochs — and the headset
 // stalls for ~3.2 s at a time (11 such gaps in the 24 Jul session), so a single
 // stall wiped out an entire image. At 10 s one stall can never kill an image:
 // the 6.8 s that remain split into at most two runs, so one is always >= 3.4 s.
-const IMAGE_DISPLAY_MS = 10000;
+const DEFAULT_IMAGE_DISPLAY_MS = 10000;
 
 // The 13-step standardised protocol (client requirement #3): a countdown + two baseline
 // periods (eyes closed, then eyes open) flank the existing images -> math block on both
@@ -107,6 +109,7 @@ export default function ActiveSessionMockup() {
   const [questions, setQuestions] = useState([]);
 
   const [currentImageIndex, setCurrentImageIndex] = useState(0);
+  const [imageDisplayMs, setImageDisplayMs] = useState(DEFAULT_IMAGE_DISPLAY_MS);
   const currentEventIdRef = useRef(null);
   const [currentMathIndex, setCurrentMathIndex] = useState(0);
   const [mathAnswers, setMathAnswers] = useState({});
@@ -297,7 +300,7 @@ export default function ActiveSessionMockup() {
         frameId = requestAnimationFrame(advance);
         return;
       }
-      if (frameTime - presentation.frameTime < IMAGE_DISPLAY_MS) {
+      if (frameTime - presentation.frameTime < imageDisplayMs) {
         frameId = requestAnimationFrame(advance);
         return;
       }
@@ -313,7 +316,7 @@ export default function ActiveSessionMockup() {
 
     frameId = requestAnimationFrame(advance);
     return () => cancelAnimationFrame(frameId);
-  }, [currentStep, currentImageIndex, images]);
+  }, [currentStep, currentImageIndex, images, imageDisplayMs]);
 
   useLayoutEffect(() => {
     if (currentStep !== 'images')
@@ -451,6 +454,9 @@ export default function ActiveSessionMockup() {
       if (checkRes.ok) {
         const sessionData = await checkRes.json();
         if (sessionData.bridge_recording_at !== null) {
+          const intervalSeconds = Number(sessionData.image_display_interval_seconds);
+          if (Number.isInteger(intervalSeconds) && intervalSeconds >= 1 && intervalSeconds <= 60)
+            setImageDisplayMs(intervalSeconds * 1000);
           clearInterval(pollInterval);
           setCurrentStep("countdown_pre");
         }

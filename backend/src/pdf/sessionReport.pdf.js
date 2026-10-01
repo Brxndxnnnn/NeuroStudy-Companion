@@ -15,7 +15,6 @@ const MARGIN = 40
 const CHANNEL_COLORS = { Fp1: '#3B82F6', Fp2: '#22C55E', T3: '#E67E22', T4: '#A78BFA' }
 const TEXT_COLOR = '#111827'
 const MUTED_COLOR = '#6B7280'
-const AXIS_COLOR = '#94A3B8'
 const HEADER_BG = '#1E2A3C'
 const ROW_BG = '#F4F6F8'
 const BORDER_COLOR = '#D9DEE4'

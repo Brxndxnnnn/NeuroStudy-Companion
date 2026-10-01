@@ -41,21 +41,49 @@ const router = Router()
  *           type: string
  *           format: date-time
  *         description: The end date to filter sessions by.
+ *       - in: query
+ *         name: search
+ *         required: false
+ *         schema:
+ *           type: string
+ *         description: Searches session ID, status, device, client, and technician.
+ *       - in: query
+ *         name: page
+ *         required: false
+ *         schema:
+ *           type: integer
+ *           minimum: 1
+ *           default: 1
+ *       - in: query
+ *         name: page_size
+ *         required: false
+ *         schema:
+ *           type: integer
+ *           minimum: 1
+ *           maximum: 100
+ *           default: 20
  *     responses:
  *       200:
- *         description: Array of sessions with client and technician names
+ *         description: A paginated session list, including totals by status.
  *         content:
  *           application/json:
  *             schema:
- *               type: array
- *               items:
- *                 type: object
- *                 properties:
- *                   session_id: { type: string, format: uuid }
- *                   sync_status: { type: string, example: "claimed" }
- *                   client_name: { type: string, example: "John Doe" }
- *                   technician_name: { type: string, example: "Tech 1" }
- *                   start_time: { type: string, format: date-time }
+ *               type: object
+ *               properties:
+ *                 sessions:
+ *                   type: array
+ *                   items:
+ *                     type: object
+ *                     properties:
+ *                       session_id: { type: string, format: uuid }
+ *                       sync_status: { type: string, example: "claimed" }
+ *                       client_name: { type: string, example: "John Doe" }
+ *                       technician_name: { type: string, example: "Tech 1" }
+ *                       start_time: { type: string, format: date-time }
+ *                 pagination:
+ *                   type: object
+ *                 status_counts:
+ *                   type: object
  *       401:
  *         description: Not authenticated
  *       403:
@@ -89,6 +117,35 @@ router.get(
     '/:session_id',
     requirePermission(PERMS.SESSIONS_READ_OWN_CLINIC),
     sessionController.getSessionById
+)
+
+/**
+ * @openapi
+ * /api/sessions/{session_id}:
+ *   delete:
+ *     summary: Permanently delete a session (admin only)
+ *     tags: [Sessions]
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - in: path
+ *         name: session_id
+ *         required: true
+ *         schema:
+ *           type: string
+ *           format: uuid
+ *     responses:
+ *       200:
+ *         description: Session deleted successfully
+ *       403:
+ *         description: Administrator access is required
+ *       404:
+ *         description: Session not found
+ */
+router.delete(
+    '/:session_id',
+    requirePermission(PERMS.SESSIONS_WRITE_ALL),
+    sessionController.deleteSession
 )
 
 /**

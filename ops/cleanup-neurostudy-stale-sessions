@@ -1,0 +1,70 @@
+#!/usr/bin/env bash
+set -Eeuo pipefail
+umask 077
+
+readonly PROJECT_DIR='/opt/NeuroStudy-Companion'
+readonly LOCK_FILE='/var/lock/neurostudy-session-cleanup.lock'
+readonly STARTED_AT_EPOCH="$(date +%s)"
+
+log() {
+  printf '%s %s\n' "$(date -u +'%Y-%m-%dT%H:%M:%SZ')" "$*"
+}
+
+fail() {
+  log "ERROR: $*"
+  exit 1
+}
+
+[[ -d "$PROJECT_DIR" ]] || fail "Project directory does not exist: $PROJECT_DIR"
+
+# Prevent overlapping host-cron executions. A skipped duplicate is successful:
+# the next daily run will evaluate the same idempotent deletion predicate.
+exec 9>"$LOCK_FILE"
+if ! flock -n 9; then
+  log 'Another stale-session cleanup is already running; skipping this run'
+  exit 0
+fi
+
+trap 'fail "Cleanup failed at line $LINENO"' ERR
+
+cd "$PROJECT_DIR"
+
+readonly COMPOSE=(
+  /usr/bin/docker compose
+  -f compose.yaml
+  -f compose.prod.yaml
+)
+
+log 'Checking database container status'
+"${COMPOSE[@]}" exec -T db \
+  pg_isready \
+  --username="${POSTGRES_USER:-neurostudy_user}" \
+  --dbname="${POSTGRES_DB:-neurostudy}" \
+  >/dev/null
+
+log 'Deleting unclaimed sessions older than 30 days'
+deleted_count="$(
+  "${COMPOSE[@]}" exec -T db \
+    psql \
+    --username="${POSTGRES_USER:-neurostudy_user}" \
+    --dbname="${POSTGRES_DB:-neurostudy}" \
+    --set=ON_ERROR_STOP=1 \
+    --tuples-only \
+    --no-align \
+    --command="
+      WITH deleted AS (
+        DELETE FROM public.sessions
+        WHERE sync_status = 'unclaimed'
+          AND created_at < clock_timestamp() - interval '30 days'
+        RETURNING 1
+      )
+      SELECT COUNT(*) FROM deleted;
+    " \
+    | tr -d '[:space:]'
+)"
+
+[[ "$deleted_count" =~ ^[0-9]+$ ]] ||
+  fail 'Database returned an invalid stale-session deletion count'
+
+elapsed_seconds=$(( $(date +%s) - STARTED_AT_EPOCH ))
+log "Stale-session cleanup completed successfully: deleted_count=$deleted_count elapsed_seconds=$elapsed_seconds"
