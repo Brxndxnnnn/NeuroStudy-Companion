@@ -53,8 +53,14 @@ class Settings:
 
     @property
     def DATABASE_URL(self) -> str:
+        # Explicit +psycopg2, not a bare "postgresql://" — SQLAlchemy resolves an
+        # unspecified driver to whichever postgres DBAPI it finds first, and that
+        # default has changed between versions (2.1 started preferring psycopg v3,
+        # which this project doesn't install — only psycopg2-binary, see
+        # requirements.txt). Naming the driver explicitly makes this immune to that
+        # kind of default-resolution drift in a future SQLAlchemy release.
         return (
-            f"postgresql://{self.DB_USER}:{self.DB_PASSWORD}"
+            f"postgresql+psycopg2://{self.DB_USER}:{self.DB_PASSWORD}"
             f"@{self.DB_HOST}:{self.DB_PORT}/{self.DB_NAME}"
         )
 
