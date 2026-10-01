@@ -83,7 +83,7 @@ export default function ProfilePage() {
       <TopNav />
 
       <PageContainer width="mid" className="py-8 space-y-7">
-        <PageHeading title="Your profile" subtitle="Account details for the signed-in technician." />
+        <PageHeading title="Your profile" subtitle="Account details for the signed-in user." />
 
         {loading ? (
           <Card className="p-12 text-center text-muted">
