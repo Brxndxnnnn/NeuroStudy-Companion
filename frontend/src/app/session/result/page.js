@@ -8,7 +8,9 @@ import {
   getSessionResultsFftBandPower,
   getSessionResultEvents,
   getSessionEllipticBandStats,
+  getSessionReportPdf,
 } from "@/utils/api";
+import { Toaster, toast } from "react-hot-toast";
 import { buildEventWindows } from "@/utils/events";
 import { SessionTopBar } from "@/components/TopNav";
 import { Card, CardHeader, Button, Label, Pill, Alert, Spinner, Select } from "@/components/ui";
@@ -263,6 +265,7 @@ export default function SessionResults() {
   const [featuresError, setFeaturesError] = useState("");
   const [sessionId, setSessionId] = useState(null);
   const [pollTimedOut, setPollTimedOut] = useState(false);
+  const [pdfGenerating, setPdfGenerating] = useState(false);
   const [ellipticChannel, setEllipticChannel] = useState("fp1");
   const [ellipticStat, setEllipticStat] = useState("std");
   const [ellipticRange, setEllipticRange] = useState({ from: 0, to: 0 });
@@ -820,13 +823,52 @@ export default function SessionResults() {
   const hasFft = fftBandRows.length > 0;
   const hasBands = hasFft || bandRows.length > 0 || ellipticRows.length > 0;
 
+  // ITP2 requirement #6 — downloads the clinical PDF report. The response is a binary blob, not
+  // JSON (unlike every other api.js call on this page), so it's handled separately here rather
+  // than through the shared load effect above.
+  const handleGeneratePdf = async () => {
+    if (!sessionId || pdfGenerating) return;
+    setPdfGenerating(true);
+    const toastId = toast.loading("Generating PDF report…");
+    try {
+      const res = await getSessionReportPdf(sessionId);
+      if (!res.ok) throw new Error(`Report generation failed (${res.status})`);
+      const blob = await res.blob();
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = `session-report-${sessionId}.pdf`;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      URL.revokeObjectURL(url);
+      toast.success("PDF report downloaded.", { id: toastId });
+    } catch (err) {
+      console.error("Failed to generate PDF report:", err);
+      toast.error("Failed to generate PDF report.", { id: toastId });
+    } finally {
+      setPdfGenerating(false);
+    }
+  };
+
   return (
     <main className="min-h-screen bg-ground flex flex-col">
+      <Toaster
+        position="bottom-right"
+        toastOptions={{ duration: 4000, style: { background: "#33434e", color: "#fff", fontWeight: 600, borderRadius: "12px" } }}
+      />
       <SessionTopBar
         onBack={() => router.push("/sessions")}
         backLabel="Sessions"
         patient={patientName}
-        right={<Button variant="ghost" size="sm" onClick={() => router.push("/history")}>Done</Button>}
+        right={
+          <div className="flex items-center gap-2">
+            <Button variant="primary" size="sm" onClick={handleGeneratePdf} disabled={pdfGenerating || !sessionId}>
+              {pdfGenerating ? "Generating…" : "Generate PDF"}
+            </Button>
+            <Button variant="ghost" size="sm" onClick={() => router.push("/history")}>Done</Button>
+          </div>
+        }
       />
 
       <div className="max-w-6xl mx-auto w-full px-5 sm:px-8 py-8 space-y-6">

@@ -306,6 +306,13 @@ export async function getSessionResultsFftBandPower(sessionId) {
   return res;
 }
 
+// Clinical PDF report (ITP2 requirement #6). Response body is a PDF binary, not JSON — the caller
+// should check res.ok then read res.blob(), not res.json(), unlike every other function here.
+export async function getSessionReportPdf(sessionId) {
+  const res = await fetchWithAuth(`${BASE_URL}/sessions/${sessionId}/report.pdf`);
+  return res;
+}
+
 
 
 
