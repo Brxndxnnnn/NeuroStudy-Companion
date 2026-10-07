@@ -115,15 +115,14 @@ function QuadrantSummary({ breakdown, weak }) {
   );
 }
 
-/* Which model produced the trajectory on screen. Only rendered when a session
-   genuinely has more than one — with a single model there is no choice to make and
-   the control would be decoration. */
+/* Which version of the client's model produced the trajectory on screen. Only
+   rendered when a session genuinely has more than one — with a single version
+   there is no choice to make and the control would be decoration. */
 function ModelSwitch({ models, value, onChange }) {
   if (!models || models.length < 2) return null;
   return (
     <div className="inline-flex rounded-md border border-border p-0.5">
       {models.map((m) => {
-        const personal = m.client_id != null;
         const active = m.model_version === value;
         return (
           <button
@@ -135,7 +134,7 @@ function ModelSwitch({ models, value, onChange }) {
             }`}
             title={`${m.n_predictions} windows`}
           >
-            {personal ? `Personal model (v${m.model_version})` : `Global model (v${m.model_version})`}
+            Personal model (v{m.model_version})
           </button>
         );
       })}
@@ -418,7 +417,7 @@ function HowItWorksModal({ onClose, trained, readinessReady, dataOasisLabelled, 
                 <PipelineStep done={trained}>
                   <strong className="font-semibold text-ink">Train a personal model.</strong> Pick
                   a client on this page and choose which of their sessions to train on. A
-                  retrained model only replaces the one in use if it scores at least as well.
+                  retrained model replaces the one in use for that client.
                 </PipelineStep>
                 <PipelineStep done={readinessReady}>
                   <strong className="font-semibold text-ink">Reach enough different images.</strong>{" "}
@@ -928,7 +927,7 @@ export default function InsightsPage() {
                               <p className="mb-4 text-[12.5px] leading-relaxed text-muted">
                                 Showing predictions from the{" "}
                                 <strong className="font-semibold text-ink-2">
-                                  {shownModel.client_id ? "personal" : "global"} model
+                                  personal model
                                 </strong>{" "}
                                 (v{shownModel.model_version}), built on an evidence base of{" "}
                                 <strong className="font-semibold text-ink-2">

@@ -18,46 +18,23 @@ log = logging.getLogger(__name__)
 # FEATURE_JOB_ENABLED=false to run the API without the background worker.
 FEATURE_JOB_ENABLED = os.getenv("FEATURE_JOB_ENABLED", "true").lower() != "false"
 
-# Phase 1 inference worker: runs the current model over completed sessions.
+# Phase 1 inference worker: runs each client's current model over their completed
+# sessions.
 PREDICTION_JOB_ENABLED = os.getenv("PREDICTION_JOB_ENABLED", "true").lower() != "false"
-
-# Phase 1 training cron: retrains on a cadence (default weekly). The first run
-# fires one interval AFTER startup, so a deploy never triggers a retrain storm.
-PHASE1_TRAIN_ENABLED = os.getenv("PHASE1_TRAIN_ENABLED", "true").lower() != "false"
-PHASE1_TRAIN_INTERVAL_DAYS = int(os.getenv("PHASE1_TRAIN_INTERVAL_DAYS", "7"))
-
-
-def _scheduled_train():
-    """Weekly retrain. Skips quietly when there isn't enough data to fit."""
-    from app.database import engine
-    from app.phase1 import train
-    try:
-        with engine.begin() as conn:
-            summary = train.train_and_save(conn)
-        if summary:
-            log.info(
-                "Scheduled retrain produced model v%s (%s).",
-                summary["model_version"],
-                "now current" if summary["is_current"] else "kept as candidate",
-            )
-        else:
-            # train_and_save has already logged the specific reason (not enough data,
-            # or no new data since the current model).
-            log.info("Scheduled retrain: skipped, see reason above.")
-    except Exception:
-        log.exception("Scheduled Phase 1 retrain failed.")
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """
     Start the background jobs alongside the API, so nobody has to remember to run
-    anything. Three independently-gated jobs share one scheduler:
+    anything. Two independently-gated jobs share one scheduler:
 
       • feature worker   — elliptic band stats for the results chart (existing)
-      • prediction worker — Phase 1 inference: runs the current model over completed
-                            sessions (see workers/prediction_jobs.py)
-      • training cron     — Phase 1 retrain on a cadence (default weekly)
+      • prediction worker — Phase 1 inference: runs each client's current model over
+                            their completed sessions (see workers/prediction_jobs.py)
+
+    Phase 1 training is not scheduled: a model is fitted per client, when a
+    technician asks for one (POST /phase1/train).
 
     Several workers may be alive at once (uvicorn --workers, or the dev reloader),
     so more than one scheduler will tick. That is safe: every job claims its work
@@ -97,18 +74,9 @@ async def lifespan(app: FastAPI):
         )
         scheduled = True
         log.info("Prediction worker started: polling every %ss for completed "
-                 "sessions to run inference on (no-op until a model is trained).",
+                 "sessions to run inference on (no-op for a client until their "
+                 "model is trained).",
                  prediction_jobs.POLL_INTERVAL_S)
-
-    if PHASE1_TRAIN_ENABLED:
-        scheduler.add_job(
-            _scheduled_train, "interval",
-            days=PHASE1_TRAIN_INTERVAL_DAYS,
-            max_instances=1, coalesce=True, id="phase1_train",
-        )
-        scheduled = True
-        log.info("Phase 1 training cron scheduled every %d day(s).",
-                 PHASE1_TRAIN_INTERVAL_DAYS)
 
     if scheduled:
         scheduler.start()

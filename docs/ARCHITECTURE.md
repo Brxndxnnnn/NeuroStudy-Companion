@@ -178,7 +178,8 @@ actually used.
 `fft_band_powers` (Welch PSD over the recorded signal — distinct from the bridge's live
 ~1 Hz FFT above; both are ours, neither is the SDK's), `ml_insights`.
 
-**ML:** `ml_models` (registry; `client_id` NULL = population model, set = personal),
+**ML:** `ml_models` (registry; one personal model per client, keyed by `client_id` —
+rows with a NULL `client_id` are leftovers of the retired shared model and are ignored),
 `ml_model_sessions` (which sessions trained which model), `session_predictions`.
 
 **Auth / tenancy:** `roles`, `permissions`, `role_permissions`, `revoked_tokens`,
@@ -213,23 +214,20 @@ Endpoints (`ml_service/app/api/`):
 | `POST /infer` | Ad-hoc inference |
 | `POST /process/{session_id}` | Run the feature pipeline for one session |
 | `GET /phase1/status` | Readiness: distinct labelled images vs target |
-| `GET /phase1/model` | Current model + metrics |
 | `GET /phase1/sessions` | Completed sessions and prediction status |
 | `GET /phase1/predictions/{session_id}` | Predictions, scoped to one model |
-| `GET /phase1/clients/{client_id}/sessions` | A client's trainable sessions |
-| `POST /phase1/train` | Fit + register a model |
+| `GET /phase1/clients/{client_id}/sessions` | A client's trainable sessions + their current model |
+| `POST /phase1/train` | Fit + register one client's model (`client_id` required) |
 
-Three background schedulers start with the app (`ml_service/app/main.py`):
+Two background schedulers start with the app (`ml_service/app/main.py`):
 
 | Worker | Cadence | Env override |
 |---|---|---|
 | Feature jobs | every 10 s | `FEATURE_JOB_INTERVAL_S`, `FEATURE_JOB_ENABLED` |
 | Prediction jobs | every 15 s | `PREDICTION_JOB_INTERVAL_S` |
-| Phase 1 training cron | every 7 days | `PHASE1_TRAIN_INTERVAL_DAYS`, `PHASE1_TRAIN_ENABLED` |
 
 Both job workers claim work atomically and reclaim rows stuck longer than 15 minutes.
-The training cron's first run fires one full interval *after* startup, so a deploy never
-triggers a retrain storm.
+Training is not scheduled — it runs only when a technician starts it for a client.
 
 ---
 
@@ -280,17 +278,18 @@ extraction by hand.
   Without it a model scores well by learning "which session is this?".
 - Scored against a predict-the-mean null baseline.
 
-**Scope:** `client_id=None` trains the population model (the weekly cron); a `client_id`
-trains that client's personal model over their completed sessions, or an explicit
-hand-picked list recorded in `ml_model_sessions` for auditability.
+**Scope:** every model is personal. `train_and_save(conn, client_id)` fits one client's
+model over their completed sessions, or an explicit hand-picked list recorded in
+`ml_model_sessions` for auditability. There is no model shared across clients, and no
+scheduled retrain — training starts from the Insights tab (or `scripts/phase1_cli.py
+--train --client <id>`).
 
-**Promotion** (`_should_promote`): personal models **always** promote — a technician
-asked for that specific model, and the honest score is displayed beside it. The gate
-exists only to stop an *unattended* weekly retrain from silently replacing a good
-population model with a worse one.
+**Promotion:** a newly trained model **always** becomes its client's current one — a
+technician asked for that specific model, and the honest score is displayed beside it.
 
-**Serving** (`phase1_store.current_model_for`): a client's personal model wins whenever
-one exists; the population model covers the cold start.
+**Serving** (`phase1_store.current_model`): a session is predicted with its own client's
+current model. A client with no model yet has no predictions; their sessions stay
+pending and are picked up automatically once a model is trained for them.
 
 ### Why image duration matters
 

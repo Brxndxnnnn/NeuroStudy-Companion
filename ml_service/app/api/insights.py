@@ -4,14 +4,14 @@ api/insights.py
 ML Phase 1 endpoints for the web Insights tab:
 
   GET  /phase1/status               readiness snapshot (data coverage)
-  GET  /phase1/model                current model + version history
   GET  /phase1/sessions             completed sessions + prediction status
   GET  /phase1/predictions/{id}     one session's predicted valence/arousal
-  POST /phase1/train                fit + register a model (admin / cron trigger)
+  GET  /phase1/clients/{id}/sessions  one client's sessions + their current model
+  POST /phase1/train                fit + register one client's model
 
 Inference (per-session predictions) is produced automatically by the background
 prediction worker; these endpoints read what it wrote. Training is offline and
-occasional — the POST here is the manual lever alongside the weekly cron.
+occasional — it happens only when the POST here is called for a client.
 
 ml_service has no auth of its own and connects to the DB as a BYPASSRLS role, so it
 is NOT exposed publicly. Every one of these endpoints is reached only through the
@@ -48,7 +48,6 @@ def phase1_status_endpoint():
     try:
         with engine.connect() as conn:
             data = phase1_status.phase1_readiness(conn)
-            model = phase1_store.current_model(conn)
     except Exception as e:  # surface a clean state to the UI, never a 500 blob
         return {"available": False, "error": str(e)}
 
@@ -79,11 +78,6 @@ def phase1_status_endpoint():
 
     return {
         "available": True,
-        "model": {
-            "trained": model is not None,
-            "targets": ["valence", "arousal"],
-            "current_version": model["model_version"] if model else None,
-        },
         "data": data,
         "readiness": {
             "distinct_images_target": DISTINCT_IMAGE_TARGET,
@@ -91,19 +85,6 @@ def phase1_status_endpoint():
             "message": message,
         },
     }
-
-
-@router.get("/model")
-def current_model_endpoint():
-    """The current model + version history, for the tab's model card."""
-    try:
-        with engine.connect() as conn:
-            current = phase1_store.current_model(conn)
-            history = phase1_store.model_history(conn)
-    except Exception as e:
-        return {"available": False, "error": str(e)}
-    return {"available": True, "trained": current is not None,
-            "current": current, "history": history}
 
 
 @router.get("/sessions")
@@ -118,9 +99,9 @@ def sessions_endpoint():
 
 def _preferred_model(available: list[dict]) -> int | None:
     """
-    Which model's predictions to show by default: the client's personal one when it
-    exists, otherwise the population model. session_prediction_models already sorts
-    personal first, so this is simply the head of the list.
+    Which model version's predictions to show by default: the newest one holding
+    predictions for the session. session_prediction_models already sorts newest
+    first, so this is simply the head of the list.
     """
     return int(available[0]["model_version"]) if available else None
 
@@ -130,11 +111,11 @@ def predictions_endpoint(session_id: str, model_version: int | None = None):
     """
     One session's predicted valence/arousal trajectory.
 
-    A session can hold predictions from both the population model and its client's
-    personal model. Exactly ONE model's rows are returned — interleaving them would
-    plot as a single impossible trajectory. Defaults to the personal model when one
-    has predictions here; pass ?model_version= to switch. `available_models` lists
-    what the tab can offer.
+    A session can hold predictions from more than one version of its client's
+    model. Exactly ONE version's rows are returned — interleaving them would plot as
+    a single impossible trajectory. Defaults to the newest version with predictions
+    here; pass ?model_version= to switch. `available_models` lists what the tab can
+    offer.
     """
     try:
         with engine.connect() as conn:
@@ -155,15 +136,16 @@ def predictions_endpoint(session_id: str, model_version: int | None = None):
 
 class TrainRequest(BaseModel):
     """
-    Optional body for POST /phase1/train.
+    Body for POST /phase1/train.
 
-    client_id   fit a PERSONAL model for one client. Omitted → the population model.
+    client_id   the client whose model to fit. Required — every model belongs to
+                exactly one client.
     session_ids restrict the fit to these sessions (the technician's selection).
-                Omitted with a client_id → all of that client's completed sessions.
+                Omitted → all of that client's completed sessions.
     predict     run the new model over its training sessions immediately, so the
-                tab shows personal predictions without waiting for a background pass.
+                tab shows predictions without waiting for a background pass.
     """
-    client_id: str | None = None
+    client_id: str
     session_ids: list[str] | None = None
     predict: bool = True
 
@@ -172,7 +154,7 @@ class TrainRequest(BaseModel):
 def client_sessions_endpoint(client_id: str):
     """
     One client's completed sessions — what the technician picks from when generating
-    that client's personal model.
+    that client's model — plus the model currently serving them, if any.
     """
     try:
         with engine.connect() as conn:
@@ -185,28 +167,23 @@ def client_sessions_endpoint(client_id: str):
 
 
 @router.post("/train")
-def train_endpoint(req: TrainRequest | None = None):
+def train_endpoint(req: TrainRequest):
     """
-    Fit + register a model. The manual counterpart to the weekly training cron, and
-    the endpoint behind the technician's "generate this client's model" action. Runs
-    synchronously; on the datasets this project has, that is a few seconds.
+    Fit + register one client's model — the endpoint behind the technician's
+    "generate this client's model" action. Runs synchronously; on the datasets this
+    project has, that is a few seconds.
 
-    A PERSONAL model (client_id set) is always promoted to serve that client — the
-    technician asked for it explicitly, and its honest score is returned alongside.
-    A POPULATION model still has to clear the promotion gate.
+    The new model always becomes the one serving that client — the technician asked
+    for it explicitly, and its honest score is returned alongside.
 
     Reached only through the backend's authenticated /api/ml/train proxy, which
-    verifies the caller and confirms any client_id / session_ids belong to their
+    verifies the caller and confirms the client_id / session_ids belong to their
     clinic before forwarding here. See backend/src/routes/ml.routes.js.
     """
-    req = req or TrainRequest()
     try:
         with engine.begin() as conn:
-            # force=True: someone asked explicitly, so retrain even if no new data
-            # has arrived since the last model in this scope.
             summary = train.train_and_save(
-                conn, force=True,
-                client_id=req.client_id, session_ids=req.session_ids,
+                conn, req.client_id, session_ids=req.session_ids,
             )
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
@@ -215,12 +192,10 @@ def train_endpoint(req: TrainRequest | None = None):
         return {"trained": False,
                 "message": ("Not enough data to fit a model yet — this client needs "
                             "at least 2 distinct labelled images across the selected "
-                            "sessions." if req.client_id else
-                            "Not enough data to fit a model yet "
-                            "(need at least 2 distinct labelled images).")}
+                            "sessions.")}
 
     inferred = None
-    if req.predict and summary.get("is_current"):
+    if req.predict:
         # Predict over the sessions the model was actually fitted on, so the tab has
         # something to show immediately. Outside the training transaction: inference
         # failing must not roll back a model that trained fine.
@@ -231,20 +206,10 @@ def train_endpoint(req: TrainRequest | None = None):
         if trained_on:
             inferred = prediction_jobs.predict_sessions_with_model(summary, trained_on)
 
-    promoted = summary["is_current"]
-    if req.client_id:
-        message = ("Trained this client's personal model — it is now the one their "
-                   "Insights tab uses.")
-    elif promoted:
-        message = "Trained and promoted to the current model."
-    else:
-        message = ("Trained and registered, but kept as a candidate — it did not "
-                   "beat the model currently in service, which was retained.")
-
     return {
         "trained": True,
-        "promoted": promoted,
-        "message": message,
+        "message": ("Trained this client's personal model — it is now the one their "
+                    "Insights tab uses."),
         "model": summary,
         "inference": inferred,
     }
