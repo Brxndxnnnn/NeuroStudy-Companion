@@ -65,6 +65,8 @@ namespace NeuuroBridge.Wpf
             _ctl.RawFrame += f => Ui(() => LivePanel.PushRaw(f.IntSamples));
             _ctl.FftBandPowers += p => Ui(() => LivePanel.PushBands(p));
             _ctl.SessionEvents += list => Ui(() => LivePanel.PushEvents(list));
+            _ctl.BlinkDetected += ts => Ui(() => LivePanel.PushBlinkMarker(ts));
+            _ctl.ClenchDetected += ts => Ui(() => LivePanel.PushClenchMarker(ts));
 
             _refresh.Tick += (_, __) => RefreshLiveState();
             _refresh.Start();

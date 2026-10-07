@@ -59,6 +59,37 @@ namespace NeuuroBridge
         private readonly LowPassFilter[] _lowPass = ChannelLabels
             .Select(_ => new LowPassFilter(cutoffHz: 100.0, sampleRateHz: CaptureSampleRateHz))
             .ToArray();
+
+        // ITP2 #5 — "EEG Signal Quality Checks... auto-detect + label on the EEG chart: Eye
+        // Blink (transient/low-freq spike on Fp1/Fp2) and Teeth Clench (high-freq EMG on
+        // T3/T4)." No specific algorithm/threshold was given in the requirement — these are
+        // literature-reasonable starting heuristics, not clinically validated numbers; expect to
+        // tune once real T3/T4 signal is available (electrodes flagged dead in project notes as
+        // of writing). Live-chart annotation only, not persisted to the DB — see PushBlinkMarker/
+        // PushClenchMarker in LiveEegPanel.xaml.cs.
+        public event Action<DateTime> BlinkDetected;
+        public event Action<DateTime> ClenchDetected;
+
+        // Blink: fixed peak-amplitude threshold on the filtered Fp1/Fp2 signal. Blink amplitude
+        // is a fairly device-independent physiological phenomenon (unlike EMG below) — a flat µV
+        // cutoff is standard practice in EEG artifact-rejection literature.
+        private const double BlinkThresholdUv = 100.0;
+        private const int BlinkCooldownMs = 400; // one real blink can span several frames; collapse to one marker
+        private DateTime _lastBlinkUtc = DateTime.MinValue;
+
+        // Clench: adaptive threshold on T3/T4's existing Gamma-band power (EegProcessor already
+        // computes this, 30-45Hz — squarely the EMG range), not a fixed number. Muscle-tension
+        // baseline varies far more by individual and electrode contact than blink amplitude
+        // does, so a flat threshold would be much more likely to be wrong. Same slow-EMA-baseline
+        // approach LiveEegPanel's own auto-gain already uses (RecalibrateEegGain/BlendBaseline).
+        private const double ClenchBaselineAlpha = 0.02; // slow blend -- tracks "resting" Gamma, not instantaneous spikes
+        private const double ClenchMultiplier = 4.0;     // flag when current Gamma exceeds baseline by this factor
+        private const int ClenchCooldownMs = 600;
+        private const int ClenchMinBaselineSamples = 20; // ~5s at ~4Hz OnBandPowers rate -- skip until baseline means something
+        private readonly double[] _gammaBaseline = new double[ChannelCount];
+        private readonly int[] _gammaBaselineCount = new int[ChannelCount];
+        private DateTime _lastClenchUtc = DateTime.MinValue;
+
         // Holds the faster-BLE-interval request for as long as a device is connected. Its log
         // messages go to the same sink as everything else, so a refused request is visible in the
         // session log rather than being silently absent.
@@ -379,6 +410,7 @@ namespace NeuuroBridge
             _processor.OnBandPowers += powers => { lock (_stateLock) _fftPowers = powers; };
             _processor.OnBandPowers += UploadBandPowers;
             _processor.OnBandPowers += powers => FftBandPowers?.Invoke(powers);
+            _processor.OnBandPowers += DetectClench;
         }
 
         public bool StartScan() => _svc.StartScan();
@@ -786,6 +818,7 @@ namespace NeuuroBridge
                 _processor.AddFilteredFrame(filtered);
                 UploadFilteredFrame(filtered);
                 if (_capturing) lock (_captureLock) _capFilt.Add((DateTime.UtcNow, filtered));
+                DetectBlink(filtered);
             }
 
             // Combined CSV capture: record raw ADC + raw µV for this frame, tagged with the
@@ -815,6 +848,73 @@ namespace NeuuroBridge
                 }
             }
             return filtered;
+        }
+
+        /// <summary>ITP2 #5 — flags a transient eye-blink artifact when either frontal channel's
+        /// filtered signal peaks above BlinkThresholdUv within this frame. Checked on every raw
+        /// frame (same cadence as ApplyLowPass), cooldown-gated so one real blink — which can
+        /// span several consecutive frames while amplitude stays elevated — produces one marker,
+        /// not a flooded cluster.</summary>
+        private void DetectBlink(float[] filtered)
+        {
+            int spc = filtered.Length / ChannelCount;
+            float peak = 0;
+            for (int ch = 0; ch <= 1; ch++) // Fp1, Fp2 — frontal channels only
+            {
+                int baseIdx = ch * spc;
+                for (int i = 0; i < spc; i++)
+                {
+                    float abs = Math.Abs(filtered[baseIdx + i]);
+                    if (abs > peak) peak = abs;
+                }
+            }
+            if (peak < BlinkThresholdUv) return;
+
+            DateTime now = DateTime.UtcNow;
+            if ((now - _lastBlinkUtc).TotalMilliseconds < BlinkCooldownMs) return;
+            _lastBlinkUtc = now;
+            BlinkDetected?.Invoke(now);
+        }
+
+        /// <summary>ITP2 #5 — flags a teeth-clench/EMG artifact when either temporal channel's
+        /// Gamma band power (EegProcessor already computes this, 30-45Hz — squarely the EMG
+        /// range) exceeds a slow-moving per-channel baseline by ClenchMultiplier. Adaptive rather
+        /// than a fixed power number, since muscle-tension baseline varies far more by
+        /// individual/electrode contact than blink amplitude does (see DetectBlink). Same
+        /// cooldown reasoning as blink: a held contraction shouldn't flood one marker per
+        /// ~256ms band-power update.</summary>
+        private void DetectClench(BandPowers[] powers)
+        {
+            bool triggered = false;
+            for (int ch = 2; ch <= 3; ch++) // T4, T3 — temporal channels only
+            {
+                double gamma = powers[ch].Gamma;
+                double baseline = _gammaBaseline[ch];
+
+                if (_gammaBaselineCount[ch] < ClenchMinBaselineSamples)
+                {
+                    // Still establishing a baseline — blend in but don't detect against it yet
+                    // (an unestablished baseline of 0 would trivially "exceed" on sample one).
+                    _gammaBaseline[ch] = _gammaBaselineCount[ch] == 0
+                        ? gamma
+                        : baseline * (1 - ClenchBaselineAlpha) + gamma * ClenchBaselineAlpha;
+                    _gammaBaselineCount[ch]++;
+                    continue;
+                }
+
+                if (baseline > 0 && gamma > baseline * ClenchMultiplier)
+                    triggered = true;
+
+                // Blend AFTER the comparison — a genuine clench shouldn't drag its own baseline up.
+                _gammaBaseline[ch] = baseline * (1 - ClenchBaselineAlpha) + gamma * ClenchBaselineAlpha;
+            }
+
+            if (!triggered) return;
+
+            DateTime now = DateTime.UtcNow;
+            if ((now - _lastClenchUtc).TotalMilliseconds < ClenchCooldownMs) return;
+            _lastClenchUtc = now;
+            ClenchDetected?.Invoke(now);
         }
 
         private void UploadEegSnapshot()
