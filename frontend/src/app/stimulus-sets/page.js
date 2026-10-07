@@ -530,16 +530,37 @@ export default function StimulusSetsPage() {
   );
 }
 
+// ITP2 #1 — hovering an image reveals its OASIS valence/arousal norms (1-7 scale).
+// Both valence_mean and arousal_mean are already returned by every endpoint that feeds
+// this component (getImages, getClinicStimulusSet), so this is display-only — no new
+// API call. Shown as an overlay on the thumbnail itself (not a floating tooltip) since
+// these sit in a dense grid where an externally-positioned tooltip would risk getting
+// clipped by neighbouring cards.
 function ImagePreview({ image }) {
-  // eslint-disable-next-line @next/next/no-img-element
-  return image.url ? (
-    <img
-      src={image.url}
-      alt=""
-      className="h-24 w-full rounded-lg object-cover bg-inset"
-    />
-  ) : (
-    <div className="h-24 rounded-lg bg-inset" />
+  const hasRatings = image.valence_mean != null && image.arousal_mean != null;
+  return (
+    <div className="group relative">
+      {image.url ? (
+        // eslint-disable-next-line @next/next/no-img-element
+        <img
+          src={image.url}
+          alt=""
+          className="h-24 w-full rounded-lg object-cover bg-inset"
+        />
+      ) : (
+        <div className="h-24 rounded-lg bg-inset" />
+      )}
+      {hasRatings && (
+        <div
+          className="pointer-events-none absolute inset-x-1 bottom-1 hidden items-center justify-center gap-1.5 rounded-md border border-border bg-surface/95 px-2 py-1 text-[11px] font-medium text-ink shadow-sm group-hover:flex"
+          role="tooltip"
+        >
+          <span>Valence {image.valence_mean.toFixed(2)}</span>
+          <span className="text-muted">·</span>
+          <span>Arousal {image.arousal_mean.toFixed(2)}</span>
+        </div>
+      )}
+    </div>
   );
 }
 
