@@ -148,7 +148,9 @@ namespace NeuuroBridge.Wpf
         // screen — throttled to ~1/s so the number doesn't visibly jitter with every recalibration.
         private ScaleBar[] _eegScaleBars;
         private const double ScaleBarHeightUnits = 0.5;   // normalised-axis units the bar spans
-        private const double MicrovoltsPerCount = 0.02235;
+        // Single shared source of truth in NeuuroBridge.Core.BridgeController — also used there
+        // for the ITP2 #4 100Hz low-pass filter's raw-ADC-to-µV conversion.
+        private const double MicrovoltsPerCount = NeuuroBridge.BridgeController.MicrovoltsPerCount;
         private int _scaleBarLastUpdateTicks;
         private const int ScaleBarUpdateIntervalMs = 1000;
 

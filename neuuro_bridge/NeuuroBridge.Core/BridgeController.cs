@@ -29,6 +29,11 @@ namespace NeuuroBridge
         // Where each electrode sits on the head (10-20 system), in ChannelLabels order.
         public static readonly string[] ChannelLocations = { "Left forehead", "Right forehead", "Right temple", "Left temple" };
 
+        // Raw ADC integer counts -> microvolts. SenzeBand 2 product spec. Single shared source of
+        // truth — NeuuroBridge.Wpf's LiveEegPanel scale-bar label uses this same constant rather
+        // than keeping its own private copy.
+        public const double MicrovoltsPerCount = 0.02235;
+
         /// <summary>
         /// Version of the running app — the WPF assembly's csproj &lt;Version&gt;. Stamped onto the
         /// session row so a stored dropout figure can be traced back to the build that produced it
@@ -40,6 +45,20 @@ namespace NeuuroBridge
 
         private readonly SenzeBandService _svc = SenzeBandService.Instance;
         private readonly EegProcessor _processor = new EegProcessor();
+        // ITP2 #4 — "Apply a low-pass filter with a cutoff frequency of 100 Hz to all EEG
+        // signals before storage and analysis. Ensure filtering is consistently applied across
+        // all acquisition channels." One instance per channel (ChannelLabels order), identical
+        // coefficients (same cutoff/rate/order — that IS "consistently applied"), independent
+        // state since each channel is its own signal. Built once for the controller's lifetime,
+        // same convention as _processor above (EegProcessor is likewise never reset between
+        // sessions) — a filter's brief settling transient after a reconnect is negligible.
+        // Computed from HandleRawEeg's raw IntSamples, replacing the SDK's own onboard/vendor
+        // filter (a black box with no documented cutoff) as the source for eeg_filtered_samples
+        // AND everywhere else "filtered" is used (EegProcessor's FFT, live cache, CSV) — see
+        // HandleRawEeg below.
+        private readonly LowPassFilter[] _lowPass = ChannelLabels
+            .Select(_ => new LowPassFilter(cutoffHz: 100.0, sampleRateHz: CaptureSampleRateHz))
+            .ToArray();
         // Holds the faster-BLE-interval request for as long as a device is connected. Its log
         // messages go to the same sink as everything else, so a refused request is visible in the
         // session log rather than being silently absent.
@@ -346,14 +365,10 @@ namespace NeuuroBridge
                 SignalStateChanged?.Invoke();
             };
             _svc.OnRawEeg += HandleRawEeg;
-            _svc.OnFilteredEeg += f => { lock (_stateLock) _lastFiltered = f; };
-            _svc.OnFilteredEeg += f => _processor.AddFilteredFrame(f);
-            _svc.OnFilteredEeg += UploadFilteredFrame;   // DB: full-res filtered µV → eeg_filtered_samples
-            _svc.OnFilteredEeg += f =>   // combined CSV capture: filtered µV stream
-            {
-                // Filtered frames carry no SDK arrival stamp; capture now (in the marshalled handler).
-                if (_capturing && f != null) lock (_captureLock) _capFilt.Add((DateTime.UtcNow, f));
-            };
+            // ITP2 #4: eeg_filtered_samples (and everywhere else "filtered" is used — FFT/band
+            // powers, live cache, CSV) now comes from our own documented 100Hz low-pass
+            // (HandleRawEeg -> ApplyLowPass), not the SDK's own onboard filter. OnFilteredEeg is
+            // deliberately no longer consumed for any of this — see HandleRawEeg.
             _svc.OnAuthStatus += (ok, detail) => AuthChanged?.Invoke(ok, detail);
 
             _svc.OnAttention += v => { lock (_stateLock) _sdkAttention = v; SdkCognitiveChanged?.Invoke(); };
@@ -761,6 +776,16 @@ namespace NeuuroBridge
                     db.EnqueueRaw(db.ToDbTime(frame.ArrivalUtc), frame.IntSamples);
                 else if (IsWithinTailTrackWindow())
                     Interlocked.Add(ref _tailLostSamples, frame.IntSamples.Length / ChannelCount);
+
+                // ITP2 #4 — our own 100Hz low-pass, replacing the SDK's onboard filter as the
+                // single source for "filtered" everywhere: DB storage, FFT/band-power analysis,
+                // the live-display cache, and CSV capture. Same raw sample stream/timing already
+                // used for eeg_raw_samples above, just run through ApplyLowPass first.
+                float[] filtered = ApplyLowPass(frame.IntSamples);
+                lock (_stateLock) _lastFiltered = filtered;
+                _processor.AddFilteredFrame(filtered);
+                UploadFilteredFrame(filtered);
+                if (_capturing) lock (_captureLock) _capFilt.Add((DateTime.UtcNow, filtered));
             }
 
             // Combined CSV capture: record raw ADC + raw µV for this frame, tagged with the
@@ -768,6 +793,28 @@ namespace NeuuroBridge
             if (_capturing) CaptureRawFrame(frame);
 
             RawFrame?.Invoke(frame);
+        }
+
+        /// <summary>Converts raw ADC counts to µV and runs each channel through its own 100Hz
+        /// low-pass (see the _lowPass field comment). Block layout in, block layout out —
+        /// [ch0][ch1][ch2][ch3] — identical to what the SDK's own filtered frames used, so every
+        /// downstream consumer (EegProcessor, DbUploader, CSV capture) needs no changes beyond
+        /// what feeds them.</summary>
+        private float[] ApplyLowPass(int[] rawSamples)
+        {
+            int spc = rawSamples.Length / ChannelCount;
+            var filtered = new float[rawSamples.Length];
+            for (int ch = 0; ch < ChannelCount; ch++)
+            {
+                var filter = _lowPass[ch];
+                int baseIdx = ch * spc;
+                for (int i = 0; i < spc; i++)
+                {
+                    float uv = (float)(rawSamples[baseIdx + i] * MicrovoltsPerCount);
+                    filtered[baseIdx + i] = filter.Process(uv);
+                }
+            }
+            return filtered;
         }
 
         private void UploadEegSnapshot()
@@ -795,9 +842,10 @@ namespace NeuuroBridge
             db.EnqueueEeg(row);
         }
 
-        // Streams the SDK's full-resolution filtered (µV) frames to eeg_filtered_samples, mirroring the
-        // raw path. The frame is already a private per-frame clone (OnFiltered clones before dispatch), and
-        // it carries no SDK arrival stamp — so DbNow at handler time anchors the per-sample counter clock.
+        // Streams our own 100Hz-low-pass-filtered (µV) frames to eeg_filtered_samples (see
+        // ApplyLowPass), mirroring the raw path. The array is a fresh per-call allocation (not
+        // shared/mutated elsewhere) and carries no SDK arrival stamp — so DbNow at handler time
+        // anchors the per-sample counter clock.
         private void UploadFilteredFrame(float[] frame)
         {
             if (frame == null) return;
