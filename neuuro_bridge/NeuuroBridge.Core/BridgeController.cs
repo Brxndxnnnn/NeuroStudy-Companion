@@ -29,6 +29,11 @@ namespace NeuuroBridge
         // Where each electrode sits on the head (10-20 system), in ChannelLabels order.
         public static readonly string[] ChannelLocations = { "Left forehead", "Right forehead", "Right temple", "Left temple" };
 
+        // Raw ADC integer counts -> microvolts. SenzeBand 2 product spec. Single shared source of
+        // truth — NeuuroBridge.Wpf's LiveEegPanel scale-bar label uses this same constant rather
+        // than keeping its own private copy.
+        public const double MicrovoltsPerCount = 0.02235;
+
         /// <summary>
         /// Version of the running app — the WPF assembly's csproj &lt;Version&gt;. Stamped onto the
         /// session row so a stored dropout figure can be traced back to the build that produced it
@@ -40,6 +45,51 @@ namespace NeuuroBridge
 
         private readonly SenzeBandService _svc = SenzeBandService.Instance;
         private readonly EegProcessor _processor = new EegProcessor();
+        // ITP2 #4 — "Apply a low-pass filter with a cutoff frequency of 100 Hz to all EEG
+        // signals before storage and analysis. Ensure filtering is consistently applied across
+        // all acquisition channels." One instance per channel (ChannelLabels order), identical
+        // coefficients (same cutoff/rate/order — that IS "consistently applied"), independent
+        // state since each channel is its own signal. Built once for the controller's lifetime,
+        // same convention as _processor above (EegProcessor is likewise never reset between
+        // sessions) — a filter's brief settling transient after a reconnect is negligible.
+        // Computed from HandleRawEeg's raw IntSamples, replacing the SDK's own onboard/vendor
+        // filter (a black box with no documented cutoff) as the source for eeg_filtered_samples
+        // AND everywhere else "filtered" is used (EegProcessor's FFT, live cache, CSV) — see
+        // HandleRawEeg below.
+        private readonly LowPassFilter[] _lowPass = ChannelLabels
+            .Select(_ => new LowPassFilter(cutoffHz: 100.0, sampleRateHz: CaptureSampleRateHz))
+            .ToArray();
+
+        // ITP2 #5 — "EEG Signal Quality Checks... auto-detect + label on the EEG chart: Eye
+        // Blink (transient/low-freq spike on Fp1/Fp2) and Teeth Clench (high-freq EMG on
+        // T3/T4)." No specific algorithm/threshold was given in the requirement — these are
+        // literature-reasonable starting heuristics, not clinically validated numbers; expect to
+        // tune once real T3/T4 signal is available (electrodes flagged dead in project notes as
+        // of writing). Live-chart annotation only, not persisted to the DB — see PushBlinkMarker/
+        // PushClenchMarker in LiveEegPanel.xaml.cs.
+        public event Action<DateTime> BlinkDetected;
+        public event Action<DateTime> ClenchDetected;
+
+        // Blink: fixed peak-amplitude threshold on the filtered Fp1/Fp2 signal. Blink amplitude
+        // is a fairly device-independent physiological phenomenon (unlike EMG below) — a flat µV
+        // cutoff is standard practice in EEG artifact-rejection literature.
+        private const double BlinkThresholdUv = 100.0;
+        private const int BlinkCooldownMs = 400; // one real blink can span several frames; collapse to one marker
+        private DateTime _lastBlinkUtc = DateTime.MinValue;
+
+        // Clench: adaptive threshold on T3/T4's existing Gamma-band power (EegProcessor already
+        // computes this, 30-45Hz — squarely the EMG range), not a fixed number. Muscle-tension
+        // baseline varies far more by individual and electrode contact than blink amplitude
+        // does, so a flat threshold would be much more likely to be wrong. Same slow-EMA-baseline
+        // approach LiveEegPanel's own auto-gain already uses (RecalibrateEegGain/BlendBaseline).
+        private const double ClenchBaselineAlpha = 0.02; // slow blend -- tracks "resting" Gamma, not instantaneous spikes
+        private const double ClenchMultiplier = 4.0;     // flag when current Gamma exceeds baseline by this factor
+        private const int ClenchCooldownMs = 600;
+        private const int ClenchMinBaselineSamples = 20; // ~5s at ~4Hz OnBandPowers rate -- skip until baseline means something
+        private readonly double[] _gammaBaseline = new double[ChannelCount];
+        private readonly int[] _gammaBaselineCount = new int[ChannelCount];
+        private DateTime _lastClenchUtc = DateTime.MinValue;
+
         // Holds the faster-BLE-interval request for as long as a device is connected. Its log
         // messages go to the same sink as everything else, so a refused request is visible in the
         // session log rather than being silently absent.
@@ -346,14 +396,10 @@ namespace NeuuroBridge
                 SignalStateChanged?.Invoke();
             };
             _svc.OnRawEeg += HandleRawEeg;
-            _svc.OnFilteredEeg += f => { lock (_stateLock) _lastFiltered = f; };
-            _svc.OnFilteredEeg += f => _processor.AddFilteredFrame(f);
-            _svc.OnFilteredEeg += UploadFilteredFrame;   // DB: full-res filtered µV → eeg_filtered_samples
-            _svc.OnFilteredEeg += f =>   // combined CSV capture: filtered µV stream
-            {
-                // Filtered frames carry no SDK arrival stamp; capture now (in the marshalled handler).
-                if (_capturing && f != null) lock (_captureLock) _capFilt.Add((DateTime.UtcNow, f));
-            };
+            // ITP2 #4: eeg_filtered_samples (and everywhere else "filtered" is used — FFT/band
+            // powers, live cache, CSV) now comes from our own documented 100Hz low-pass
+            // (HandleRawEeg -> ApplyLowPass), not the SDK's own onboard filter. OnFilteredEeg is
+            // deliberately no longer consumed for any of this — see HandleRawEeg.
             _svc.OnAuthStatus += (ok, detail) => AuthChanged?.Invoke(ok, detail);
 
             _svc.OnAttention += v => { lock (_stateLock) _sdkAttention = v; SdkCognitiveChanged?.Invoke(); };
@@ -364,6 +410,7 @@ namespace NeuuroBridge
             _processor.OnBandPowers += powers => { lock (_stateLock) _fftPowers = powers; };
             _processor.OnBandPowers += UploadBandPowers;
             _processor.OnBandPowers += powers => FftBandPowers?.Invoke(powers);
+            _processor.OnBandPowers += DetectClench;
         }
 
         public bool StartScan() => _svc.StartScan();
@@ -761,6 +808,17 @@ namespace NeuuroBridge
                     db.EnqueueRaw(db.ToDbTime(frame.ArrivalUtc), frame.IntSamples);
                 else if (IsWithinTailTrackWindow())
                     Interlocked.Add(ref _tailLostSamples, frame.IntSamples.Length / ChannelCount);
+
+                // ITP2 #4 — our own 100Hz low-pass, replacing the SDK's onboard filter as the
+                // single source for "filtered" everywhere: DB storage, FFT/band-power analysis,
+                // the live-display cache, and CSV capture. Same raw sample stream/timing already
+                // used for eeg_raw_samples above, just run through ApplyLowPass first.
+                float[] filtered = ApplyLowPass(frame.IntSamples);
+                lock (_stateLock) _lastFiltered = filtered;
+                _processor.AddFilteredFrame(filtered);
+                UploadFilteredFrame(filtered);
+                if (_capturing) lock (_captureLock) _capFilt.Add((DateTime.UtcNow, filtered));
+                DetectBlink(filtered);
             }
 
             // Combined CSV capture: record raw ADC + raw µV for this frame, tagged with the
@@ -768,6 +826,95 @@ namespace NeuuroBridge
             if (_capturing) CaptureRawFrame(frame);
 
             RawFrame?.Invoke(frame);
+        }
+
+        /// <summary>Converts raw ADC counts to µV and runs each channel through its own 100Hz
+        /// low-pass (see the _lowPass field comment). Block layout in, block layout out —
+        /// [ch0][ch1][ch2][ch3] — identical to what the SDK's own filtered frames used, so every
+        /// downstream consumer (EegProcessor, DbUploader, CSV capture) needs no changes beyond
+        /// what feeds them.</summary>
+        private float[] ApplyLowPass(int[] rawSamples)
+        {
+            int spc = rawSamples.Length / ChannelCount;
+            var filtered = new float[rawSamples.Length];
+            for (int ch = 0; ch < ChannelCount; ch++)
+            {
+                var filter = _lowPass[ch];
+                int baseIdx = ch * spc;
+                for (int i = 0; i < spc; i++)
+                {
+                    float uv = (float)(rawSamples[baseIdx + i] * MicrovoltsPerCount);
+                    filtered[baseIdx + i] = filter.Process(uv);
+                }
+            }
+            return filtered;
+        }
+
+        /// <summary>ITP2 #5 — flags a transient eye-blink artifact when either frontal channel's
+        /// filtered signal peaks above BlinkThresholdUv within this frame. Checked on every raw
+        /// frame (same cadence as ApplyLowPass), cooldown-gated so one real blink — which can
+        /// span several consecutive frames while amplitude stays elevated — produces one marker,
+        /// not a flooded cluster.</summary>
+        private void DetectBlink(float[] filtered)
+        {
+            int spc = filtered.Length / ChannelCount;
+            float peak = 0;
+            for (int ch = 0; ch <= 1; ch++) // Fp1, Fp2 — frontal channels only
+            {
+                int baseIdx = ch * spc;
+                for (int i = 0; i < spc; i++)
+                {
+                    float abs = Math.Abs(filtered[baseIdx + i]);
+                    if (abs > peak) peak = abs;
+                }
+            }
+            if (peak < BlinkThresholdUv) return;
+
+            DateTime now = DateTime.UtcNow;
+            if ((now - _lastBlinkUtc).TotalMilliseconds < BlinkCooldownMs) return;
+            _lastBlinkUtc = now;
+            BlinkDetected?.Invoke(now);
+        }
+
+        /// <summary>ITP2 #5 — flags a teeth-clench/EMG artifact when either temporal channel's
+        /// Gamma band power (EegProcessor already computes this, 30-45Hz — squarely the EMG
+        /// range) exceeds a slow-moving per-channel baseline by ClenchMultiplier. Adaptive rather
+        /// than a fixed power number, since muscle-tension baseline varies far more by
+        /// individual/electrode contact than blink amplitude does (see DetectBlink). Same
+        /// cooldown reasoning as blink: a held contraction shouldn't flood one marker per
+        /// ~256ms band-power update.</summary>
+        private void DetectClench(BandPowers[] powers)
+        {
+            bool triggered = false;
+            for (int ch = 2; ch <= 3; ch++) // T4, T3 — temporal channels only
+            {
+                double gamma = powers[ch].Gamma;
+                double baseline = _gammaBaseline[ch];
+
+                if (_gammaBaselineCount[ch] < ClenchMinBaselineSamples)
+                {
+                    // Still establishing a baseline — blend in but don't detect against it yet
+                    // (an unestablished baseline of 0 would trivially "exceed" on sample one).
+                    _gammaBaseline[ch] = _gammaBaselineCount[ch] == 0
+                        ? gamma
+                        : baseline * (1 - ClenchBaselineAlpha) + gamma * ClenchBaselineAlpha;
+                    _gammaBaselineCount[ch]++;
+                    continue;
+                }
+
+                if (baseline > 0 && gamma > baseline * ClenchMultiplier)
+                    triggered = true;
+
+                // Blend AFTER the comparison — a genuine clench shouldn't drag its own baseline up.
+                _gammaBaseline[ch] = baseline * (1 - ClenchBaselineAlpha) + gamma * ClenchBaselineAlpha;
+            }
+
+            if (!triggered) return;
+
+            DateTime now = DateTime.UtcNow;
+            if ((now - _lastClenchUtc).TotalMilliseconds < ClenchCooldownMs) return;
+            _lastClenchUtc = now;
+            ClenchDetected?.Invoke(now);
         }
 
         private void UploadEegSnapshot()
@@ -795,9 +942,10 @@ namespace NeuuroBridge
             db.EnqueueEeg(row);
         }
 
-        // Streams the SDK's full-resolution filtered (µV) frames to eeg_filtered_samples, mirroring the
-        // raw path. The frame is already a private per-frame clone (OnFiltered clones before dispatch), and
-        // it carries no SDK arrival stamp — so DbNow at handler time anchors the per-sample counter clock.
+        // Streams our own 100Hz-low-pass-filtered (µV) frames to eeg_filtered_samples (see
+        // ApplyLowPass), mirroring the raw path. The array is a fresh per-call allocation (not
+        // shared/mutated elsewhere) and carries no SDK arrival stamp — so DbNow at handler time
+        // anchors the per-sample counter clock.
         private void UploadFilteredFrame(float[] frame)
         {
             if (frame == null) return;

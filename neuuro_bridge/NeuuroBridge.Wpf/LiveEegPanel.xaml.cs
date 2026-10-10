@@ -148,7 +148,9 @@ namespace NeuuroBridge.Wpf
         // screen — throttled to ~1/s so the number doesn't visibly jitter with every recalibration.
         private ScaleBar[] _eegScaleBars;
         private const double ScaleBarHeightUnits = 0.5;   // normalised-axis units the bar spans
-        private const double MicrovoltsPerCount = 0.02235;
+        // Single shared source of truth in NeuuroBridge.Core.BridgeController — also used there
+        // for the ITP2 #4 100Hz low-pass filter's raw-ADC-to-µV conversion.
+        private const double MicrovoltsPerCount = NeuuroBridge.BridgeController.MicrovoltsPerCount;
         private int _scaleBarLastUpdateTicks;
         private const int ScaleBarUpdateIntervalMs = 1000;
 
@@ -200,11 +202,17 @@ namespace NeuuroBridge.Wpf
             public DateTime ShownAtUtc;
             public DateTime EffectiveEndUtc;   // = ShownAtUtc for point events (images/questions)
             public bool IsPhase;
-            public IPlottable[] Items;         // one per EEG lane plot
+            public IPlottable[] Items;         // one slot per EEG lane plot; null for a lane this
+                                                // marker doesn't apply to (e.g. blink only populates
+                                                // Fp1/Fp2) — every consumer below must null-check
         }
         private readonly List<EegMarker> _eegMarkers = new List<EegMarker>();
         private static readonly SPColor MarkerLineColor = new SPColor("#F59E0B");
         private static readonly SPColor PhaseSpanColor = new SPColor("#3B82F6");
+        // ITP2 #5 — blink/clench quality-check markers. Colors reuse the existing chart Palette
+        // (already validated readable on this dark theme) rather than introducing new ad-hoc ones.
+        private static readonly SPColor BlinkLineColor = Palette[4];  // violet
+        private static readonly SPColor ClenchSpanColor = Palette[3]; // orange
 
         // ── "GAP" label over real BLE data-loss stretches ──────────────────────────────────────
         // The line still breaks exactly as before (NaN in the streamer — see PooledScrollView);
@@ -856,6 +864,71 @@ namespace NeuuroBridge.Wpf
             return marker;
         }
 
+        /// <summary>ITP2 #5 — eye-blink marker: a dashed vertical line on the Fp1/Fp2 lanes only
+        /// (indices 0/1 — see BridgeController.ChannelLabels), a true instantaneous transient
+        /// rather than a window. Items[2]/Items[3] (T4/T3) are left null — UpdateEegMarkers/
+        /// RebuildEegWindow/Clear all null-check before touching a lane's item, since this is the
+        /// first marker type that doesn't populate all 4 lanes.</summary>
+        private EegMarker CreateBlinkMarker(DateTime shownAtUtc)
+        {
+            var marker = new EegMarker
+            {
+                ShownAtUtc = shownAtUtc,
+                EffectiveEndUtc = shownAtUtc,
+                IsPhase = false,
+                Items = new IPlottable[Channels],
+            };
+            for (int i = 0; i <= 1; i++) // Fp1, Fp2
+            {
+                var plt = _eegPlots[i].Plot;
+                var line = plt.Add.VerticalLine(0, 1, BlinkLineColor.WithAlpha(0.6), LinePattern.Dashed);
+                line.LabelStyle.Text = "Blink";
+                line.LabelStyle.ForeColor = BlinkLineColor;
+                line.LabelStyle.FontSize = 9;
+                line.LabelStyle.Bold = false;
+                marker.Items[i] = line;
+            }
+            return marker;
+        }
+
+        /// <summary>ITP2 #5 — teeth-clench marker: a short labelled span on the T4/T3 lanes only
+        /// (indices 2/3). Given a brief nominal duration (ClenchMarkerDurationMs) rather than a
+        /// point, since a jaw contraction has some real duration even though only its onset is
+        /// detected (see BridgeController.DetectClench). Items[0]/Items[1] (Fp1/Fp2) left null.</summary>
+        private const double ClenchMarkerDurationMs = 400.0;
+        private EegMarker CreateClenchMarker(DateTime shownAtUtc)
+        {
+            var marker = new EegMarker
+            {
+                ShownAtUtc = shownAtUtc,
+                EffectiveEndUtc = shownAtUtc.AddMilliseconds(ClenchMarkerDurationMs),
+                IsPhase = true,
+                Items = new IPlottable[Channels],
+            };
+            for (int i = 2; i <= 3; i++) // T4, T3
+            {
+                var plt = _eegPlots[i].Plot;
+                var span = plt.Add.HorizontalSpan(0, 0, ClenchSpanColor.WithAlpha(0.18));
+                span.LineColor = ScottPlot.Colors.Transparent;
+#pragma warning disable CS0618
+                span.Label.Text = "Clench";
+                span.Label.ForeColor = ClenchSpanColor;
+                span.Label.FontSize = 9;
+                span.Label.Bold = true;
+#pragma warning restore CS0618
+                marker.Items[i] = span;
+            }
+            return marker;
+        }
+
+        /// <summary>ITP2 #5 — live-chart-only annotation (not persisted to the DB) for a detected
+        /// eye-blink artifact on Fp1/Fp2. See BridgeController.DetectBlink/BlinkDetected.</summary>
+        public void PushBlinkMarker(DateTime shownAtUtc) => _eegMarkers.Add(CreateBlinkMarker(shownAtUtc));
+
+        /// <summary>ITP2 #5 — live-chart-only annotation (not persisted to the DB) for a detected
+        /// teeth-clench/EMG artifact on T3/T4. See BridgeController.DetectClench/ClenchDetected.</summary>
+        public void PushClenchMarker(DateTime shownAtUtc) => _eegMarkers.Add(CreateClenchMarker(shownAtUtc));
+
         /// <summary>Pushes one real sample into an EEG lane's live streamer, hard-clearing the
         /// buffer (full blank, not an in-place overwrite) the instant it's full rather than letting
         /// ScottPlot's built-in wipe view silently start painting new data over the tail end of the
@@ -1001,7 +1074,10 @@ namespace NeuuroBridge.Wpf
                 double endAgeSeconds = (now - mk.EffectiveEndUtc).TotalSeconds;
                 if (endAgeSeconds > staleSeconds)
                 {
-                    for (int i = 0; i < Channels; i++) _eegPlots[i].Plot.Remove(mk.Items[i]);
+                    // ITP2 #5's blink/clench markers only populate 2 of the 4 lanes (Fp1/Fp2 or
+                    // T4/T3) — the other two stay null and must be skipped here.
+                    for (int i = 0; i < Channels; i++)
+                        if (mk.Items[i] != null) _eegPlots[i].Plot.Remove(mk.Items[i]);
                     _eegMarkers.RemoveAt(m);
                     continue;
                 }
@@ -1013,6 +1089,7 @@ namespace NeuuroBridge.Wpf
                     double endX = (RawWindow - 1) - endAgeSeconds * 250.0;
                     for (int i = 0; i < Channels; i++)
                     {
+                        if (mk.Items[i] == null) continue;
                         var span = (HorizontalSpan)mk.Items[i];
                         span.X1 = startX;
                         span.X2 = endX;
@@ -1020,7 +1097,8 @@ namespace NeuuroBridge.Wpf
                 }
                 else
                 {
-                    for (int i = 0; i < Channels; i++) ((VerticalLine)mk.Items[i]).X = startX;
+                    for (int i = 0; i < Channels; i++)
+                        if (mk.Items[i] != null) ((VerticalLine)mk.Items[i]).X = startX;
                 }
             }
         }
@@ -1153,7 +1231,8 @@ namespace NeuuroBridge.Wpf
             foreach (var s in _eegStream) s.Clear();
             Array.Clear(_eegWipeCount, 0, _eegWipeCount.Length);
             foreach (var mk in _eegMarkers)
-                for (int i = 0; i < Channels; i++) _eegPlots[i].Plot.Remove(mk.Items[i]);
+                for (int i = 0; i < Channels; i++)
+                    if (mk.Items[i] != null) _eegPlots[i].Plot.Remove(mk.Items[i]);
             _eegMarkers.Clear();
             _eegGapOpen = false;
             _eegGapMarker = null;
@@ -1396,7 +1475,8 @@ namespace NeuuroBridge.Wpf
             // at that same x position. Hide them for the duration of the scrub; they're accurate
             // again the moment live resumes (RefreshVisibleTab calls UpdateEegMarkers every frame).
             foreach (var mk in _eegMarkers)
-                for (int i = 0; i < Channels; i++) mk.Items[i].IsVisible = _eegTrack.Live;
+                for (int i = 0; i < Channels; i++)
+                    if (mk.Items[i] != null) mk.Items[i].IsVisible = _eegTrack.Live;
 
             foreach (var p in _eegPlots) p.Refresh();
         }
