@@ -1,8 +1,13 @@
 -- O2.3: Retention timestamp for sessions that have not been paired yet.
 -- Add the column without a default first so existing rows can be backfilled from
 -- the best available historical timestamp before the NOT NULL constraint is set.
+-- IF NOT EXISTS: production already had this column added manually ahead of this
+-- migration landing (to get the new cleanup cron script — ops/cleanup-neurostudy-
+-- stale-sessions — working immediately), so a bare ADD COLUMN broke the first real
+-- deploy of this migration. Idempotent like every other migration in this project
+-- (see e.g. 017's ADD COLUMN IF NOT EXISTS / ON CONFLICT DO NOTHING throughout).
 ALTER TABLE public.sessions
-    ADD COLUMN created_at timestamptz;
+    ADD COLUMN IF NOT EXISTS created_at timestamptz;
 
 -- All undated legacy rows deliberately receive the same migration timestamp,
 -- giving them a full 30-day grace period before scheduled cleanup can delete
@@ -33,6 +38,6 @@ ALTER TABLE public.sessions
 
 -- The scheduled deletion query only considers unclaimed sessions. A partial
 -- index avoids scanning claimed, recording, and completed session records.
-CREATE INDEX idx_sessions_unclaimed_created_at
+CREATE INDEX IF NOT EXISTS idx_sessions_unclaimed_created_at
     ON public.sessions (created_at)
     WHERE sync_status = 'unclaimed';

@@ -1,7 +1,7 @@
 <UserControl x:Class="NeuuroBridge.Wpf.LiveEegPanel"
              xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
              xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
-             xmlns:sp="clr-namespace:ScottPlot;assembly=ScottPlot.WPF">
+             xmlns:sp="clr-namespace:ScottPlot.WPF;assembly=ScottPlot.WPF">
     <UserControl.Resources>
         <!-- Paper-style strip-chart tabs, adapted to the app's dark theme. -->
         <Style x:Key="ChartTabItem" TargetType="TabItem">
@@ -73,16 +73,56 @@
                 </Setter.Value>
             </Setter>
         </Style>
+
+        <!-- Minimal dark horizontal scrollbar for scrubbing back through session history. The two
+             page (track-click) RepeatButtons are invisible but still functional — clicking the
+             track pages toward that side without drawing ugly default-chrome arrow buttons. -->
+        <Style x:Key="DarkScrollBar" TargetType="ScrollBar">
+            <Setter Property="Height" Value="14"/>
+            <Setter Property="Orientation" Value="Horizontal"/>
+            <Setter Property="Template">
+                <Setter.Value>
+                    <ControlTemplate TargetType="ScrollBar">
+                        <Border Background="{StaticResource Panel2}" CornerRadius="7" Height="14">
+                            <Track x:Name="PART_Track" IsDirectionReversed="False">
+                                <Track.DecreaseRepeatButton>
+                                    <RepeatButton Command="ScrollBar.PageLeftCommand" Opacity="0"/>
+                                </Track.DecreaseRepeatButton>
+                                <Track.IncreaseRepeatButton>
+                                    <RepeatButton Command="ScrollBar.PageRightCommand" Opacity="0"/>
+                                </Track.IncreaseRepeatButton>
+                                <Track.Thumb>
+                                    <Thumb>
+                                        <Thumb.Template>
+                                            <ControlTemplate TargetType="Thumb">
+                                                <Border Background="{StaticResource PanelEdge}" CornerRadius="6" Margin="0,2"/>
+                                            </ControlTemplate>
+                                        </Thumb.Template>
+                                    </Thumb>
+                                </Track.Thumb>
+                            </Track>
+                        </Border>
+                    </ControlTemplate>
+                </Setter.Value>
+            </Setter>
+        </Style>
     </UserControl.Resources>
 
     <Grid>
         <TabControl x:Name="Tabs" Style="{StaticResource ChartTabs}" SelectionChanged="Tabs_SelectionChanged">
             <TabItem Header="EEG Waves" Style="{StaticResource ChartTabItem}">
                 <Grid Margin="0,8,0,0">
-                    <Border Background="#0B121C" CornerRadius="6" ClipToBounds="True">
-                        <sp:WpfPlot x:Name="EegPlot"/>
-                    </Border>
-                    <Button x:Name="BtnEegLive" Style="{StaticResource JumpToLive}"/>
+                    <Grid.RowDefinitions>
+                        <RowDefinition Height="*"/>
+                        <RowDefinition Height="Auto"/>
+                    </Grid.RowDefinitions>
+                    <!-- One bordered mini-plot per channel, added in code (LiveEegPanel.xaml.cs) so
+                         each channel is fully isolated in its own pixel region — a line can never
+                         visually cross into a neighbouring channel's section. -->
+                    <Grid x:Name="EegPlotHost" Grid.Row="0"/>
+                    <ScrollBar x:Name="EegScrollBar" Grid.Row="1" Style="{StaticResource DarkScrollBar}" Margin="0,6,0,0"
+                               ValueChanged="EegScrollBar_ValueChanged"/>
+                    <Button x:Name="BtnEegLive" Grid.Row="0" Style="{StaticResource JumpToLive}"/>
                 </Grid>
             </TabItem>
             <TabItem Header="Frequency Bands" Style="{StaticResource ChartTabItem}">
@@ -90,22 +130,28 @@
                     <Grid.RowDefinitions>
                         <RowDefinition Height="Auto"/>
                         <RowDefinition Height="*"/>
+                        <RowDefinition Height="Auto"/>
                     </Grid.RowDefinitions>
                     <StackPanel x:Name="BandChannelBar" Grid.Row="0" Orientation="Horizontal" Margin="0,0,0,6"/>
-                    <Grid Grid.Row="1">
-                        <Border Background="#0B121C" CornerRadius="6" ClipToBounds="True">
-                            <sp:WpfPlot x:Name="BandPlot"/>
-                        </Border>
-                        <Button x:Name="BtnBandLive" Style="{StaticResource JumpToLive}"/>
-                    </Grid>
+                    <!-- One bordered mini-plot per band, same isolation reasoning as EEG Waves. -->
+                    <Grid x:Name="BandPlotHost" Grid.Row="1"/>
+                    <ScrollBar x:Name="BandScrollBar" Grid.Row="2" Style="{StaticResource DarkScrollBar}" Margin="0,6,0,0"
+                               ValueChanged="BandScrollBar_ValueChanged"/>
+                    <Button x:Name="BtnBandLive" Grid.Row="1" Style="{StaticResource JumpToLive}"/>
                 </Grid>
             </TabItem>
             <TabItem Header="Mental States" Style="{StaticResource ChartTabItem}">
                 <Grid Margin="0,8,0,0">
-                    <Border Background="#0B121C" CornerRadius="6" ClipToBounds="True">
+                    <Grid.RowDefinitions>
+                        <RowDefinition Height="*"/>
+                        <RowDefinition Height="Auto"/>
+                    </Grid.RowDefinitions>
+                    <Border Background="#0B121C" CornerRadius="6" ClipToBounds="True" Grid.Row="0">
                         <sp:WpfPlot x:Name="CogPlot"/>
                     </Border>
-                    <Button x:Name="BtnCogLive" Style="{StaticResource JumpToLive}"/>
+                    <ScrollBar x:Name="CogScrollBar" Grid.Row="1" Style="{StaticResource DarkScrollBar}" Margin="0,6,0,0"
+                               ValueChanged="CogScrollBar_ValueChanged"/>
+                    <Button x:Name="BtnCogLive" Grid.Row="0" Style="{StaticResource JumpToLive}"/>
                 </Grid>
             </TabItem>
         </TabControl>

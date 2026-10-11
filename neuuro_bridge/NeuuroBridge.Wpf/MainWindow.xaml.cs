@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.IO;
 using System.Linq;
 using System.Windows;
 using System.Windows.Controls;
@@ -23,6 +24,13 @@ namespace NeuuroBridge.Wpf
 
         private bool _logOpen;
 
+        // Persists the in-app log to disk alongside the SDK's own numbered log files, so things
+        // like BleConnectionTuner's "was the faster interval actually granted?" outcome survive
+        // past the session instead of only ever existing in the (never-saved) on-screen log box.
+        // Readable timestamp filename, unlike the SDK's raw-tick names, for easy eyeballing side by
+        // side. Best-effort: a failure to open/write must never take the app down with it.
+        private StreamWriter _logFile;
+
         private static readonly Brush Good = (Brush)new BrushConverter().ConvertFromString("#22C55E");
         private static readonly Brush Warn = (Brush)new BrushConverter().ConvertFromString("#F59E0B");
         private static readonly Brush Bad  = (Brush)new BrushConverter().ConvertFromString("#EF4444");
@@ -37,6 +45,8 @@ namespace NeuuroBridge.Wpf
 
         private void OnLoaded(object sender, RoutedEventArgs e)
         {
+            OpenLogFile();
+
             // Controller events marshal to whatever thread is current at Initialize() — the UI
             // thread here — but guard with Ui() anyway in case a callback slips in off-thread.
             _ctl.Log += m => Ui(() => AppendLog(m));
@@ -54,6 +64,9 @@ namespace NeuuroBridge.Wpf
             _ctl.SessionStopped += () => Ui(OnSessionStopped);
             _ctl.RawFrame += f => Ui(() => LivePanel.PushRaw(f.IntSamples));
             _ctl.FftBandPowers += p => Ui(() => LivePanel.PushBands(p));
+            _ctl.SessionEvents += list => Ui(() => LivePanel.PushEvents(list));
+            _ctl.BlinkDetected += ts => Ui(() => LivePanel.PushBlinkMarker(ts));
+            _ctl.ClenchDetected += ts => Ui(() => LivePanel.PushClenchMarker(ts));
 
             _refresh.Tick += (_, __) => RefreshLiveState();
             _refresh.Start();
@@ -241,6 +254,7 @@ namespace NeuuroBridge.Wpf
                 return;
             }
             try { _ctl.Dispose(); } catch { }
+            try { _logFile?.Dispose(); } catch { }
         }
 
         private void OnAuth(bool ok, string detail)
@@ -504,7 +518,7 @@ namespace NeuuroBridge.Wpf
                 pg.ImagesShown && (pg.QuestionsShown || pg.Ended) ? StepState.Done :
                 pg.ImagesShown ? StepState.Active : StepState.Pending);
             SetStep(DotPgMath, NumPgMath, TxtPgMath, LinePgMath,
-                pg.QuestionsShown && pg.Ended ? StepState.Done :
+                pg.QuestionsShown && (pg.Baseline2Shown || pg.Ended) ? StepState.Done :
                 pg.QuestionsShown ? StepState.Active : StepState.Pending);
             // "Baseline 2" — active once the post-math phase block starts, done once the bridge
             // actually stops recording (see BridgeController.PollSyncStatus / Baseline2Shown).
@@ -587,14 +601,30 @@ namespace NeuuroBridge.Wpf
 
         private void AppendLog(string m)
         {
+            string line = $"[{DateTime.Now:HH:mm:ss}] {m}";
+
             // Colour the line by severity so errors/warnings stand out in the log.
-            var para = new Paragraph(new Run($"[{DateTime.Now:HH:mm:ss}] {m}"))
+            var para = new Paragraph(new Run(line))
             {
                 Margin = new Thickness(0),
                 Foreground = SeverityBrush(m)
             };
             LogBox.Document.Blocks.Add(para);
             LogBox.ScrollToEnd();
+
+            try { _logFile?.WriteLine(line); } catch { /* best-effort — never let logging break the app */ }
+        }
+
+        private void OpenLogFile()
+        {
+            try
+            {
+                string dir = System.IO.Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "logs");
+                Directory.CreateDirectory(dir);
+                string path = System.IO.Path.Combine(dir, $"bridge_{DateTime.Now:yyyyMMdd_HHmmss}.txt");
+                _logFile = new StreamWriter(path, append: true) { AutoFlush = true };
+            }
+            catch { _logFile = null; /* in-app log box still works without it */ }
         }
 
         private static Brush SeverityBrush(string m)

@@ -83,6 +83,24 @@ namespace NeuuroBridge
     }
 
     /// <summary>
+    /// One row from the events table (image/question shown, or a baseline/countdown protocol
+    /// phase — see db/migrations/016_session_phase_markers.sql), for live-chart annotation.
+    /// Advisory/display-only, same as <see cref="SessionProgress"/>.
+    /// </summary>
+    public struct SessionEventMarker
+    {
+        public DateTime ShownAtUtc;
+        public DateTime? HiddenAtUtc;   // populated if the row already had it when read; often not, since phases are usually still open when first seen
+        public string Label;
+        public bool IsPhase;            // true = baseline/countdown (render as a span); false = image/question (a line)
+        // Documented fixed duration from db/migrations/016_session_phase_markers.sql's phase
+        // vocabulary comments — used as the span's end when HiddenAtUtc hasn't landed yet (the
+        // common case, since phases are usually still running when first polled). Only set when
+        // IsPhase is true.
+        public double PhaseDurationSeconds;
+    }
+
+    /// <summary>
     /// Write-only bridge → TimescaleDB sink (TS1.6). Owns the session row, anchors the
     /// bridge clock to DB time once, then streams batched EEG and per-second band powers
     /// via binary COPY. Fire-and-forget: a DB hiccup never blocks or crashes streaming —
@@ -104,12 +122,14 @@ namespace NeuuroBridge
 
         // ── Expected steady-state row rates while recording (sent-vs-expected reconciliation).
         // Raw and filtered stream one row per hardware sample (true 250 Hz); the summary row is
-        // throttled to one per 500 ms in BridgeController; the band row fires once per
-        // 256-sample FFT window (EegProcessor.FftSize) at the true 250 Hz hardware rate.
+        // throttled to one per 500 ms in BridgeController; the band row fires once per FftStep
+        // samples of the overlapping FFT window (EegProcessor.FftStep) at the true 250 Hz hardware
+        // rate — not once per FftSize, since EegProcessor now slides the window instead of
+        // resetting it, firing ~4x more often without changing the window's frequency resolution.
         public const double RawRowsPerSecond      = 250.0;
         public const double FilteredRowsPerSecond = 250.0;
         public const double SummaryRowsPerSecond  = 2.0;
-        public const double BandRowsPerSecond     = 250.0 / 256.0;
+        public const double BandRowsPerSecond     = 250.0 / EegProcessor.FftStep;
 
         // Approximate per-row size on the binary-COPY wire (2 B column count + 4 B length prefix
         // per column + column data) — lets the UI show a human-scale upload volume.
@@ -536,6 +556,101 @@ namespace NeuuroBridge
             }
             catch { /* advisory only — a failed read means "unknown this tick" */ }
             return p;
+        }
+
+        /// <summary>
+        /// Reads events with shown_at strictly after <paramref name="sinceUtc"/> for live-chart
+        /// annotation (image/question markers, baseline/countdown phase spans). Own pooled connection,
+        /// same reasoning as <see cref="TryReadProgress"/>. Best-effort: a failed read just means
+        /// nothing new was found this tick, not an error the caller needs to handle.
+        /// </summary>
+        public static List<SessionEventMarker> TryReadNewEvents(string connString, Guid sessionId, DateTime sinceUtc)
+        {
+            var list = new List<SessionEventMarker>();
+            try
+            {
+                using (var conn = new NpgsqlConnection(connString))
+                {
+                    conn.Open();
+                    using (var cmd = new NpgsqlCommand(
+                        "SELECT e.shown_at, e.hidden_at, e.phase, i.filename, q.question_no " +
+                        "FROM events e " +
+                        "LEFT JOIN images i ON i.image_id = e.image_id " +
+                        "LEFT JOIN questions q ON q.question_id = e.question_id " +
+                        "WHERE e.session_id = @sid AND e.shown_at > @since " +
+                        "ORDER BY e.shown_at", conn))
+                    {
+                        cmd.Parameters.AddWithValue("sid", NpgsqlDbType.Uuid, sessionId);
+                        cmd.Parameters.AddWithValue("since", NpgsqlDbType.TimestampTz, sinceUtc);
+                        using (var rd = cmd.ExecuteReader())
+                        {
+                            while (rd.Read())
+                            {
+                                var m = new SessionEventMarker
+                                {
+                                    ShownAtUtc = DateTime.SpecifyKind(rd.GetDateTime(0), DateTimeKind.Utc),
+                                    HiddenAtUtc = rd.IsDBNull(1) ? (DateTime?)null : DateTime.SpecifyKind(rd.GetDateTime(1), DateTimeKind.Utc),
+                                };
+                                if (!rd.IsDBNull(2))
+                                {
+                                    string phase = rd.GetString(2);
+                                    m.Label = PhaseLabel(phase);
+                                    m.IsPhase = true;
+                                    m.PhaseDurationSeconds = PhaseDurationSeconds(phase);
+                                }
+                                else if (!rd.IsDBNull(3)) { m.Label = "Image: " + rd.GetString(3); }
+                                else if (!rd.IsDBNull(4)) { m.Label = "Question " + rd.GetInt32(4); }
+                                else { m.Label = "Event"; }
+                                list.Add(m);
+                            }
+                        }
+                    }
+                }
+            }
+            catch { /* advisory only — a failed read means "nothing new this tick" */ }
+            return list;
+        }
+
+        private static string PhaseLabel(string phase)
+        {
+            switch (phase)
+            {
+                case "countdown_pre":
+                case "countdown_b1":
+                case "countdown_images":
+                case "countdown_post":
+                case "countdown_b2":
+                    return "Countdown";
+                case "baseline1_closed": return "Baseline 1 (eyes closed)";
+                case "baseline1_open": return "Baseline 1 (eyes open)";
+                case "baseline2_closed": return "Baseline 2 (eyes closed)";
+                case "baseline2_open": return "Baseline 2 (eyes open)";
+                default: return phase;
+            }
+        }
+
+        /// <summary>Fixed durations from db/migrations/016_session_phase_markers.sql's phase
+        /// vocabulary comments — the protocol's phases run a set length, not a variable one, so this
+        /// is a reliable stand-in for hidden_at when that hasn't been written yet.</summary>
+        private static double PhaseDurationSeconds(string phase)
+        {
+            switch (phase)
+            {
+                case "countdown_pre":
+                case "countdown_images":
+                case "countdown_post":
+                    return 5;
+                case "countdown_b1":
+                case "countdown_b2":
+                    return 3;
+                case "baseline1_closed":
+                case "baseline1_open":
+                case "baseline2_closed":
+                case "baseline2_open":
+                    return 60;
+                default:
+                    return 5;
+            }
         }
 
         /// <summary>

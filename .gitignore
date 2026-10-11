@@ -13,6 +13,14 @@ logs/
 .env
 .env.docker
 
+# Local dev TLS cert/key for Postgres (self-signed, generated per-machine — see README)
+db/certs/*.crt
+db/certs/*.key
+
+# Local-only Docker Compose override (Windows bind-mount permission workaround — see the
+# file's own header comment). Never applies on the Linux droplet.
+compose.override.yml
+
 # Python
 __pycache__/
 *.py[cod]
