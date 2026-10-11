@@ -31,7 +31,7 @@ OASIS-labelled images).
 |---|---|---|
 | `frontend/` | Next.js | Clinician web app: clients, session flow (images/questions), results, admin, ML insights |
 | `backend/` | Node.js / Express | REST API **for the frontend only** (JWT auth, per-request RLS tenant context). Single exception: the public `POST /api/clinics/activate` enrollment endpoint for the bridge |
-| `ml_service/` | Python / FastAPI | Post-session feature workers (elliptic band stats + our own FFT/Welch band powers), ML Phase 1 (EEG → OASIS valence/arousal): weekly training cron, model registry, inference |
+| `ml_service/` | Python / FastAPI | Post-session feature workers (elliptic band stats + our own FFT/Welch band powers), ML Phase 1 (EEG → OASIS valence/arousal): per-client model training, model registry, inference |
 | `neuuro_bridge/` | C# WPF (.NET Framework 4.8, x64) | Windows app at the clinic. Connects the SenzeBand over BLE and writes EEG **directly to the DB** via binary COPY — the backend is never in the data path |
 | `db/` | TimescaleDB | Hypertables `eeg_raw_samples`, `eeg_filtered_samples`, `eeg_readings`, `band_powers`; forced row-level security for clinic tenancy; migrations in `db/migrations/` |
 | `nginx/` + certbot | nginx | TLS termination, service routing, and the static Velopack update feed at `/bridge-updates/` |
