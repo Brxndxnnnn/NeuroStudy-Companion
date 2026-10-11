@@ -3,12 +3,13 @@ scripts/phase1_cli.py
 
 Operator CLI for ML Phase 1 — the manual counterpart to the background workers.
 
-    python -m scripts.phase1_cli --train             # fit + register a model now
+    python -m scripts.phase1_cli --train --client <client_id>   # fit one client's model now
     python -m scripts.phase1_cli --predict-once       # run one inference tick now
     python -m scripts.phase1_cli --predict-backfill   # requeue ALL sessions, then tick
 
-Training is otherwise on a weekly cron; inference otherwise polls automatically.
-This is here for bring-up and for forcing a retrain / recompute on demand.
+Training is otherwise started per client from the Insights tab; inference otherwise
+polls automatically. This is here for bring-up and for forcing a retrain /
+recompute on demand.
 """
 
 import argparse
@@ -29,7 +30,10 @@ from app.workers import prediction_jobs
 def main() -> int:
     ap = argparse.ArgumentParser(description="ML Phase 1 operator CLI.")
     ap.add_argument("--train", action="store_true",
-                    help="Fit + register a model on all labelled data, make it current.")
+                    help="Fit + register one client's model on all their completed "
+                         "sessions, make it their current one. Requires --client.")
+    ap.add_argument("--client", metavar="CLIENT_ID",
+                    help="The client whose model --train fits.")
     ap.add_argument("--predict-once", action="store_true",
                     help="Run one inference tick over completed sessions lacking predictions.")
     ap.add_argument("--predict-backfill", action="store_true",
@@ -40,17 +44,16 @@ def main() -> int:
         ap.print_help()
         return 0
 
+    if args.train and not args.client:
+        ap.error("--train requires --client <client_id>: every model belongs to one client.")
+
     if args.train:
-        # force=True: a manual run always retrains (bypasses the cron's no-new-data
-        # guard). The promotion gate still decides whether it becomes current.
         with engine.begin() as conn:
-            summary = train.train_and_save(conn, force=True)
+            summary = train.train_and_save(conn, args.client)
         if summary:
-            promoted = "promoted to current" if summary["is_current"] else \
-                       "kept as candidate (current model retained)"
             print(f"Trained model v{summary['model_version']} ({summary['algo']}) on "
                   f"{summary['n_epochs']} epochs / {summary['n_distinct_images']} images "
-                  f"— {promoted}.")
+                  f"— now this client's current model.")
             print(f"  CV R²  valence {summary['cv']['r2']['valence']}  "
                   f"arousal {summary['cv']['r2']['arousal']}")
         else:

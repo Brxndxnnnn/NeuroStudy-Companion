@@ -1,13 +1,13 @@
 """
 phase1/train.py
 
-Fit a Phase 1 valence/arousal model on ALL available labelled data, persist it as a
-joblib artifact, and register it in ml_models. This is the step that turns the
-evaluation harness (which only cross-validates and throws its models away) into
-something inference can serve.
+Fit one client's Phase 1 valence/arousal model on that client's labelled data,
+persist it as a joblib artifact, and register it in ml_models. This is the step that
+turns the evaluation harness (which only cross-validates and throws its models away)
+into something inference can serve.
 
-Training is OFFLINE and OCCASIONAL — a weekly cron or an admin trigger — never
-per-session. See docs/ARCHITECTURE.md §6.
+Training is OFFLINE and OCCASIONAL — started by a technician (or the operator CLI)
+for one client at a time — never per-session. See docs/ARCHITECTURE.md §6.
 """
 
 from __future__ import annotations
@@ -53,7 +53,7 @@ def _log_extraction(conn, reports, session_ids: list[str] | None) -> None:
     — dead electrodes, gap-spanning windows, unlabelled or too-noisy images — reported
     nothing, and diagnosing a thin training set meant re-running the extraction by hand.
 
-    Aggregated rather than per-session: a weekly cron over dozens of sessions should not
+    Aggregated rather than per-session: a train over dozens of sessions should not
     emit dozens of log blocks, but it must not stay silent either.
     """
     if not reports:
@@ -109,70 +109,7 @@ def _empty_metrics() -> tuple[dict, dict]:
     return {"r2": dict(nan), "mae": dict(nan)}, {"r2": dict(nan)}
 
 
-def _has_new_data(current: dict | None, n_epochs: int, n_sessions: int) -> bool:
-    """
-    Has anything actually changed since the current model was trained? The weekly
-    cron fires whether or not new sessions arrived; retraining on identical data
-    just mints a redundant version and artifact every week. Grew if there are more
-    epochs or more sessions than the model in service was trained on. (A manual
-    train bypasses this — see `force`.)
-    """
-    if current is None:
-        return True
-    return (n_epochs > (current.get("n_epochs") or 0)
-            or n_sessions > (current.get("n_sessions") or 0))
-
-
-def _should_promote(cv: dict, null: dict, current: dict | None,
-                    client_id: str | None = None) -> bool:
-    """
-    Decide whether a freshly trained model should become the one inference serves.
-
-    PERSONAL MODELS ALWAYS PROMOTE (client_id is not None). A technician asked for
-    this specific model over these specific sessions; quietly declining to serve it
-    would look broken, and the honest score is shown next to it either way. The gate
-    below exists to stop an UNATTENDED weekly retrain silently replacing a good
-    population model with a worse one — a risk a deliberate, attended action does
-    not carry.
-
-    The gate exists to stop a routine retrain from silently REPLACING a good model
-    with a worse one. The rules, in order:
-
-      • No current model → promote. Inference must have something to serve, and a
-        meaningless-but-real model is explicitly acceptable for Phase 1.
-      • Neither the new model nor the incumbent could be cross-validated (too few
-        distinct images to hold any out) → promote the newer one. There is no honest
-        score to protect, and this keeps the retrain→promote→predict flow visibly
-        working in the current tiny-data regime.
-      • New model can't be scored but the incumbent could → keep the incumbent. Don't
-        displace a model with a real score using one that has none.
-      • New model IS scored → it must clear the predict-the-mean null on BOTH targets
-        and not score below a scored incumbent. Otherwise keep the incumbent.
-    """
-    if client_id is not None:
-        return True
-
-    if current is None:
-        return True
-
-    v, a = cv["r2"]["valence"], cv["r2"]["arousal"]
-    cur_v, cur_a = current.get("cv_r2_valence"), current.get("cv_r2_arousal")
-    new_scored = v is not None and a is not None
-    cur_scored = cur_v is not None and cur_a is not None
-
-    if not new_scored:
-        return not cur_scored  # promote only if the incumbent is unscored too
-
-    nv, na = null["r2"]["valence"], null["r2"]["arousal"]
-    if not (v > nv and a > na):
-        return False           # no signal over the trivial baseline
-    if cur_scored and (v + a) < (cur_v + cur_a):
-        return False           # would regress a scored incumbent
-    return True
-
-
-def _prune_artifacts(conn, keep: int = KEEP_ARTIFACTS,
-                     client_id: str | None = None) -> int:
+def _prune_artifacts(conn, client_id: str, keep: int = KEEP_ARTIFACTS) -> int:
     """
     Delete old artifact files, keeping the newest `keep` versions plus whichever is
     current. ml_models rows are left intact (they carry the metric history); only the
@@ -180,11 +117,11 @@ def _prune_artifacts(conn, keep: int = KEEP_ARTIFACTS,
     non-current, superseded artifacts, so a rollback after this is harmless.
 
     ⚠ Pruning is SCOPED to the model's owner. An unscoped "keep the newest 5" would,
-    the moment a few clients had trained personal models, delete other clients'
-    artifacts while their ml_models rows still pointed at them — inference would then
-    fail to load a model the registry insists is current.
+    the moment a few clients had trained models, delete other clients' artifacts
+    while their ml_models rows still pointed at them — inference would then fail to
+    load a model the registry insists is current.
     """
-    rows = phase1_store.model_artifacts(conn, client_id=client_id, scoped=True)
+    rows = phase1_store.model_artifacts(conn, client_id)
     protected = {
         r["artifact_path"]
         for i, r in enumerate(rows)
@@ -208,44 +145,40 @@ def _prune_artifacts(conn, keep: int = KEEP_ARTIFACTS,
 
 def train_and_save(
     conn,
+    client_id: str,
     cfg: Phase1Config = DEFAULT,
     algo: str = DEFAULT_ALGO,
-    force: bool = False,
-    client_id: str | None = None,
     session_ids: list[str] | None = None,
 ) -> dict | None:
     """
-    Train, persist, and register one model. Returns a summary dict, or None if the
-    run was skipped (not enough data, or — for the automatic cron — no new data
-    since the current model).
+    Train, persist, and register one client's model, and make it the one inference
+    serves for them. Returns a summary dict, or None if the run was skipped (not
+    enough data).
 
-    SCOPE:
-      client_id=None  → the POPULATION model, fitted across every client's sessions.
-                        This is the weekly cron, and what a new client is served.
-      client_id set   → that client's PERSONAL model. EEG is individualistic enough
-                        that a model fitted to one person's own recordings does not
-                        have to survive between-subject variation at all.
+    Every model is fitted to ONE client's own recordings. EEG is individualistic
+    enough that a model fitted to one person does not have to survive
+    between-subject variation at all, so there is no model shared across clients.
 
       session_ids restricts the fit to an explicit list — the technician's chosen
-      sessions. Omitted, a personal train uses all of that client's completed
-      sessions. The chosen list is recorded against the model (migration 012) so a
+      sessions. Omitted, the train uses all of that client's completed sessions.
+      The chosen list is recorded against the model (migration 012) so a
       hand-picked training set stays auditable.
 
     ⚠ The honest sample size is the number of DISTINCT IMAGES, not sessions or
     epochs. Repeat sessions over the same stimulus set add repeated measurements of
-    the same labels, not new ones, so a personal model is capped by how many
-    different images that client has ever been shown.
+    the same labels, not new ones, so a model is capped by how many different
+    images that client has ever been shown.
 
-    `force` (set by the manual /train endpoint and the CLI) bypasses the no-new-data
-    guard so an operator can always retrain on demand. For a POPULATION model it does
-    not override the promotion gate; a personal model always promotes by design.
+    The new model always becomes the client's current one. Someone asked for this
+    specific model over these specific sessions; quietly declining to serve it
+    would look broken, and the honest score is shown next to it either way.
 
     Does not commit — the caller owns the transaction (so a failed file write or DB
     insert rolls back cleanly). The artifact file is written before the DB row; a
     rolled-back transaction can leave an unreferenced .joblib on disk, which is
     harmless and gets swept by the next successful train's pruning.
     """
-    if session_ids is None and client_id is not None:
+    if session_ids is None:
         session_ids = queries.fetch_client_session_ids(conn, client_id)
         if not session_ids:
             log.info("No completed sessions for client %s — nothing to train.", client_id)
@@ -259,19 +192,9 @@ def train_and_save(
 
     if n_epochs == 0 or n_images < MIN_IMAGES_TO_FIT:
         log.info(
-            "Phase 1 training skipped for %s: %d epochs from %d distinct images "
-            "(need >= %d images).",
-            f"client {client_id}" if client_id else "population",
-            n_epochs, n_images, MIN_IMAGES_TO_FIT,
-        )
-        return None
-
-    current = phase1_store.current_model(conn, client_id)
-    if not force and not _has_new_data(current, n_epochs, n_sessions):
-        log.info(
-            "Phase 1 retrain skipped: no new data since model v%s "
-            "(%d epochs / %d sessions unchanged).",
-            current.get("model_version"), n_epochs, n_sessions,
+            "Phase 1 training skipped for client %s: %d epochs from %d distinct "
+            "images (need >= %d images).",
+            client_id, n_epochs, n_images, MIN_IMAGES_TO_FIT,
         )
         return None
 
@@ -314,27 +237,20 @@ def train_and_save(
     path = os.path.join(settings.MODEL_DIR, fname)
     joblib.dump(bundle, path)
 
-    # Promotion gate: only serve this model if it doesn't regress the one in service.
-    # A personal model bypasses this — see _should_promote.
-    make_current = _should_promote(cv, null, current, client_id)
-
     version = phase1_store.insert_model(
-        conn, algo=algo, artifact_path=path,
+        conn, client_id=client_id, algo=algo, artifact_path=path,
         n_epochs=n_epochs, n_distinct_images=n_images, n_sessions=n_sessions,
-        cv=cv, null=null, make_current=make_current,
-        client_id=client_id,
+        cv=cv, null=null,
         session_ids=[str(s) for s in np.unique(sessions)] if n_epochs else session_ids,
     )
 
-    # Housekeeping: drop superseded artifact files within this model's own scope.
-    _prune_artifacts(conn, client_id=client_id)
+    # Housekeeping: drop this client's superseded artifact files.
+    _prune_artifacts(conn, client_id)
 
     log.info(
-        "Trained Phase 1 %s model v%d (%s) on %d epochs / %d images / %d sessions — %s.",
-        f"personal (client {client_id})" if client_id else "population",
-        version, algo, n_epochs, n_images, n_sessions,
-        "promoted to current" if make_current
-        else f"kept as candidate (current v{current.get('model_version')} retained)",
+        "Trained Phase 1 model v%d (%s) for client %s on %d epochs / %d images / "
+        "%d sessions — now their current model.",
+        version, algo, client_id, n_epochs, n_images, n_sessions,
     )
     return {
         "model_version": version,
@@ -346,5 +262,4 @@ def train_and_save(
         "cv": cv,
         "null": null,
         "artifact_path": path,
-        "is_current": make_current,
     }
