@@ -68,7 +68,7 @@ def phase1_status_endpoint():
         message = (
             f"{distinct} of ~{DISTINCT_IMAGE_TARGET} distinct labelled images seen "
             "in recorded EEG. More sessions over more OASIS images are needed "
-            "before a model can generalise."
+            "before a client's model can be trusted."
         )
     else:
         message = (

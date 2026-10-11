@@ -183,10 +183,6 @@ def session_prediction_models(conn, session_id: str) -> list[dict]:
     session_predictions rather than sessions.predictions_model_version because the
     rows ARE the truth: that column records only the automatic pass, while a
     technician-triggered train writes rows without touching it.
-
-    Only client-owned models are listed. Rows from the retired shared model
-    (ml_models.client_id IS NULL) may still exist in older databases and must not
-    be offered.
     """
     # Grouped on ml_models' primary key, so every other m.* column is functionally
     # dependent and needs no repeating in the GROUP BY.
@@ -199,7 +195,7 @@ def session_prediction_models(conn, session_id: str) -> list[dict]:
                m.null_r2_valence, m.null_r2_arousal
         FROM   session_predictions p
         JOIN   ml_models m ON m.model_version = p.model_version
-        WHERE  p.session_id = :sid AND m.client_id IS NOT NULL
+        WHERE  p.session_id = :sid
         GROUP  BY m.model_version
         ORDER  BY m.model_version DESC
     """), {"sid": session_id}).mappings().all()
@@ -219,9 +215,7 @@ def sessions_with_predictions(conn) -> list[dict]:
                s.predictions_model_version,
                s.client_id, c.name AS client_name,
                (SELECT count(*) FROM session_predictions p
-                JOIN   ml_models pm ON pm.model_version = p.model_version
-                WHERE  p.session_id = s.session_id
-                  AND  pm.client_id IS NOT NULL) AS n_predictions,
+                WHERE p.session_id = s.session_id) AS n_predictions,
                EXISTS (SELECT 1 FROM ml_models m
                        WHERE m.client_id = s.client_id AND m.is_current)
                    AS has_personal_model

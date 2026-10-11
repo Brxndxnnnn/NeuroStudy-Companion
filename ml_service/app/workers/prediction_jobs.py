@@ -236,3 +236,4 @@ def requeue(conn, session_ids: list[str] | None = None) -> int:
             RETURNING session_id
         """))
     return len(result.all())
+

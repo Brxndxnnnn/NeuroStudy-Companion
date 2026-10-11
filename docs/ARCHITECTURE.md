@@ -178,8 +178,7 @@ actually used.
 `fft_band_powers` (Welch PSD over the recorded signal — distinct from the bridge's live
 ~1 Hz FFT above; both are ours, neither is the SDK's), `ml_insights`.
 
-**ML:** `ml_models` (registry; one personal model per client, keyed by `client_id` —
-rows with a NULL `client_id` are leftovers of the retired shared model and are ignored),
+**ML:** `ml_models` (registry; one personal model per client, `client_id` NOT NULL),
 `ml_model_sessions` (which sessions trained which model), `session_predictions`.
 
 **Auth / tenancy:** `roles`, `permissions`, `role_permissions`, `revoked_tokens`,
