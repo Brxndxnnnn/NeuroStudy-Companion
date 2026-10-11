@@ -696,7 +696,7 @@ export default function InsightsPage() {
           {howItWorksOpen && (
             <HowItWorksModal
               onClose={() => setHowItWorksOpen(false)}
-              trained={hasPersonalModel}
+              trained={sessions.some((s) => s.has_personal_model)}
               readinessReady={readiness.ready_to_train}
               dataOasisLabelled={data.oasis_images_labelled}
               dataSessionsWithOasis={data.sessions_with_oasis_eeg}

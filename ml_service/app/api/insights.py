@@ -68,7 +68,7 @@ def phase1_status_endpoint():
         message = (
             f"{distinct} of ~{DISTINCT_IMAGE_TARGET} distinct labelled images seen "
             "in recorded EEG. More sessions over more OASIS images are needed "
-            "before a model can generalise."
+            "before a client's model can be trusted."
         )
     else:
         message = (
@@ -185,6 +185,10 @@ def train_endpoint(req: TrainRequest):
             summary = train.train_and_save(
                 conn, req.client_id, session_ids=req.session_ids,
             )
+            # Sessions already marked done under an older model would never be
+            # revisited by the worker; requeue them so they pick up this model.
+            if summary:
+                prediction_jobs.requeue_client(conn, req.client_id)
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
