@@ -40,11 +40,3 @@ def test_pending_sessions_joins_clients_current_model():
     assert "m.client_id = s.client_id" in sql and "m.is_current" in sql
     assert out == [("s1", {"model_version": 7, "artifact_path": "/m/7.joblib"})]
 
-
-def test_requeue_client_is_scoped_to_one_client():
-    conn = MagicMock()
-    conn.execute.return_value.all.return_value = [("a",), ("b",)]
-    assert prediction_jobs.requeue_client(conn, "c1") == 2
-    stmt, params = conn.execute.call_args[0]
-    assert "client_id = :cid" in str(stmt)
-    assert params == {"cid": "c1"}

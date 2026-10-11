@@ -237,20 +237,3 @@ def requeue(conn, session_ids: list[str] | None = None) -> int:
         """))
     return len(result.all())
 
-
-def requeue_client(conn, client_id: str) -> int:
-    """
-    Requeue every completed session of one client that has already been through the
-    automatic pass, so the next tick re-infers it under the client's current model.
-
-    Called after a train: sessions first predicted under an older (or retired) model
-    keep predictions_status='done' and would otherwise never be revisited, leaving
-    them with no predictions the tab is willing to show.
-    """
-    result = conn.execute(text("""
-        UPDATE sessions SET predictions_status = NULL, predictions_error = NULL
-        WHERE client_id = :cid AND sync_status = 'completed'
-          AND predictions_status IS NOT NULL
-        RETURNING session_id
-    """), {"cid": client_id})
-    return len(result.all())

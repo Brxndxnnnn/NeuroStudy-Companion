@@ -185,10 +185,6 @@ def train_endpoint(req: TrainRequest):
             summary = train.train_and_save(
                 conn, req.client_id, session_ids=req.session_ids,
             )
-            # Sessions already marked done under an older model would never be
-            # revisited by the worker; requeue them so they pick up this model.
-            if summary:
-                prediction_jobs.requeue_client(conn, req.client_id)
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
