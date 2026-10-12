@@ -6,7 +6,7 @@
 
 import sessionModel from '../models/session.model.js'
 import { computePowerSpectrum } from '../utils/spectrum.js'
-import { NotFoundError } from '../utils/AppError.js'
+import { ConflictError, NotFoundError } from '../utils/AppError.js'
 
 const CHANNELS = [
     { label: 'Fp1', sampleKey: 'fp1_left_front', bandPrefix: 'fp1' },
@@ -92,6 +92,12 @@ async function buildSessionReportData(sessionId, dbClient) {
     const sessions = await sessionModel.findById(sessionId, dbClient)
     if (!sessions || sessions.length === 0) throw new NotFoundError('Session not found')
     const session = sessions[0]
+
+    // Client requirement: the technician's commentary must be published before a report
+    // can be produced. Checked here, ahead of the EEG queries, so every way of building
+    // a report enforces it.
+    if (!session.has_active_commentary)
+        throw new ConflictError('Session commentary must be completed before the report can be generated')
 
     const phaseEvents = await sessionModel.getSessionPhaseEvents(sessionId, dbClient)
     const windows = resolvePhaseWindows(phaseEvents)

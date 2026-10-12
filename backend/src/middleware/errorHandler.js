@@ -24,6 +24,13 @@ const handlePostgresErrors = (err) => {
         case 'P2006': // claim_session: client has no published history
             return new ConflictError(safeMessage);
 
+        // Session commentaries (db/migrations/023_session_commentaries.sql)
+        case 'P2101': // session not found / not visible to this clinic
+            return new NotFoundError(safeMessage);
+        case 'P2102': // session has not completed
+        case 'P2103': // published commentary cannot be changed or deleted
+            return new ConflictError(safeMessage);
+
         // Client histories (db/migrations/022_client_histories.sql)
         case 'P2201': // client or history not found / not visible to this clinic
             return new NotFoundError(safeMessage);

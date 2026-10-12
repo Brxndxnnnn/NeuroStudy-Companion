@@ -3,7 +3,12 @@ import query from '../utils/query.js'
 
 const findAll = async ({ clinic_id = undefined, sync_status, start_date, end_date, search, page, page_size }, client = pool) => {
     const selectSql = `SELECT s.session_id, s.sync_status, s.bridge_recording_at, s.device_id, s.paired_at, s.start_time, s.end_time,
-            s.client_id, c.name AS client_name, s.conducted_by, u.display_name AS technician_name, cl.name AS clinic_name FROM sessions s
+            s.client_id, c.name AS client_name, s.conducted_by, u.display_name AS technician_name, cl.name AS clinic_name,
+            EXISTS (
+                SELECT 1 FROM session_commentaries sc
+                WHERE sc.session_id = s.session_id AND sc.status = 'active'
+            ) AS has_active_commentary
+            FROM sessions s
             LEFT JOIN clients c ON s.client_id = c.client_id
             LEFT JOIN users u ON s.conducted_by = u.user_id
             LEFT JOIN clinics cl ON s.clinic_id = cl.clinic_id`;
@@ -90,7 +95,12 @@ const findById = async (session_id, client = pool) => {
             -- results page can only offer a shrug and a retry button.
             s.features_status,
             s.features_error,
-            s.features_computed_at
+            s.features_computed_at,
+            -- The PDF report is only allowed once the technician's commentary is published.
+            EXISTS (
+                SELECT 1 FROM session_commentaries sc
+                WHERE sc.session_id = s.session_id AND sc.status = 'active'
+            ) AS has_active_commentary
          FROM sessions s
          LEFT JOIN clients c ON s.client_id = c.client_id
          LEFT JOIN users u ON s.conducted_by = u.user_id

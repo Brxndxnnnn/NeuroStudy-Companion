@@ -1,9 +1,12 @@
 import { Router } from 'express'
 import sessionController from '../controllers/session.controller.js'
+import sessionCommentariesRouter from './sessionCommentaries.routes.js'
 import requirePermission from '../middleware/requirePermission.js'
 import PERMS from '../constants/permissions.js'
 
 const router = Router()
+
+router.use('/:session_id/commentaries', sessionCommentariesRouter)
 
 /**
  * @openapi
@@ -456,6 +459,9 @@ router.get(
  *      waveform snapshot, an alpha-band POWER table, per-channel Power-vs-Frequency spectra, and
  *      an absolute band-power table — scoped to our 4 real electrodes (Fp1/Fp2/T3/T4).
  *
+ *      The session must have a published commentary (client requirement); otherwise 409.
+ *      Requires both session and session-commentary read permissions.
+ *
  *      **Note**: The `session_id` must be a valid UUID.
  *    tags: [Sessions]
  *    security:
@@ -471,10 +477,14 @@ router.get(
  *          application/pdf: {}
  *      404:
  *        description: Could not find session with the provided session_id
+ *      409:
+ *        description: The session has no published commentary yet
  */
 router.get(
     '/:session_id/report.pdf',
     requirePermission(PERMS.SESSIONS_READ_OWN_CLINIC),
+    // The report requires (and will later show) the session commentary.
+    requirePermission(PERMS.SESSION_COMMENTARIES_READ_OWN_CLINIC),
     sessionController.getSessionReportPdf
 )
 
