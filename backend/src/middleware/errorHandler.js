@@ -21,6 +21,16 @@ const handlePostgresErrors = (err) => {
         case 'P2003':
         case 'P2004':
             return new BadRequestError(safeMessage);
+        case 'P2006': // claim_session: client has no published history
+            return new ConflictError(safeMessage);
+
+        // Client histories (db/migrations/022_client_histories.sql)
+        case 'P2201': // client or history not found / not visible to this clinic
+            return new NotFoundError(safeMessage);
+        case 'P2202': // published history cannot be changed or deleted
+            return new ConflictError(safeMessage);
+        case 'P2203': // history incomplete, or not created as a draft
+            return new BadRequestError(safeMessage);
         case '22P02': // invalid input syntax for type uuid
             return new BadRequestError('Invalid ID format provided.');
         

@@ -12,6 +12,12 @@ const PERMS = Object.freeze({
   CLIENTS_WRITE_OWN_CLINIC: 'clients:write:own_clinic',
   CLIENTS_WRITE_ALL:        'clients:write:all',
 
+  // Client histories
+  CLIENT_HISTORIES_READ_OWN_CLINIC:  'client_histories:read:own_clinic',
+  CLIENT_HISTORIES_READ_ALL:         'client_histories:read:all',
+  CLIENT_HISTORIES_WRITE_OWN_CLINIC: 'client_histories:write:own_clinic',
+  CLIENT_HISTORIES_WRITE_ALL:        'client_histories:write:all',
+
   // Users
   USERS_READ_ALL:  'users:read:all',
   USERS_WRITE_ALL: 'users:write:all',

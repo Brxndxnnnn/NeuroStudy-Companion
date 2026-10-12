@@ -47,3 +47,6 @@ certbot/www/
 # Database
 db/certs/*
 !db/certs/.gitkeep
+
+*.docx
+*.pdf

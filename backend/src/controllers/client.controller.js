@@ -1,6 +1,8 @@
 import clientModel from '../models/client.model.js'
+import clientHistoryModel from '../models/clientHistory.model.js'
 import catchAsync  from '../utils/catchAsync.js'
 import { BadRequestError, NotFoundError } from '../utils/AppError.js'
+import { validateClientHistory } from '../validators/clientHistory.validators.js'
 
 // ── GET /api/clients ─────────────────────────────────────────────────────────────
 const listClients = catchAsync(async (req, res) => {
@@ -26,6 +28,12 @@ const createClient = catchAsync(async (req, res) => {
     if (!name || !dob || !gender || !race)
         throw new BadRequestError('Missing required fields: name, dob, gender, and race are required')
 
+    // The full client history is compulsory at registration: pairing refuses a client
+    // without a published history.
+    if (req.body.history === undefined)
+        throw new BadRequestError('Missing required field: history is required')
+    const history = validateClientHistory(req.body.history, { requireComplete: true })
+
     let clinic_id = req.user.clinic_id // from JWT for technician, but allow override for admin users to create clients for other clinics
     if (req.user.role === 'admin') {
         if (!req.body.clinic_id)
@@ -33,8 +41,14 @@ const createClient = catchAsync(async (req, res) => {
         clinic_id = req.body.clinic_id
     }
     // clinic_id from JWT for technician, but allow override for admin users to create clients for other clinics
-    const newClient = await clientModel.create({ name, dob, gender, race, notes, clinic_id }, req.dbClient)
-    return res.status(201).json(newClient)
+    const { client: newClient, history_id } = await clientModel.createWithHistory(
+        { name, dob, gender, race, notes, clinic_id },
+        history,
+        req.user.sub,
+        req.dbClient
+    )
+    const createdHistory = await clientHistoryModel.findById(history_id, req.dbClient)
+    return res.status(201).json({ ...newClient, history: createdHistory })
 })
 
 export default { listClients, getClientById, createClient }
