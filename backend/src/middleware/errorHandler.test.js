@@ -32,7 +32,7 @@ describe('errorHandler', () => {
   })
 
   test('client history and pairing SQLSTATEs map to their HTTP statuses', () => {
-    const expected = { P2006: 409, P2201: 404, P2202: 409, P2203: 400 }
+    const expected = { P2006: 409, P2101: 404, P2102: 409, P2103: 409, P2201: 404, P2202: 409, P2203: 400 }
     for (const [code, status] of Object.entries(expected)) {
       const res = fakeRes()
       errorHandler({ code, message: `raised ${code}` }, {}, res, () => {})
