@@ -2,7 +2,7 @@ import { Router } from 'express'
 import clientHistoryController from '../controllers/clientHistory.controller.js'
 import requirePermission from '../middleware/requirePermission.js'
 import validateRequest from '../middleware/validateRequest.js'
-import { clientIdValidation } from '../validators/clientHistory.validators.js'
+import { clientIdValidation, historyIdValidation } from '../validators/clientHistory.validators.js'
 import PERMS from '../constants/permissions.js'
 
 // Mounted at /api/clients/:client_id/histories; mergeParams exposes :client_id.
@@ -86,7 +86,52 @@ const router = Router({ mergeParams: true })
  *             updated_at:   { type: string, format: date-time }
  *             published_by: { type: string, format: uuid, nullable: true }
  *             published_at: { type: string, format: date-time, nullable: true }
+ *     ClientHistorySummary:
+ *       type: object
+ *       properties:
+ *         history_id:   { type: string, format: uuid }
+ *         version:      { type: integer, nullable: true, description: "Null while draft" }
+ *         status:       { type: string, enum: [draft, active, superseded] }
+ *         intake_date:  { type: string, format: date, nullable: true }
+ *         is_backfilled_default: { type: boolean }
+ *         created_by:   { type: string, format: uuid, nullable: true }
+ *         created_at:   { type: string, format: date-time }
+ *         updated_at:   { type: string, format: date-time }
+ *         published_by: { type: string, format: uuid, nullable: true }
+ *         published_at: { type: string, format: date-time, nullable: true }
  */
+
+/**
+ * @openapi
+ * /api/clients/{client_id}/histories:
+ *   get:
+ *     summary: List every version of a client's history
+ *     description: |
+ *       Newest first, with the draft (if any) at the top. Answers are not included;
+ *       fetch a version by ID for its complaints and symptoms.
+ *     tags: [Client Histories]
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - { in: path, name: client_id, required: true, schema: { type: string, format: uuid } }
+ *     responses:
+ *       200:
+ *         description: The client's history versions
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: array
+ *               items: { $ref: '#/components/schemas/ClientHistorySummary' }
+ *       404:
+ *         description: Client not found
+ */
+router.get(
+    '/',
+    requirePermission(PERMS.CLIENT_HISTORIES_READ_OWN_CLINIC),
+    clientIdValidation,
+    validateRequest,
+    clientHistoryController.listHistories
+)
 
 /**
  * @openapi
@@ -236,6 +281,38 @@ router.delete(
     clientIdValidation,
     validateRequest,
     clientHistoryController.deleteDraftHistory
+)
+
+/**
+ * @openapi
+ * /api/clients/{client_id}/histories/{history_id}:
+ *   get:
+ *     summary: Get one version of a client's history
+ *     description: |
+ *       Any version, including superseded ones and the draft. Use this with a session's
+ *       client_history_id to show the history that applied when the session was paired.
+ *     tags: [Client Histories]
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - { in: path, name: client_id, required: true, schema: { type: string, format: uuid } }
+ *       - { in: path, name: history_id, required: true, schema: { type: string, format: uuid } }
+ *     responses:
+ *       200:
+ *         description: The history version with its complaints and symptoms
+ *         content:
+ *           application/json:
+ *             schema: { $ref: '#/components/schemas/ClientHistory' }
+ *       404:
+ *         description: Client not found, or the history does not belong to this client
+ */
+// Registered last so /active and /draft are matched before this parameter route.
+router.get(
+    '/:history_id',
+    requirePermission(PERMS.CLIENT_HISTORIES_READ_OWN_CLINIC),
+    historyIdValidation,
+    validateRequest,
+    clientHistoryController.getHistoryById
 )
 
 export default router

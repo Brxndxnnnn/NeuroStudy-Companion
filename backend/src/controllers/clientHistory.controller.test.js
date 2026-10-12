@@ -50,6 +50,44 @@ const clientExists = () => mock.method(clientModel, 'findById', async () => [{ c
 afterEach(() => mock.restoreAll())
 
 describe('client history controller', () => {
+    test('lists history versions', async () => {
+        clientExists()
+        const list = mock.method(clientHistoryModel, 'listByClientId', async () => [
+            { history_id: HISTORY_ID, version: 1, status: 'active' }
+        ])
+
+        const { response, next } = await invoke(clientHistoryController.listHistories, technicianReq())
+
+        assert.equal(next.mock.callCount(), 0)
+        assert.equal(list.mock.calls[0].arguments[0], CLIENT_ID)
+        assert.equal(response.json.mock.calls[0].arguments[0].length, 1)
+    })
+
+    test('returns a specific version of this client', async () => {
+        clientExists()
+        mock.method(clientHistoryModel, 'findById', async () => ({ history_id: HISTORY_ID, client_id: CLIENT_ID, status: 'superseded' }))
+
+        const { response, next } = await invoke(clientHistoryController.getHistoryById, technicianReq({
+            validated: { client_id: CLIENT_ID.toUpperCase(), history_id: HISTORY_ID }
+        }))
+
+        assert.equal(next.mock.callCount(), 0)
+        assert.equal(response.json.mock.calls[0].arguments[0].status, 'superseded')
+    })
+
+    test('hides a history that belongs to another client', async () => {
+        clientExists()
+        mock.method(clientHistoryModel, 'findById', async () => ({
+            history_id: HISTORY_ID, client_id: 'c0000000-0000-0000-0000-000000000099'
+        }))
+
+        const { next } = await invoke(clientHistoryController.getHistoryById, technicianReq({
+            validated: { client_id: CLIENT_ID, history_id: HISTORY_ID }
+        }))
+
+        assert.ok(next.mock.calls[0].arguments[0] instanceof NotFoundError)
+    })
+
     test('returns the active history', async () => {
         clientExists()
         const find = mock.method(clientHistoryModel, 'findByStatus', async () => ({ history_id: HISTORY_ID, status: 'active' }))

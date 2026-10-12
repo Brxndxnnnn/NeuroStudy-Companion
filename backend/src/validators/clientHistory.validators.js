@@ -35,6 +35,13 @@ export const clientIdValidation = [
         .withMessage('client_id must be a valid UUID-formatted identifier')
 ]
 
+export const historyIdValidation = [
+    ...clientIdValidation,
+    param('history_id')
+        .matches(UUID_SHAPE)
+        .withMessage('history_id must be a valid UUID-formatted identifier')
+]
+
 // Blank strings become null so drafts store "not answered yet" consistently and the
 // completeness check treats whitespace-only text as missing, like the database does.
 const optionalText = (value, path, errors) => {

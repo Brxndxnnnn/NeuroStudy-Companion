@@ -73,6 +73,28 @@ const findById = async (history_id, client = pool) => {
     return inQuestionnaireOrder(rows[0] ?? null)
 }
 
+// Version list without answers, newest first; a draft (no version yet) comes first.
+const listByClientId = async (client_id, client = pool) => {
+    const { rows } = await query(client,
+        `SELECT
+            ch.history_id,
+            ch.version,
+            ch.status,
+            ch.intake_date::text AS intake_date,
+            ch.created_by,
+            ch.created_at,
+            ch.updated_at,
+            ch.published_by,
+            ch.published_at,
+            COALESCE(ch.medical_history = $2, false) AS is_backfilled_default
+         FROM public.client_histories ch
+         WHERE ch.client_id = $1
+         ORDER BY ch.version DESC NULLS FIRST`,
+        [client_id, BACKFILLED_DEFAULT_MARKER]
+    )
+    return rows
+}
+
 // clinic_id is omitted on purpose: the database triggers copy it from the client
 // (or parent history) so a caller can never attach rows to another clinic.
 const insertDraft = async (client_id, history, created_by, client) => {
@@ -184,6 +206,7 @@ const deleteDraft = async (client_id, client = pool) => {
 export default {
     findByStatus,
     findById,
+    listByClientId,
     createPublished,
     saveDraft,
     publish,

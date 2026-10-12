@@ -11,6 +11,28 @@ const ensureClientExists = async (client_id, dbClient) => {
         throw new NotFoundError('Client not found')
 }
 
+// ── GET /api/clients/:client_id/histories ────────────────────────────────────────
+const listHistories = catchAsync(async (req, res) => {
+    const { client_id } = req.validated
+    await ensureClientExists(client_id, req.dbClient)
+    const histories = await clientHistoryModel.listByClientId(client_id, req.dbClient)
+    return res.json(histories)
+})
+
+// ── GET /api/clients/:client_id/histories/:history_id ────────────────────────────
+// Any version, including superseded ones: a session's report shows the history
+// recorded on that session (sessions.client_history_id), not the current one.
+const getHistoryById = catchAsync(async (req, res) => {
+    const { client_id, history_id } = req.validated
+    await ensureClientExists(client_id, req.dbClient)
+    const history = await clientHistoryModel.findById(history_id, req.dbClient)
+    // A history ID from another client must not be readable through this client's URL.
+    // Postgres returns UUIDs in lowercase; the path may use either case.
+    if (!history || history.client_id !== client_id.toLowerCase())
+        throw new NotFoundError('Client history not found')
+    return res.json(history)
+})
+
 // ── GET /api/clients/:client_id/histories/active ─────────────────────────────────
 const getActiveHistory = catchAsync(async (req, res) => {
     const { client_id } = req.validated
@@ -74,6 +96,8 @@ const deleteDraftHistory = catchAsync(async (req, res) => {
 })
 
 export default {
+    listHistories,
+    getHistoryById,
     getActiveHistory,
     getDraftHistory,
     saveDraftHistory,
