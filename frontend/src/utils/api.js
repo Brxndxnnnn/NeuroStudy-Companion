@@ -399,6 +399,46 @@ export async function getClient(clientId) {
   return res;
 }
 
+// CLIENT HISTORIES (versioned intake questionnaire; one draft + one active per client).
+// GET /active and /draft 404 when none exists. PUT /draft replaces the whole draft.
+export async function getClientActiveHistory(clientId) {
+  return fetchWithAuth(`${BASE_URL}/clients/${clientId}/histories/active`);
+}
+export async function getClientHistories(clientId) {
+  return fetchWithAuth(`${BASE_URL}/clients/${clientId}/histories`);
+}
+export async function saveClientHistoryDraft(clientId, history) {
+  return fetchWithAuth(`${BASE_URL}/clients/${clientId}/histories/draft`, {
+    method: "PUT",
+    body: JSON.stringify(history),
+  });
+}
+export async function publishClientHistoryDraft(clientId) {
+  return fetchWithAuth(`${BASE_URL}/clients/${clientId}/histories/draft/publish`, {
+    method: "POST",
+  });
+}
+
+// SESSION COMMENTARIES (technician's post-session notes for the PDF report; one draft + one
+// active per session). GET /active and /draft 404 when none exists.
+export async function getSessionActiveCommentary(sessionId) {
+  return fetchWithAuth(`${BASE_URL}/sessions/${sessionId}/commentaries/active`);
+}
+export async function getSessionCommentaryDraft(sessionId) {
+  return fetchWithAuth(`${BASE_URL}/sessions/${sessionId}/commentaries/draft`);
+}
+export async function saveSessionCommentaryDraft(sessionId, commentary) {
+  return fetchWithAuth(`${BASE_URL}/sessions/${sessionId}/commentaries/draft`, {
+    method: "PUT",
+    body: JSON.stringify(commentary),
+  });
+}
+export async function publishSessionCommentaryDraft(sessionId) {
+  return fetchWithAuth(`${BASE_URL}/sessions/${sessionId}/commentaries/draft/publish`, {
+    method: "POST",
+  });
+}
+
 
 
 // USERS (admin only)
