@@ -5,8 +5,10 @@
 // see the ITP2 PDF-report plan for why each table is in/out of scope.
 
 import sessionModel from '../models/session.model.js'
+import clientHistoryModel from '../models/clientHistory.model.js'
+import sessionCommentaryModel from '../models/sessionCommentary.model.js'
 import { computePowerSpectrum } from '../utils/spectrum.js'
-import { NotFoundError } from '../utils/AppError.js'
+import { ConflictError, NotFoundError } from '../utils/AppError.js'
 
 const CHANNELS = [
     { label: 'Fp1', sampleKey: 'fp1_left_front', bandPrefix: 'fp1' },
@@ -93,6 +95,22 @@ async function buildSessionReportData(sessionId, dbClient) {
     if (!sessions || sessions.length === 0) throw new NotFoundError('Session not found')
     const session = sessions[0]
 
+    // Client requirement: the technician's commentary must be published before a report
+    // can be produced. Checked here, ahead of the EEG queries, so every way of building
+    // a report enforces it.
+    if (!session.has_active_commentary)
+        throw new ConflictError('Session commentary must be completed before the report can be generated')
+
+    // The intake history the session was paired with (falling back to the client's current one
+    // for sessions that predate histories) and the technician's commentary, printed before and
+    // after the EEG blocks. A backfilled placeholder history carries no real answers, so it is
+    // reported as absent rather than printed.
+    const commentary = await sessionCommentaryModel.findByStatus(sessionId, 'active', dbClient)
+    const rawHistory = session.client_history_id
+        ? await clientHistoryModel.findById(session.client_history_id, dbClient)
+        : await clientHistoryModel.findByStatus(session.client_id, 'active', dbClient)
+    const history = rawHistory && !rawHistory.is_backfilled_default ? rawHistory : null
+
     const phaseEvents = await sessionModel.getSessionPhaseEvents(sessionId, dbClient)
     const windows = resolvePhaseWindows(phaseEvents)
 
@@ -163,6 +181,7 @@ async function buildSessionReportData(sessionId, dbClient) {
     return {
         patient: {
             name: session.client_name,
+            dob: session.client_dob,
             age: calculateAge(session.client_dob),
             gender: session.client_gender,
         },
@@ -171,7 +190,10 @@ async function buildSessionReportData(sessionId, dbClient) {
             startTime: session.start_time,
             endTime: session.end_time,
             technicianName: session.technician_name,
+            clinicName: session.clinic_name,
         },
+        history,
+        commentary,
         blocks,
     }
 }

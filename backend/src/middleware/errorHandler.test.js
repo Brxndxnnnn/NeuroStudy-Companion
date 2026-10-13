@@ -31,6 +31,16 @@ describe('errorHandler', () => {
     assert.ok(!JSON.stringify(res.body).includes('leaked internal detail'))
   })
 
+  test('client history and pairing SQLSTATEs map to their HTTP statuses', () => {
+    const expected = { P2006: 409, P2101: 404, P2102: 409, P2103: 409, P2201: 404, P2202: 409, P2203: 400 }
+    for (const [code, status] of Object.entries(expected)) {
+      const res = fakeRes()
+      errorHandler({ code, message: `raised ${code}` }, {}, res, () => {})
+      assert.equal(res.statusCode, status, code)
+      assert.equal(res.body.error, `raised ${code}`)
+    }
+  })
+
   test('foreign_key_violation (23503) on clinic_id maps to a readable 400', () => {
     const err = { code: '23503', constraint: 'sessions_clinic_id_fkey', message: 'fk violation' }
     const res = fakeRes()

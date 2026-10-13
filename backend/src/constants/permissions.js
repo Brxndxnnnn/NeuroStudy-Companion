@@ -6,11 +6,23 @@ const PERMS = Object.freeze({
   SESSIONS_WRITE_OWN_CLINIC: 'sessions:write:own_clinic',
   SESSIONS_WRITE_ALL:        'sessions:write:all',
 
+  // Session commentaries
+  SESSION_COMMENTARIES_READ_OWN_CLINIC:  'session_commentaries:read:own_clinic',
+  SESSION_COMMENTARIES_READ_ALL:         'session_commentaries:read:all',
+  SESSION_COMMENTARIES_WRITE_OWN_CLINIC: 'session_commentaries:write:own_clinic',
+  SESSION_COMMENTARIES_WRITE_ALL:        'session_commentaries:write:all',
+
   // Clients
   CLIENTS_READ_OWN_CLINIC:  'clients:read:own_clinic',
   CLIENTS_READ_ALL:         'clients:read:all',
   CLIENTS_WRITE_OWN_CLINIC: 'clients:write:own_clinic',
   CLIENTS_WRITE_ALL:        'clients:write:all',
+
+  // Client histories
+  CLIENT_HISTORIES_READ_OWN_CLINIC:  'client_histories:read:own_clinic',
+  CLIENT_HISTORIES_READ_ALL:         'client_histories:read:all',
+  CLIENT_HISTORIES_WRITE_OWN_CLINIC: 'client_histories:write:own_clinic',
+  CLIENT_HISTORIES_WRITE_ALL:        'client_histories:write:all',
 
   // Users
   USERS_READ_ALL:  'users:read:all',

@@ -1,9 +1,12 @@
 import { Router } from 'express'
 import clientController from '../controllers/client.controller.js'
+import clientHistoriesRouter from './clientHistories.routes.js'
 import requirePermission from '../middleware/requirePermission.js'
 import PERMS from '../constants/permissions.js'
 
 const router = Router()
+
+router.use('/:client_id/histories', clientHistoriesRouter)
 
 /**
  * @openapi
@@ -76,6 +79,10 @@ router.get(
  * 
  *       For **technician users**, the `clinic_id` will be automatically set to the clinic of the authenticated user.
  *       For **admin users**, the `clinic_id` can be specified in the request body to create a client for a different clinic.
+ *
+ *       The complete client `history` is required: the client and its first published
+ *       history (version 1) are created in one transaction, because a client cannot be
+ *       paired to a session without a published history.
  *     tags: [Clients]
  *     security:
  *       - bearerAuth: []
@@ -85,7 +92,10 @@ router.get(
  *         application/json:
  *           schema:
  *             type: object
+ *             required: [name, dob, gender, race, history]
  *             properties:
+ *               history:
+ *                 $ref: '#/components/schemas/ClientHistoryInput'
  *               name:
  *                 { type: string, example: "John Doe" }
  *               dob:
@@ -100,9 +110,9 @@ router.get(
  *                 { type: string, format: uuid, example: "a0000000-0000-0000-0000-000000000001" }
  *     responses:
  *       201:
- *         description: The created client
+ *         description: The created client, with its published history under `history`
  *       400:
- *         description: Missing required fields or invalid input
+ *         description: Missing required fields, or an incomplete or invalid history
  *       401:
  *         description: Not authenticated
  */

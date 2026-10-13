@@ -253,19 +253,190 @@ function drawBlock(doc, cursorY, block) {
     return cursorY
 }
 
+// ── Narrative helpers (client history + commentary) ─────────────────────────────────────────────
+// Free text can run past a page, so these let pdfkit's own flow paginate and then pick the cursor
+// back up from doc.y — unlike the fixed-height charts/tables above, whose size is known up front.
+function paragraph(doc, cursorY, text, { size = 10, color = TEXT_COLOR, gap = 8 } = {}) {
+    cursorY = ensureSpace(doc, cursorY, size * 3)
+    doc.fontSize(size).fillColor(color).font('Helvetica')
+        .text(text, MARGIN, cursorY, { width: doc.page.width - MARGIN * 2, lineGap: 1.5 })
+    doc.fillColor(TEXT_COLOR)
+    return doc.y + gap
+}
+
+function labelledText(doc, cursorY, label, text) {
+    cursorY = ensureSpace(doc, cursorY, 40)
+    doc.fontSize(9).fillColor(MUTED_COLOR).font('Helvetica-Bold').text(label, MARGIN, cursorY)
+    doc.font('Helvetica').fillColor(TEXT_COLOR)
+    return paragraph(doc, doc.y + 2, text)
+}
+
+function formatDate(value) {
+    if (!value) return '—'
+    // intake_date arrives as 'YYYY-MM-DD' text; a client's dob as a Date.
+    if (typeof value === 'string') {
+        const [y, m, d] = value.slice(0, 10).split('-')
+        return y && m && d ? `${d}/${m}/${y}` : value
+    }
+    const d = new Date(value)
+    if (Number.isNaN(d.getTime())) return '—'
+    return `${String(d.getDate()).padStart(2, '0')}/${String(d.getMonth() + 1).padStart(2, '0')}/${d.getFullYear()}`
+}
+
+// Like drawTable, but each row is as tall as its wrapped text needs (comments/notes are free text).
+function drawWrappedTable(doc, cursorY, { colWidths, header, rows, align = [] }) {
+    const pad = 4
+    const heightOf = (cells) => Math.max(
+        ...cells.map((c, i) => doc.fontSize(8).heightOfString(String(c), { width: colWidths[i] - pad * 2 }))
+    ) + pad * 2
+
+    const drawRow = (cells, y, h, bg, textColor, isHeader) => {
+        let x = MARGIN
+        cells.forEach((cell, i) => {
+            if (isHeader) doc.rect(x, y, colWidths[i], h).fill(HEADER_BG)
+            else doc.rect(x, y, colWidths[i], h).fillAndStroke(bg, BORDER_COLOR)
+            doc.fontSize(8).fillColor(textColor)
+                .text(String(cell), x + pad, y + pad, { width: colWidths[i] - pad * 2, align: align[i] ?? 'left' })
+            x += colWidths[i]
+        })
+    }
+
+    const headerH = heightOf(header)
+    cursorY = ensureSpace(doc, cursorY, headerH + 30)
+    drawRow(header, cursorY, headerH, null, '#FFFFFF', true)
+    cursorY += headerH
+
+    rows.forEach((row, rIdx) => {
+        const h = heightOf(row)
+        if (cursorY + h > doc.page.height - MARGIN) {
+            doc.addPage()
+            cursorY = MARGIN
+            drawRow(header, cursorY, headerH, null, '#FFFFFF', true)
+            cursorY += headerH
+        }
+        drawRow(row, cursorY, h, rIdx % 2 === 0 ? ROW_BG : '#FFFFFF', TEXT_COLOR, false)
+        cursorY += h
+    })
+    doc.fillColor(TEXT_COLOR)
+    return cursorY + 12
+}
+
+// ── Client intake history (Client EEG & Tap Questionnaire) ──────────────────────────────────────
+const HISTORY_TEXT_SECTIONS = [
+    ['medical_history', 'Medical history / rehabilitation / operations'],
+    ['cognitive_behavioural_profile', 'Cognitive / behavioural profile'],
+    ['language_communication', 'Language / communication'],
+    ['social_observations', 'Social skills / observations'],
+    ['treatment_goals', 'Goal of the treatment'],
+]
+const COMPLAINT_LABELS = {
+    headache: 'Headache',
+    medication: 'Medication',
+    sleep_quality: 'Sleep quality',
+    concentration: 'Concentration',
+    motor_activity: 'Motor activity',
+    pain: 'Pain',
+}
+const SYMPTOM_LABELS = { concentration: 'Concentration', motivation: 'Motivation', social_skills: 'Social skills' }
+const SEVERITY_COLUMNS = ['not_affected', 'little_affected', 'strongly_affected']
+
+function drawClientHistory(doc, cursorY, history) {
+    cursorY = sectionHeading(doc, cursorY, 'Client intake history')
+    if (!history) {
+        doc.fontSize(9).fillColor(MUTED_COLOR)
+            .text('No intake history was recorded for this client.', MARGIN, cursorY)
+        doc.fillColor(TEXT_COLOR)
+        return cursorY + 24
+    }
+
+    cursorY = paragraph(doc, cursorY, `Date of intake & measurement: ${formatDate(history.intake_date)}`, { color: MUTED_COLOR })
+    for (const [key, label] of HISTORY_TEXT_SECTIONS)
+        cursorY = labelledText(doc, cursorY, label, history[key] || '—')
+
+    cursorY = ensureSpace(doc, cursorY, 80)
+    cursorY = subHeading(doc, cursorY, 'In the last 4 weeks, how much did the client feel affected by the following complaints?')
+    const usable = doc.page.width - MARGIN * 2
+    const byComplaint = Object.fromEntries((history.complaints ?? []).map((c) => [c.complaint, c]))
+    cursorY = drawWrappedTable(doc, cursorY, {
+        colWidths: [usable * 0.17, usable * 0.12, usable * 0.12, usable * 0.14, usable * 0.45],
+        align: ['left', 'center', 'center', 'center', 'left'],
+        header: ['Complaint', 'Not affected', 'Little affected', 'Strongly affected', 'Comments'],
+        rows: Object.entries(COMPLAINT_LABELS).map(([key, label]) => {
+            const c = byComplaint[key]
+            return [label, ...SEVERITY_COLUMNS.map((sev) => (c?.severity === sev ? 'X' : '')), c?.comment || '']
+        }),
+    })
+
+    cursorY = labelledText(doc, cursorY, 'School education / study', history.school_education || '—')
+    cursorY = labelledText(doc, cursorY, 'Professional education / actual work', history.occupation || '—')
+    cursorY = labelledText(doc, cursorY, 'Hobbies', history.hobbies || '—')
+
+    cursorY = ensureSpace(doc, cursorY, 80)
+    cursorY = subHeading(doc, cursorY, 'Symptoms (rated 1–10)')
+    const bySymptom = Object.fromEntries((history.symptoms ?? []).map((x) => [x.symptom, x]))
+    return drawWrappedTable(doc, cursorY, {
+        colWidths: [usable * 0.2, usable * 0.15, usable * 0.65],
+        align: ['left', 'center', 'left'],
+        header: ['Symptom', 'Expression', 'Notes'],
+        rows: Object.entries(SYMPTOM_LABELS).map(([key, label]) => {
+            const x = bySymptom[key]
+            return [label, x ? `${x.rating} / 10` : '—', x?.notes || '']
+        }),
+    })
+}
+
+// ── Technician commentary (Section A report) ────────────────────────────────────────────────────
+const EEG_NOTE = 'Note: During a neurofeedback pre-measurement, results are stored and analyzed in the form of an EEG and ' +
+    'QEEG. This does not replace the examination by a neurologist. We can support the diagnosis with the help of the ' +
+    'analysis, it does not replace the medical and neurological diagnosis.'
+
+function drawCommentary(doc, cursorY, data) {
+    const c = data.commentary
+    cursorY = sectionHeading(doc, cursorY, 'Report')
+    cursorY = paragraph(doc, cursorY, `Dear ${data.patient.name ?? 'Client'},`)
+    cursorY = paragraph(doc, cursorY, `Thank you for visiting us${data.session.clinicName ? ` in ${data.session.clinicName}` : ''}.`)
+
+    cursorY = subHeading(doc, cursorY, 'General data')
+    cursorY = paragraph(doc, cursorY, `Name: ${data.patient.name ?? '—'}\nDate of birth: ${formatDate(data.patient.dob)}`)
+
+    cursorY = labelledText(doc, cursorY, 'Anamnesis', c.anamnesis)
+
+    cursorY = ensureSpace(doc, cursorY, 60)
+    doc.fontSize(12).font('Helvetica-Bold').fillColor(TEXT_COLOR).text('EEG Pre Measurement', MARGIN, cursorY)
+    doc.font('Helvetica')
+    cursorY = paragraph(doc, doc.y + 4, EEG_NOTE, { size: 8, color: MUTED_COLOR })
+    cursorY = labelledText(doc, cursorY, 'EEG premeasurement', c.eeg_premeasurement)
+    cursorY = labelledText(doc, cursorY, 'Resting state recording with eyes closed', c.eeg_eyes_closed)
+    cursorY = labelledText(doc, cursorY, 'Recording with eyes open', c.eeg_eyes_open)
+    cursorY = labelledText(doc, cursorY, 'Recording during performance of a cognitively responsive task', c.eeg_cognitive_task)
+    cursorY = labelledText(doc, cursorY, 'Conclusion', c.eeg_conclusion)
+    cursorY = labelledText(doc, cursorY, 'Prognostic estimation', c.prognostic_estimation)
+
+    cursorY = paragraph(doc, cursorY, 'If you have any questions, please do not hesitate to contact us.')
+    return paragraph(doc, cursorY, `With kind regards,\n${data.session.technicianName ?? ''}`)
+}
+
 /**
  * Builds the full report as a PDFDocument. The caller is responsible for piping it to a response
  * (`doc.pipe(res)`) and calling `doc.end()` once this returns.
+ *
+ * Order: patient header and client intake history, then one page per EEG block, then the
+ * technician's commentary.
  */
 export function buildSessionReportPdf(data) {
     const doc = new PDFDocument({ size: 'A4', margin: MARGIN, bufferPages: true })
 
-    let cursorY = drawReportHeader(doc, data)
-    doc.y = cursorY
+    const cursorY = drawReportHeader(doc, data)
+    drawClientHistory(doc, cursorY, data.history)
 
-    for (let i = 0; i < data.blocks.length; i++) {
-        if (i > 0) { doc.addPage(); cursorY = MARGIN }
-        cursorY = drawBlock(doc, cursorY, data.blocks[i])
+    for (const block of data.blocks) {
+        doc.addPage()
+        drawBlock(doc, MARGIN, block)
+    }
+
+    if (data.commentary) {
+        doc.addPage()
+        drawCommentary(doc, MARGIN, data)
     }
 
     return doc

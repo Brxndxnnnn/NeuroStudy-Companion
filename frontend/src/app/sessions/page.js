@@ -222,7 +222,14 @@ export default function SessionsPage() {
                           {fmtDuration(s.start_time, s.end_time)}
                         </td>
                         <td className="px-6 py-4">
-                          <Pill tone={STATUS_TONE[s.sync_status] || "neutral"}>{s.sync_status || "unknown"}</Pill>
+                          <div className="flex flex-wrap items-center gap-1.5">
+                            <Pill tone={STATUS_TONE[s.sync_status] || "neutral"}>{s.sync_status || "unknown"}</Pill>
+                            {s.sync_status === "completed" && (
+                              <Pill tone={s.has_active_commentary ? "good" : "warn"}>
+                                {s.has_active_commentary ? "Commentary" : "No commentary"}
+                              </Pill>
+                            )}
+                          </div>
                         </td>
                         <td className="px-6 py-4 text-right">
                           {ready ? (

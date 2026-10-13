@@ -1,10 +1,17 @@
 "use client";
 import { useState, useEffect, useMemo } from "react";
 import { useRouter } from "next/navigation";
-import { getClients, createClient } from "@/utils/api";
+import {
+  getClients,
+  createClient,
+  getClientActiveHistory,
+  saveClientHistoryDraft,
+  publishClientHistoryDraft,
+} from "@/utils/api";
 import { useAuth } from "@/context/AuthContext";
 import { Toaster, toast } from "react-hot-toast";
 import TopNav from "@/components/TopNav";
+import ClientHistoryForm, { emptyHistory, historyFromApi, historyToPayload } from "@/components/ClientHistoryForm";
 import {
   PageContainer,
   PageHeading,
@@ -21,6 +28,16 @@ import {
 } from "@/components/ui";
 
 const RACE_OPTIONS = ["Chinese", "Malay", "Indian", "Caucasian", "Eurasian", "Other"];
+
+// The backend answers errors as { error: "..." }; surface its message (it lists every
+// missing/invalid history field) and fall back to a generic one.
+async function errorMessage(res, fallback) {
+  try {
+    const body = await res.json();
+    if (body?.error) return body.error;
+  } catch {}
+  return fallback;
+}
 
 export default function ClinicalDashboard() {
   const router = useRouter();
@@ -41,7 +58,13 @@ export default function ClinicalDashboard() {
   const [newRace, setNewRace] = useState("");
   const [customRace, setCustomRace] = useState("");
   const [newNotes, setNewNotes] = useState("");
+  const [newHistory, setNewHistory] = useState(emptyHistory);
   const [submitting, setSubmitting] = useState(false);
+  // Edit-history modal: { clientId, name } while open.
+  const [editing, setEditing] = useState(null);
+  const [editHistory, setEditHistory] = useState(null);
+  const [editLoading, setEditLoading] = useState(false);
+  const [editSaving, setEditSaving] = useState(false);
   const greetName = user?.display_name?.split(" ")[0] || "";
 
   const greeting = () => {
@@ -70,8 +93,8 @@ export default function ClinicalDashboard() {
 
   const handleRegisterClient = async (e) => {
     e.preventDefault();
-    if (!newName || !newDob || !newGender) {
-      toast.error("Name, date of birth, and gender are required.");
+    if (!newName || !newDob || !newGender || !newRace) {
+      toast.error("Name, date of birth, gender and race are required.");
       return;
     }
 
@@ -86,19 +109,65 @@ export default function ClinicalDashboard() {
         gender: newGender,
         race: finalRace,
         notes: newNotes,
+        history: historyToPayload(newHistory),
       });
 
       if (res.ok) {
         toast.success("Patient registered.", { id: toastId });
         setNewName(""); setNewDob(""); setNewGender(""); setNewRace(""); setCustomRace(""); setNewNotes("");
+        setNewHistory(emptyHistory());
         fetchClients();
       } else {
-        toast.error("Failed to register patient on server.", { id: toastId });
+        toast.error(await errorMessage(res, "Failed to register patient on server."), { id: toastId, duration: 8000 });
       }
     } catch (err) {
       toast.error("Network error while registering.", { id: toastId });
     } finally {
       setSubmitting(false);
+    }
+  };
+
+  const openHistoryEditor = async (client) => {
+    setEditing({ clientId: client.client_id, name: client.name });
+    setEditHistory(null);
+    setEditLoading(true);
+    try {
+      const res = await getClientActiveHistory(client.client_id);
+      if (res.ok) setEditHistory(historyFromApi(await res.json()));
+      else if (res.status === 404) setEditHistory(emptyHistory());
+      else throw new Error(String(res.status));
+    } catch {
+      toast.error("Failed to load the client's history.");
+      setEditing(null);
+    } finally {
+      setEditLoading(false);
+    }
+  };
+
+  // Published histories are immutable: saving writes the whole draft, then publishes it
+  // as the next version (the previous one is superseded).
+  const handleSaveHistory = async (e) => {
+    e.preventDefault();
+    if (!editing || !editHistory) return;
+    const toastId = toast.loading("Saving history…");
+    setEditSaving(true);
+    try {
+      const saved = await saveClientHistoryDraft(editing.clientId, historyToPayload(editHistory));
+      if (!saved.ok) {
+        toast.error(await errorMessage(saved, "Failed to save history."), { id: toastId, duration: 8000 });
+        return;
+      }
+      const published = await publishClientHistoryDraft(editing.clientId);
+      if (!published.ok) {
+        toast.error(await errorMessage(published, "Failed to publish history."), { id: toastId, duration: 8000 });
+        return;
+      }
+      toast.success("History updated.", { id: toastId });
+      setEditing(null);
+    } catch {
+      toast.error("Network error while saving history.", { id: toastId });
+    } finally {
+      setEditSaving(false);
     }
   };
 
@@ -220,9 +289,14 @@ export default function ClinicalDashboard() {
                         <span className="text-muted"> · {client.gender || "N/A"} · {client.race || "N/A"}</span>
                       </td>
                       <td className="px-6 py-4 text-right">
-                        <Button size="sm" onClick={() => handleSelectClient(client.client_id, client.name)}>
-                          Start session →
-                        </Button>
+                        <div className="flex items-center justify-end gap-2">
+                          <Button variant="subtle" size="sm" onClick={() => openHistoryEditor(client)}>
+                            History
+                          </Button>
+                          <Button size="sm" onClick={() => handleSelectClient(client.client_id, client.name)}>
+                            Start session →
+                          </Button>
+                        </div>
                       </td>
                     </tr>
                   ))
@@ -234,7 +308,7 @@ export default function ClinicalDashboard() {
 
         {/* Registration */}
         <Card>
-          <CardHeader title="Register new client" subtitle="Add a new patient to the database." />
+          <CardHeader title="Register new client" subtitle="Add a new patient and complete their intake history. Everything is required except comments and notes." />
           <form onSubmit={handleRegisterClient} className="grid grid-cols-1 md:grid-cols-2 gap-5 p-6">
             <Field label="Full name" required htmlFor="c-name">
               <Input id="c-name" type="text" placeholder="e.g. John Doe" value={newName} onChange={(e) => setNewName(e.target.value)} required />
@@ -249,7 +323,7 @@ export default function ClinicalDashboard() {
                 <option value="Female">Female</option>
               </Select>
             </Field>
-            <Field label="Race (optional)">
+            <Field label="Race" required>
               <div className="flex gap-2">
                 <Select
                   value={newRace}
@@ -276,6 +350,9 @@ export default function ClinicalDashboard() {
             <Field label="Clinical notes (optional)" className="md:col-span-2">
               <Textarea placeholder="Any relevant medical history…" rows={3} value={newNotes} onChange={(e) => setNewNotes(e.target.value)} />
             </Field>
+            <div className="md:col-span-2 pt-2">
+              <ClientHistoryForm value={newHistory} onChange={setNewHistory} idPrefix="new" />
+            </div>
             <div className="md:col-span-2">
               <Button type="submit" size="lg" fullWidth loading={submitting}>
                 Register client
@@ -284,6 +361,31 @@ export default function ClinicalDashboard() {
           </form>
         </Card>
       </PageContainer>
+
+      {editing && (
+        <div className="fixed inset-0 z-50 flex items-start justify-center overflow-y-auto bg-black/50 p-4 sm:p-8" role="dialog" aria-modal="true">
+          <Card className="w-full max-w-4xl">
+            <CardHeader
+              title={`Client history — ${editing.name}`}
+              subtitle="Saving publishes a new version; earlier versions are kept."
+              actions={<Button variant="ghost" size="sm" onClick={() => setEditing(null)} disabled={editSaving}>Close</Button>}
+            />
+            {editLoading || !editHistory ? (
+              <div className="p-12 flex items-center justify-center text-muted font-medium">
+                <Spinner size={18} className="mr-2" /> Loading history…
+              </div>
+            ) : (
+              <form onSubmit={handleSaveHistory} className="p-6 space-y-6">
+                <ClientHistoryForm value={editHistory} onChange={setEditHistory} idPrefix="edit" />
+                <div className="flex justify-end gap-3">
+                  <Button type="button" variant="ghost" onClick={() => setEditing(null)} disabled={editSaving}>Cancel</Button>
+                  <Button type="submit" loading={editSaving}>Publish new version</Button>
+                </div>
+              </form>
+            )}
+          </Card>
+        </div>
+      )}
     </main>
   );
 }
