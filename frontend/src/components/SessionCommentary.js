@@ -7,7 +7,8 @@ import {
   saveSessionCommentaryDraft,
   publishSessionCommentaryDraft,
 } from "@/utils/api";
-import { Card, CardHeader, Button, Field, Textarea, Pill, Spinner } from "@/components/ui";
+import Modal from "@/components/Modal";
+import { Button, Field, Textarea, Pill, Spinner } from "@/components/ui";
 
 // Mirrors backend/src/validators/sessionCommentary.validators.js, in report order. Every
 // section is required to publish; a draft may leave any of them empty.
@@ -45,9 +46,10 @@ async function errorMessage(res, fallback) {
 /**
  * Technician's post-session commentary, which the PDF report requires. Loads the
  * session's draft if there is one, otherwise the published version (so it can be
- * revised), otherwise a blank form. `onPublished` fires after each successful publish.
+ * revised), otherwise a blank form. Shown as a dialog: `onClose` dismisses it, and `onPublished`
+ * fires after each successful publish (the parent closes the dialog).
  */
-export default function SessionCommentary({ sessionId, onPublished }) {
+export default function SessionCommentary({ sessionId, onPublished, onClose }) {
   const [form, setForm] = useState(emptyForm);
   const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState("");
@@ -147,13 +149,18 @@ export default function SessionCommentary({ sessionId, onPublished }) {
   else if (active) statusPill = <Pill tone="good">Published · v{active.version}</Pill>;
   else if (hasDraft || dirty) statusPill = <Pill tone="neutral">Draft</Pill>;
 
+  const handleClose = () => {
+    if (dirty && !window.confirm("Discard your unsaved changes?")) return;
+    onClose();
+  };
+
   return (
-    <Card>
-      <CardHeader
-        title="Session commentary"
-        subtitle="Written by the technician after the session. Required before the PDF report can be generated, and printed in it."
-        actions={statusPill}
-      />
+    <Modal
+      title="Session commentary"
+      subtitle="Written by the technician after the session. Required before the PDF report can be generated, and printed in it."
+      onClose={handleClose}
+      busy={busy}
+    >
       {loading ? (
         <div className="p-10 flex items-center justify-center text-muted font-medium">
           <Spinner size={18} className="mr-2" /> Loading commentary…
@@ -162,6 +169,7 @@ export default function SessionCommentary({ sessionId, onPublished }) {
         <p className="p-6 text-crit-strong font-medium">{loadError}</p>
       ) : (
         <div className="p-6 space-y-6">
+          <div>{statusPill}</div>
           {GROUPS.map((g, i) => (
             <div key={g.title || i} className="space-y-4">
               {g.title && (
@@ -194,6 +202,6 @@ export default function SessionCommentary({ sessionId, onPublished }) {
           </div>
         </div>
       )}
-    </Card>
+    </Modal>
   );
 }
