@@ -82,12 +82,16 @@ const findById = async (session_id, client = pool) => {
             s.start_time,
             s.end_time,
             s.client_id,
+            -- The client's history as it stood when the session was paired; the PDF report
+            -- prints this one, not whatever the client's latest history has since become.
+            s.client_history_id,
             c.name AS client_name,
             c.dob AS client_dob,
             c.gender AS client_gender,
             s.sample_rate,
             s.conducted_by,
             u.display_name AS technician_name,
+            cl.name AS clinic_name,
             -- Status of the elliptic feature job (ml_service computes it after the
             -- bridge marks the session completed). Without these, an empty
             -- elliptic_band_stats response is ambiguous: "still computing", "finished
@@ -104,6 +108,7 @@ const findById = async (session_id, client = pool) => {
          FROM sessions s
          LEFT JOIN clients c ON s.client_id = c.client_id
          LEFT JOIN users u ON s.conducted_by = u.user_id
+         LEFT JOIN clinics cl ON s.clinic_id = cl.clinic_id
          WHERE s.session_id = $1
          ORDER BY s.start_time DESC NULLS LAST, s.session_id DESC`, [session_id]
     )

@@ -18,6 +18,7 @@ import EegStripChart from "@/components/EegStripChart";
 import TimeSeriesChart from "@/components/TimeSeriesChart";
 import BandProfileChart from "@/components/BandProfileChart";
 import StimulusModal from "@/components/StimulusModal";
+import SessionCommentary from "@/components/SessionCommentary";
 
 const CHANNELS = [
   { key: "fp1_left_front", prefix: "fp1", label: "Fp1", color: "--ch-fp1" },
@@ -266,6 +267,7 @@ export default function SessionResults() {
   const [sessionId, setSessionId] = useState(null);
   const [pollTimedOut, setPollTimedOut] = useState(false);
   const [pdfGenerating, setPdfGenerating] = useState(false);
+  const [hasCommentary, setHasCommentary] = useState(false);
   const [ellipticChannel, setEllipticChannel] = useState("fp1");
   const [ellipticStat, setEllipticStat] = useState("std");
   const [ellipticRange, setEllipticRange] = useState({ from: 0, to: 0 });
@@ -330,6 +332,7 @@ export default function SessionResults() {
         const session = sData.session || sData;
         if (session.client_name) setPatientName(session.client_name);
         setSessionId(sessionId);
+        setHasCommentary(Boolean(session.has_active_commentary));
         setFeaturesStatus(session.features_status ?? null);
         setFeaturesError(session.features_error || "");
 
@@ -828,10 +831,22 @@ export default function SessionResults() {
   // than through the shared load effect above.
   const handleGeneratePdf = async () => {
     if (!sessionId || pdfGenerating) return;
+    // The report is printed from the technician's commentary; the backend refuses (409)
+    // without a published one, so point at the editor instead of failing.
+    if (!hasCommentary) {
+      toast.error("Publish the session commentary first — it's printed in the report.");
+      document.getElementById("commentary")?.scrollIntoView({ behavior: "smooth", block: "start" });
+      return;
+    }
     setPdfGenerating(true);
     const toastId = toast.loading("Generating PDF report…");
     try {
       const res = await getSessionReportPdf(sessionId);
+      if (res.status === 409) {
+        setHasCommentary(false);
+        toast.error("Publish the session commentary first — it's printed in the report.", { id: toastId });
+        return;
+      }
       if (!res.ok) throw new Error(`Report generation failed (${res.status})`);
       const blob = await res.blob();
       const url = URL.createObjectURL(blob);
@@ -864,7 +879,7 @@ export default function SessionResults() {
         right={
           <div className="flex items-center gap-2">
             <Button variant="primary" size="sm" onClick={handleGeneratePdf} disabled={pdfGenerating || !sessionId}>
-              {pdfGenerating ? "Generating…" : "Generate PDF"}
+              {pdfGenerating ? "Generating…" : hasCommentary ? "Generate PDF" : "Generate PDF (commentary needed)"}
             </Button>
             <Button variant="ghost" size="sm" onClick={() => router.push("/history")}>Done</Button>
           </div>
@@ -1737,6 +1752,12 @@ export default function SessionResults() {
               </>
             )}
           </>
+        )}
+
+        {sessionId && (
+          <div id="commentary" className="scroll-mt-6">
+            <SessionCommentary sessionId={sessionId} onPublished={() => setHasCommentary(true)} />
+          </div>
         )}
       </div>
 
