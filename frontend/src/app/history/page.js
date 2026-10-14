@@ -11,6 +11,7 @@ import {
 import { useAuth } from "@/context/AuthContext";
 import { Toaster, toast } from "react-hot-toast";
 import TopNav from "@/components/TopNav";
+import Modal from "@/components/Modal";
 import ClientHistoryForm, { emptyHistory, historyFromApi, historyToPayload } from "@/components/ClientHistoryForm";
 import {
   PageContainer,
@@ -60,6 +61,9 @@ export default function ClinicalDashboard() {
   const [newNotes, setNewNotes] = useState("");
   const [newHistory, setNewHistory] = useState(emptyHistory);
   const [submitting, setSubmitting] = useState(false);
+  // The registration form keeps its state while closed, so an accidental close doesn't lose what
+  // was typed; it is only reset after a successful registration.
+  const [registerOpen, setRegisterOpen] = useState(false);
   // Edit-history modal: { clientId, name } while open.
   const [editing, setEditing] = useState(null);
   const [editHistory, setEditHistory] = useState(null);
@@ -116,6 +120,7 @@ export default function ClinicalDashboard() {
         toast.success("Patient registered.", { id: toastId });
         setNewName(""); setNewDob(""); setNewGender(""); setNewRace(""); setCustomRace(""); setNewNotes("");
         setNewHistory(emptyHistory());
+        setRegisterOpen(false);
         fetchClients();
       } else {
         toast.error(await errorMessage(res, "Failed to register patient on server."), { id: toastId, duration: 8000 });
@@ -224,6 +229,7 @@ export default function ClinicalDashboard() {
           <CardHeader
             title="Patients"
             subtitle="Search and filter the registry, then start a session."
+            actions={<Button onClick={() => setRegisterOpen(true)}>Register client</Button>}
           />
           <div className="flex flex-col sm:flex-row gap-3 px-6 py-4 bg-inset/40 border-b border-border">
             <div className="relative w-full sm:flex-1">
@@ -306,9 +312,15 @@ export default function ClinicalDashboard() {
           </div>
         </Card>
 
-        {/* Registration */}
-        <Card>
-          <CardHeader title="Register new client" subtitle="Add a new patient and complete their intake history. Everything is required except comments and notes." />
+      </PageContainer>
+
+      {registerOpen && (
+        <Modal
+          title="Register new client"
+          subtitle="Add a new patient and complete their intake history. Everything is required except comments and notes."
+          onClose={() => setRegisterOpen(false)}
+          busy={submitting}
+        >
           <form onSubmit={handleRegisterClient} className="grid grid-cols-1 md:grid-cols-2 gap-5 p-6">
             <Field label="Full name" required htmlFor="c-name">
               <Input id="c-name" type="text" placeholder="e.g. John Doe" value={newName} onChange={(e) => setNewName(e.target.value)} required />
@@ -353,38 +365,35 @@ export default function ClinicalDashboard() {
             <div className="md:col-span-2 pt-2">
               <ClientHistoryForm value={newHistory} onChange={setNewHistory} idPrefix="new" />
             </div>
-            <div className="md:col-span-2">
-              <Button type="submit" size="lg" fullWidth loading={submitting}>
-                Register client
-              </Button>
+            <div className="md:col-span-2 flex justify-end gap-3">
+              <Button type="button" variant="ghost" onClick={() => setRegisterOpen(false)} disabled={submitting}>Cancel</Button>
+              <Button type="submit" loading={submitting}>Register client</Button>
             </div>
           </form>
-        </Card>
-      </PageContainer>
+        </Modal>
+      )}
 
       {editing && (
-        <div className="fixed inset-0 z-50 flex items-start justify-center overflow-y-auto bg-black/50 p-4 sm:p-8" role="dialog" aria-modal="true">
-          <Card className="w-full max-w-4xl">
-            <CardHeader
-              title={`Client history — ${editing.name}`}
-              subtitle="Saving publishes a new version; earlier versions are kept."
-              actions={<Button variant="ghost" size="sm" onClick={() => setEditing(null)} disabled={editSaving}>Close</Button>}
-            />
-            {editLoading || !editHistory ? (
-              <div className="p-12 flex items-center justify-center text-muted font-medium">
-                <Spinner size={18} className="mr-2" /> Loading history…
+        <Modal
+          title={`Client history — ${editing.name}`}
+          subtitle="Saving publishes a new version; earlier versions are kept."
+          onClose={() => setEditing(null)}
+          busy={editSaving}
+        >
+          {editLoading || !editHistory ? (
+            <div className="p-12 flex items-center justify-center text-muted font-medium">
+              <Spinner size={18} className="mr-2" /> Loading history…
+            </div>
+          ) : (
+            <form onSubmit={handleSaveHistory} className="p-6 space-y-6">
+              <ClientHistoryForm value={editHistory} onChange={setEditHistory} idPrefix="edit" />
+              <div className="flex justify-end gap-3">
+                <Button type="button" variant="ghost" onClick={() => setEditing(null)} disabled={editSaving}>Cancel</Button>
+                <Button type="submit" loading={editSaving}>Publish new version</Button>
               </div>
-            ) : (
-              <form onSubmit={handleSaveHistory} className="p-6 space-y-6">
-                <ClientHistoryForm value={editHistory} onChange={setEditHistory} idPrefix="edit" />
-                <div className="flex justify-end gap-3">
-                  <Button type="button" variant="ghost" onClick={() => setEditing(null)} disabled={editSaving}>Cancel</Button>
-                  <Button type="submit" loading={editSaving}>Publish new version</Button>
-                </div>
-              </form>
-            )}
-          </Card>
-        </div>
+            </form>
+          )}
+        </Modal>
       )}
     </main>
   );
