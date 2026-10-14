@@ -31,6 +31,12 @@ const handlePostgresErrors = (err) => {
         case 'P2103': // published commentary cannot be changed or deleted
             return new ConflictError(safeMessage);
 
+        // Questionnaire answers (db/migrations/024_bfi2_who5_questionnaires.sql)
+        case 'P2301': // session not found / not visible to this clinic
+            return new NotFoundError(safeMessage);
+        case 'P2302': // answer not a whole number within the questionnaire's scale
+            return new BadRequestError(safeMessage);
+
         // Client histories (db/migrations/022_client_histories.sql)
         case 'P2201': // client or history not found / not visible to this clinic
             return new NotFoundError(safeMessage);
