@@ -9,7 +9,7 @@ import { Button, Spinner, Alert } from "@/components/ui";
 import LikertSurvey, { allAnswered as allSurveyAnswered } from "@/components/LikertSurvey";
 
 // App-chrome strings (not part of the BFI-2 instrument — safe to translate directly;
-// the instrument text lives in LikertSurvey.js). English-fallback per key.
+// the instrument text comes from the questionnaire record). English-fallback per key.
 const UI = {
   title:        { en: "Post-session survey", ms: "Tinjauan selepas sesi", zh: "疗程后问卷" },
   loading:      { en: "Loading survey…", ms: "Memuatkan tinjauan…", zh: "正在加载问卷…" },
@@ -21,8 +21,12 @@ const UI = {
 };
 const tr = (key, lang) => UI[key][lang] || UI[key].en;
 
+// The questionnaire this survey presents, selected by its stable code rather than
+// its position in the list.
+const SURVEY_CODE = "bfi2";
+
 /**
- * The BFI-style post-session survey: fetches the active questionnaire, lets
+ * The BFI-2 post-session survey: fetches the BFI-2 questionnaire (by code), lets
  * the technician switch language, and submits answers for `sessionId`.
  *
  * Shared by the standalone /questionare page and the survey step inside the
@@ -37,7 +41,8 @@ const tr = (key, lang) => UI[key][lang] || UI[key].en;
  */
 export default function PostSessionSurvey({ sessionId, onSubmitted }) {
   const [language, setLanguage] = useState("en");
-  const [questionnaireId, setQuestionnaireId] = useState("");
+  // { questionnaire_id, options, instructions, ... } from GET /api/questionnaires.
+  const [questionnaire, setQuestionnaire] = useState(null);
   const [questions, setQuestions] = useState([]);
   const [answers, setAnswers] = useState({});
   const [loading, setLoading] = useState(true);
@@ -63,10 +68,12 @@ export default function PostSessionSurvey({ sessionId, onSubmitted }) {
         const qRes = await getQuestionnaires();
         if (!qRes.ok) throw new Error("Failed to fetch questionnaires");
         const qData = await qRes.json();
-        if (qData.length > 0) {
-          const firstId = qData[0].questionnaire_id || qData[0].id;
-          setQuestionnaireId(firstId);
-          await fetchQuestionsForSurvey(firstId);
+        const survey = qData.find((q) => q.code === SURVEY_CODE);
+        // Without its answer options the survey cannot be answered, so it is treated
+        // as unavailable rather than rendered with no scale.
+        if (survey && survey.options?.length > 0) {
+          setQuestionnaire(survey);
+          await fetchQuestionsForSurvey(survey.questionnaire_id);
         }
       } catch (err) {
         console.error("Error loading survey:", err);
@@ -95,7 +102,7 @@ export default function PostSessionSurvey({ sessionId, onSubmitted }) {
         question_id: q.question_id,
         answer_value: Number(answers[idx]),
       }));
-      const res = await submitQuestionnaireAnswers(sessionId, questionnaireId, payload);
+      const res = await submitQuestionnaireAnswers(sessionId, questionnaire.questionnaire_id, payload);
       if (!res.ok) {
         console.error("Failed to submit survey", await res.text());
         setError(tr("errSubmit", language));
@@ -134,7 +141,7 @@ export default function PostSessionSurvey({ sessionId, onSubmitted }) {
           <Spinner size={22} className="text-accent" />
           <p className="text-muted mt-3">{tr("loading", language)}</p>
         </div>
-      ) : questions.length === 0 ? (
+      ) : !questionnaire || questions.length === 0 ? (
         <p className="py-8 text-center text-muted">{tr("none", language)}</p>
       ) : (
         <>
@@ -142,6 +149,8 @@ export default function PostSessionSurvey({ sessionId, onSubmitted }) {
           <LikertSurvey
             questions={questions}
             answers={answers}
+            options={questionnaire.options}
+            instructions={questionnaire.instructions}
             language={language}
             onChange={(idx, value) => setAnswers((prev) => ({ ...prev, [idx]: value }))}
           />
