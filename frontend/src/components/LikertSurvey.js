@@ -1,53 +1,31 @@
 "use client";
 
 /**
- * BFI-style Likert survey: one 1–5 radio group per statement, all statements on
- * a single page under a shared "I am someone who…" stem.
+ * Likert survey: one radio group per statement, all statements on a single page,
+ * optionally under a shared stem (BFI-2: "I am someone who…").
+ *
+ * The instrument text — answer labels, intro and stem — comes from the
+ * questionnaire record (`options` / `instructions`, seeded by
+ * db/migrations/024_bfi2_who5_questionnaires.sql), so the website and the bridge
+ * show the same validated wording and nothing instrument-specific lives here.
+ * ⚠ The ms/zh BFI-2 wording must still be verified against the official
+ * published translations before clinical use (see that migration).
  */
-// ── BFI-2 instrument text, per language ───────────────────────────────────────
-// ⚠ INSTRUMENT WORDING: the intro paragraph and the five anchor labels below are
-// part of the BFI-2, a validated instrument whose response scale is calibrated.
-// The ms/zh renderings here are ordinary translations and MUST be verified against
-// the official published BFI-2 Malay/Chinese versions before use in a real clinical
-// session — otherwise ms/zh responses are not comparable to the English norms. The
-// statements themselves are already stored per-language in the database; only this
-// surrounding instrument text lived in code.
 
-// Anchor labels keyed by scale value, per language.
-const SCALE_LABELS = {
-  en: ["Disagree strongly", "Disagree a little", "Neutral; no opinion", "Agree a little", "Agree strongly"],
-  ms: ["Sangat tidak setuju", "Kurang setuju", "Berkecuali; tiada pendapat", "Sedikit setuju", "Sangat setuju"],
-  zh: ["非常不同意", "有点不同意", "中立；没有意见", "有点同意", "非常同意"],
-};
+// App-chrome label (not instrument text).
+const ANSWERED_LABEL = { en: "answered", ms: "dijawab", zh: "已作答" };
+const t = (dict, language) => (dict && (dict[language] || dict.en)) || "";
 
-export const LIKERT_VALUES = [1, 2, 3, 4, 5];
+// Literal class names so Tailwind generates them; one column per answer option.
+const KEY_COLUMNS = { 4: "sm:grid-cols-4", 5: "sm:grid-cols-5", 6: "sm:grid-cols-6", 7: "sm:grid-cols-7" };
 
-// Build the [{value, label}] scale for a given language, English-fallback per label.
-export function likertScale(language = "en") {
-  const labels = SCALE_LABELS[language] || SCALE_LABELS.en;
-  return LIKERT_VALUES.map((value, i) => ({
-    value,
-    label: labels[i] || SCALE_LABELS.en[i],
-  }));
+// Build the [{value, label}] scale from the questionnaire's options for a language,
+// English-fallback per label. Option order is the display order.
+export function scaleFromOptions(options, language = "en") {
+  return (options || []).map((o) => ({ value: o.value, label: t(o.label, language) }));
 }
 
-// Retained for existing importers; English scale, same shape as before.
-export const LIKERT_SCALE = likertScale("en");
-
-const SURVEY_INTRO_BY_LANG = {
-  en: "Here are a number of characteristics that may or may not apply to you. For example, do you agree that you are someone who likes to spend time with others? Please select a number next to each statement to indicate the extent to which you agree or disagree with that statement.",
-  ms: "Berikut adalah beberapa ciri yang mungkin atau mungkin tidak menggambarkan diri anda. Sebagai contoh, adakah anda bersetuju bahawa anda seorang yang suka meluangkan masa bersama orang lain? Sila pilih nombor di sebelah setiap pernyataan untuk menunjukkan sejauh mana anda bersetuju atau tidak bersetuju dengan pernyataan tersebut.",
-  zh: "以下是一些可能适合或不适合您的特征。例如，您是否同意自己是一个喜欢与他人共处的人？请在每个陈述旁选择一个数字，以表明您对该陈述同意或不同意的程度。",
-};
-
-export const SURVEY_INTRO = SURVEY_INTRO_BY_LANG.en;
-
-// The shared stem ("I am someone who…") and the answered-counter label.
-const STEM = { en: "I am someone who…", ms: "Saya seorang yang…", zh: "我是一个…" };
-const ANSWERED_LABEL = { en: "answered", ms: "dijawab", zh: "已作答" };
-const t = (dict, language) => dict[language] || dict.en;
-
-// A statement counts as answered once it has a value in 1–5.
+// A statement counts as answered once it has a value.
 export function isAnswered(v) {
   return v != null && v !== "";
 }
@@ -60,18 +38,20 @@ export function allAnswered(questions, answers) {
   return questions.length > 0 && countAnswered(questions, answers) === questions.length;
 }
 
-export default function LikertSurvey({ questions, answers, onChange, language = "en" }) {
+export default function LikertSurvey({ questions, answers, onChange, options, instructions, language = "en" }) {
   const answered = countAnswered(questions, answers);
-  const scale = likertScale(language);
+  const scale = scaleFromOptions(options, language);
+  const intro = t(instructions?.intro, language);
+  const stem = t(instructions?.stem, language);
 
   return (
     <div>
-      <p className="text-[14px] leading-relaxed text-ink-2">{t(SURVEY_INTRO_BY_LANG, language)}</p>
+      {intro && <p className="text-[14px] leading-relaxed text-ink-2">{intro}</p>}
 
       {/* Scale key — the radios themselves only carry a number, so the meaning
           of each column has to live somewhere visible. */}
       <div className="mt-5 rounded-xl border border-border bg-inset/50 px-4 py-3">
-        <div className="grid grid-cols-1 sm:grid-cols-5 gap-2">
+        <div className={`grid grid-cols-1 ${KEY_COLUMNS[scale.length] || "sm:grid-cols-5"} gap-2`}>
           {scale.map((o) => (
             <div key={o.value} className="flex items-center gap-2">
               <span className="grid h-5 w-5 shrink-0 place-items-center rounded-md bg-surface border border-border-strong font-mono text-[11px] font-bold text-ink tnum">
@@ -84,7 +64,7 @@ export default function LikertSurvey({ questions, answers, onChange, language = 
       </div>
 
       <div className="mt-6 flex items-baseline justify-between gap-4">
-        <h3 className="text-[17px] font-bold tracking-tight text-ink">{t(STEM, language)}</h3>
+        <h3 className="text-[17px] font-bold tracking-tight text-ink">{stem}</h3>
         <span className="font-mono text-[12px] text-muted tnum shrink-0">
           {answered} / {questions.length} {t(ANSWERED_LABEL, language)}
         </span>

@@ -1,5 +1,9 @@
 import { Router } from 'express'
 import questionnaireController from '../controllers/questionnaire.controller.js'
+import requirePermission from '../middleware/requirePermission.js'
+import validateRequest from '../middleware/validateRequest.js'
+import { answerQuestionnaireValidation, questionnaireIdValidation } from '../validators/questionnaire.validators.js'
+import PERMS from '../constants/permissions.js'
 
 const router = Router()
 
@@ -7,62 +11,17 @@ const router = Router()
  * @openapi
  * /api/questionnaires:
  *   get:
- *     summary: List all questionnaires
+ *     summary: List all questionnaires in presentation order (BFI-2, then WHO-5)
+ *     description: |
+ *       Each questionnaire includes its `code` (`bfi2`, `who5`), answer scale
+ *       (`scale_min`/`scale_max`), `options` (answer labels per value, per language, in
+ *       display order) and `instructions` (intro and optional stem, per language).
  *     tags: [Questionnaires]
  *     responses:
  *       200:
  *         description: Array of questionnaires
  */
 router.get('/', questionnaireController.listQuestionnaires)
-
-
-/**
- * @openapi
- * /api/questionnaires/questions:
- *   get:
- *     summary: List all questions across all questionnaires, optionally filtered by languages
- *     tags: [Questionnaires]
- *     parameters:
- *       - in: query
- *         name: languages
- *         schema:
- *           type: string
- *           description: Comma-separated list of language codes (e.g., "en,ms,zh")
- *     responses:
- *       200:
- *         description: Array of questions
- *         content:
- *           application/json:
- *             schema:
- *               type: array
- *               items:
- *                 type: object
- *                 properties:
- *                   question_id:
- *                     type: string
- *                     format: uuid
- *                     example: "750c4551-2932-4597-bf72-27050e318795"
- *                   question_no:
- *                     type: integer
- *                     example: 1
- *                   domain:
- *                     type: string
- *                     description: "BFI-2 personality domain (E, A, C, N, O)"
- *                     example: "E"
- *                   is_reverse_scored:
- *                     type: boolean
- *                     example: false
- *                   statement:
- *                     type: object
- *                     description: "Multi-language statements (JSONB)"
- *                     additionalProperties:
- *                       type: string
- *                     example:
- *                       en: "Someone who is outgoing and comfortable interacting with others."
- *                       ms: "Seseorang yang peramah dan selesa berinteraksi dengan orang lain."
- *                       zh: "一个外向且乐于与他人交往的人。"
- */
-router.get('/questions', questionnaireController.listAllQuestions)
 
 /**
  * @openapi
@@ -80,7 +39,12 @@ router.get('/questions', questionnaireController.listAllQuestions)
  *       404:
  *         description: Questionnaire not found
  */
-router.get('/:questionnaire_id', questionnaireController.getQuestionnaireById)
+router.get(
+    '/:questionnaire_id',
+    questionnaireIdValidation,
+    validateRequest,
+    questionnaireController.getQuestionnaireById
+)
 
 /**
  * @openapi
@@ -116,37 +80,57 @@ router.get('/:questionnaire_id', questionnaireController.getQuestionnaireById)
  *                     example: 1
  *                   domain:
  *                     type: string
- *                     description: "BFI-2 personality domain (E, A, C, N, O)"
+ *                     nullable: true
+ *                     description: "BFI-2 personality domain (E, A, C, N, O); null for WHO-5"
  *                     example: "E"
+ *                   facet:
+ *                     type: string
+ *                     nullable: true
+ *                     description: "BFI-2 facet; null for WHO-5"
+ *                     example: "Sociability"
  *                   is_reverse_scored:
  *                     type: boolean
  *                     example: false
  *                   statement:
  *                     type: object
- *                     description: "Multi-language statements (JSONB)"
+ *                     description: "Multi-language statements (JSONB), returned when `languages` is omitted"
  *                     additionalProperties:
  *                       type: string
  *                     example:
- *                       en: "Someone who is outgoing and comfortable interacting with others."
- *                       ms: "Seseorang yang peramah dan selesa berinteraksi dengan orang lain."
- *                       zh: "一个外向且乐于与他人交往的人。"
+ *                       en: "Is outgoing, sociable"
+ *                       ms: "Bersikap peramah dan suka bergaul"
+ *                       zh: "外向、善于社交"
+ *       400:
+ *         description: Invalid questionnaire_id or language code
  *       404:
  *         description: No questions found for the given questionnaire_id
  */
-router.get('/:questionnaire_id/questions', questionnaireController.getQuestionsByQuestionnaireId)
+router.get(
+    '/:questionnaire_id/questions',
+    questionnaireIdValidation,
+    validateRequest,
+    questionnaireController.getQuestionsByQuestionnaireId
+)
 
 /**
  * @openapi
  * /api/questionnaires/answer:
  *   post:
  *     summary: Submit answers for a questionnaire
- *     description: Submit answers for a specific questionnaire associated with a session and clinic.
- *       
- *       **Note on Clinic ID:** 
- *       The frontend does NOT need to send the technician's `clinic_id`. 
- *       The backend automatically extracts the `clinic_id` 
- *       from the signed JWT (Bearer token) provided in the Authorization header.
+ *     description: |
+ *       Submits one questionnaire for a completed session. The submission must answer every
+ *       question of the questionnaire exactly once, each with a whole number within its
+ *       scale (BFI-2 1-5, WHO-5 0-5). A questionnaire can only be submitted once per session.
+ *       All answers are saved together or not at all.
+ *
+ *       **Note on Clinic ID:** the frontend does NOT send a `clinic_id`. The database takes
+ *       it from the session.
+ *
+ *       The response includes the questionnaire's scores (see
+ *       `GET /api/sessions/{session_id}/questionnaires` for their shape).
  *     tags: [Questionnaires]
+ *     security:
+ *       - bearerAuth: []
  *     requestBody:
  *       required: true
  *       content:
@@ -204,11 +188,22 @@ router.get('/:questionnaire_id/questions', questionnaireController.getQuestionsB
  *                       clinic_id:
  *                         type: string
  *                         format: uuid
+ *                 scores:
+ *                   type: object
+ *                   description: "{ total, domains, facets } for this questionnaire"
  *       400:
- *         description: Bad request (missing required fields or invalid data)
+ *         description: Missing, extra, duplicate or out-of-range answers; the message lists each problem
+ *       404:
+ *         description: Session or questionnaire not found
  *       409:
- *         description: Conflict (e.g., duplicate submission)
+ *         description: The session has not completed, or this questionnaire was already submitted for it
  */
-router.post('/answer', questionnaireController.answerQuestionnaire)
+router.post(
+    '/answer',
+    requirePermission(PERMS.SESSIONS_WRITE_OWN_CLINIC),
+    answerQuestionnaireValidation,
+    validateRequest,
+    questionnaireController.answerQuestionnaire
+)
 
 export default router
