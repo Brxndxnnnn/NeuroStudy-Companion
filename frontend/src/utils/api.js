@@ -185,6 +185,11 @@ export async function getQuestionnaireQuestions(questionnaireId) {
   );
   return res;
 }
+// Every questionnaire with this session's answers and scores (scores is null if unanswered).
+export async function getSessionQuestionnaires(sessionId) {
+  const res = await fetchWithAuth(`${BASE_URL}/sessions/${sessionId}/questionnaires`);
+  return res;
+}
 export async function submitQuestionnaireAnswers(sessionId, questionnaireId, answers) {
   const res = await fetchWithAuth(`${BASE_URL}/questionnaires/answer`, {
     method: "POST",

@@ -18,6 +18,7 @@ import EegStripChart from "@/components/EegStripChart";
 import TimeSeriesChart from "@/components/TimeSeriesChart";
 import BandProfileChart from "@/components/BandProfileChart";
 import StimulusModal from "@/components/StimulusModal";
+import QuestionnaireScores from "@/components/QuestionnaireScores";
 import SessionCommentary from "@/components/SessionCommentary";
 
 const COMMENTARY_HINT = "Publish the session commentary first — the PDF report can only be generated once it is done.";
@@ -1710,6 +1711,9 @@ export default function SessionResults() {
                     </div>
                   </div>
                 </Card>
+
+                {/* ── Questionnaires ───────────────────────────────────────── */}
+                <QuestionnaireScores sessionId={sessionId} />
 
                 {/* ── Vitals ───────────────────────────────────────────────── */}
                 <Card className="overflow-hidden">
