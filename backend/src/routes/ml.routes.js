@@ -24,8 +24,8 @@ import {
  * only then forwards to ml_service.
  *
  * Split of concerns:
- *   - /phase1/status, /phase1/model         → model/readiness metadata, no tenant
- *                                              data → any authenticated user.
+ *   - /phase1/status                        → readiness metadata, no tenant data →
+ *                                              any authenticated user.
  *   - /phase1/sessions, /predictions/:id,
  *     /clients/:id/sessions, POST /train     → touch a clinic's sessions/clients →
  *                                              insights:read + an ownership check on
@@ -94,13 +94,13 @@ async function mlFetch(path, { method = 'GET', body, timeoutMs = READ_TIMEOUT_MS
 
 const send = (res, result) => res.status(result.status).json(result.payload)
 
-// ── Model / readiness metadata — any authenticated user, no tenant data ──────────
+// ── Readiness metadata — any authenticated user, no tenant data ──────────────────
 
 /**
  * @openapi
  * /api/ml/phase1/status:
  *   get:
- *     summary: Phase 1 readiness snapshot (whether a model is trained, data accumulated)
+ *     summary: Phase 1 readiness snapshot (labelled EEG data accumulated)
  *     tags: [ML]
  *     security: [{ bearerAuth: [] }]
  *     responses:
@@ -109,20 +109,6 @@ const send = (res, result) => res.status(result.status).json(result.payload)
  *       502: { description: ML service unreachable }
  */
 router.get('/phase1/status', catchAsync(async (req, res) => send(res, await mlFetch('/phase1/status'))))
-
-/**
- * @openapi
- * /api/ml/phase1/model:
- *   get:
- *     summary: Current Phase 1 model + version history (model card)
- *     tags: [ML]
- *     security: [{ bearerAuth: [] }]
- *     responses:
- *       200: { description: Current model and history }
- *       401: { description: Missing or invalid token }
- *       502: { description: ML service unreachable }
- */
-router.get('/phase1/model', catchAsync(async (req, res) => send(res, await mlFetch('/phase1/model'))))
 
 // ── Session-scoped reads — insights:read + clinic ownership ──────────────────────
 
@@ -230,19 +216,21 @@ router.get(
  * @openapi
  * /api/ml/train:
  *   post:
- *     summary: Train a Phase 1 valence/arousal model
+ *     summary: Train a client's Phase 1 valence/arousal model
  *     description: >
- *       Fits and registers a model. Omit client_id for the population model, or
- *       supply one to train that client's personal model, optionally restricted to
- *       chosen sessions. A client_id / session_ids that do not belong to the
- *       caller's clinic are rejected (404) before anything is forwarded.
+ *       Fits and registers the personal model for one client, optionally
+ *       restricted to chosen sessions. A client_id / session_ids that do not
+ *       belong to the caller's clinic are rejected (404) before anything is
+ *       forwarded.
  *     tags: [ML]
  *     security: [{ bearerAuth: [] }]
  *     requestBody:
+ *       required: true
  *       content:
  *         application/json:
  *           schema:
  *             type: object
+ *             required: [client_id]
  *             properties:
  *               client_id: { type: string, format: uuid }
  *               session_ids:
@@ -251,6 +239,7 @@ router.get(
  *               predict: { type: boolean, default: true }
  *     responses:
  *       200: { description: Training finished (see `trained`) }
+ *       400: { description: client_id missing or malformed }
  *       401: { description: Missing or invalid token }
  *       404: { description: A referenced client/session is not in the caller's clinic }
  *       502: { description: ML service unreachable }
@@ -261,19 +250,14 @@ router.post(
     catchAsync(async (req, res) => {
         const { client_id, session_ids, predict } = req.body ?? {}
 
+        // Every model belongs to one client, so there is nothing to train without one.
+        if (!isUuid(client_id)) throw new BadRequestError('client_id must be a UUID.')
         if (session_ids !== undefined && !Array.isArray(session_ids))
             throw new BadRequestError('session_ids must be an array of session UUIDs.')
-        if (session_ids && session_ids.length && !client_id)
-            throw new BadRequestError(
-                'session_ids only applies to a personal model — supply client_id too.'
-            )
 
         // Tenant ownership: a caller may only train on their own clinic's data.
-        if (client_id !== undefined && client_id !== null) {
-            if (!isUuid(client_id)) throw new BadRequestError('client_id must be a UUID.')
-            if (!(await clientInClinic(req.dbClient, client_id)))
-                throw new NotFoundError('Client not found.')
-        }
+        if (!(await clientInClinic(req.dbClient, client_id)))
+            throw new NotFoundError('Client not found.')
         if (session_ids && session_ids.length) {
             if (!session_ids.every(isUuid))
                 throw new BadRequestError('session_ids must all be UUIDs.')

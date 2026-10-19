@@ -1,5 +1,5 @@
 "use client";
-import { useState, useEffect, useMemo } from "react";
+import { useState, useEffect } from "react";
 import { useRouter } from "next/navigation";
 import { getSessions } from "@/utils/api";
 import TopNav from "@/components/TopNav";
@@ -22,6 +22,9 @@ const STATUS_TONE = {
   claimed: "accent",
   unclaimed: "neutral",
 };
+
+const PAGE_SIZE = 20;
+const SEARCH_DEBOUNCE_MS = 300;
 
 // Results need a closed recording window — anything still open has no waveform
 // to plot, so the action is disabled rather than leading to an error screen.
@@ -53,40 +56,57 @@ function fmtDuration(start, end) {
 
 export default function SessionsPage() {
   const router = useRouter();
-  const [sessions, setSessions] = useState([]);
-  const [isLoading, setIsLoading] = useState(true);
-  const [error, setError] = useState("");
   const [searchQuery, setSearchQuery] = useState("");
+  const [debouncedSearch, setDebouncedSearch] = useState("");
   const [filterStatus, setFilterStatus] = useState("");
+  const [page, setPage] = useState(1);
+  // The last response, tagged with the query it answers. Search, status filtering and
+  // paging all happen in the backend (GET /api/sessions), so every session in the
+  // clinic is reachable, not just the first page.
+  const [result, setResult] = useState({ key: null, sessions: [], pagination: null, statusCounts: {}, error: "" });
+
+  // Query the backend once typing pauses, not on every keystroke.
+  useEffect(() => {
+    const timer = setTimeout(() => setDebouncedSearch(searchQuery.trim()), SEARCH_DEBOUNCE_MS);
+    return () => clearTimeout(timer);
+  }, [searchQuery]);
+
+  const queryKey = JSON.stringify([debouncedSearch, filterStatus, page]);
 
   useEffect(() => {
-    const load = async () => {
+    const key = JSON.stringify([debouncedSearch, filterStatus, page]);
+    // Responses can arrive out of order while typing; only the latest query's is kept.
+    let cancelled = false;
+    (async () => {
       try {
-        const res = await getSessions();
+        const res = await getSessions({ search: debouncedSearch, sync_status: filterStatus, page, page_size: PAGE_SIZE });
         if (!res.ok) throw new Error("fetch");
         const data = await res.json();
-        setSessions(Array.isArray(data) ? data : data.sessions || []);
-      } catch (err) {
-        setError("Failed to load sessions from the database.");
-      } finally {
-        setIsLoading(false);
+        if (!cancelled)
+          setResult({
+            key,
+            sessions: data.sessions || [],
+            pagination: data.pagination || null,
+            statusCounts: data.status_counts || {},
+            error: "",
+          });
+      } catch {
+        if (!cancelled)
+          setResult((prev) => ({ ...prev, key, sessions: [], error: "Failed to load sessions from the database." }));
       }
+    })();
+    return () => {
+      cancelled = true;
     };
-    load();
-  }, []);
+  }, [debouncedSearch, filterStatus, page]);
 
-  const filtered = useMemo(
-    () =>
-      sessions.filter((s) => {
-        const q = searchQuery.toLowerCase();
-        const matchesName = !q || (s.client_name || "").toLowerCase().includes(q);
-        const matchesStatus = !filterStatus || s.sync_status === filterStatus;
-        return matchesName && matchesStatus;
-      }),
-    [sessions, searchQuery, filterStatus]
-  );
-
-  const completedCount = useMemo(() => sessions.filter(hasResults).length, [sessions]);
+  const isLoading = result.key !== queryKey;
+  const { sessions, pagination, statusCounts, error } = result;
+  const totalSessions = pagination?.total ?? 0;
+  const totalPages = pagination?.total_pages ?? 1;
+  const hasFilters = Boolean(debouncedSearch || filterStatus);
+  // Counted by the backend across every matching session, not just this page.
+  const completedCount = statusCounts.completed ?? 0;
 
   const openResults = (sessionId, clientName) => {
     // Keep the "current session" pointers in step so the results page reads the
@@ -106,18 +126,16 @@ export default function SessionsPage() {
           subtitle="Every recorded session. Open a completed one to review its EEG, bands and vitals."
         />
 
-        <div className="grid grid-cols-2 sm:grid-cols-3 gap-4">
-          <StatCard label="Total sessions" value={isLoading ? "—" : sessions.length} />
+        <div className="grid grid-cols-2 gap-4">
           <StatCard
-            label="With results"
-            value={isLoading ? "—" : completedCount}
-            hint="closed recording window"
+            label={hasFilters ? "Matching sessions" : "Total sessions"}
+            value={isLoading ? "—" : totalSessions}
+            hint={hasFilters ? "filtered view" : "all sessions"}
           />
           <StatCard
-            label="Matching filters"
-            value={isLoading ? "—" : filtered.length}
-            hint={searchQuery || filterStatus ? "filtered view" : "all sessions"}
-            className="hidden sm:block"
+            label="Completed"
+            value={isLoading ? "—" : completedCount}
+            hint={hasFilters ? "in this filtered view" : "recording finished"}
           />
         </div>
 
@@ -138,15 +156,21 @@ export default function SessionsPage() {
               </svg>
               <Input
                 type="text"
-                placeholder="Search by patient name…"
+                placeholder="Search by patient, technician or session ID…"
                 value={searchQuery}
-                onChange={(e) => setSearchQuery(e.target.value)}
+                onChange={(e) => {
+                  setSearchQuery(e.target.value);
+                  setPage(1);
+                }}
                 className="pl-10 py-2.5 text-sm"
               />
             </div>
             <Select
               value={filterStatus}
-              onChange={(e) => setFilterStatus(e.target.value)}
+              onChange={(e) => {
+                setFilterStatus(e.target.value);
+                setPage(1);
+              }}
               className="w-full sm:w-44 py-2.5 text-sm"
             >
               <option value="">All statuses</option>
@@ -187,15 +211,15 @@ export default function SessionsPage() {
                       {error}
                     </td>
                   </tr>
-                ) : filtered.length === 0 ? (
+                ) : sessions.length === 0 ? (
                   <tr>
                     <td colSpan="5" className="px-6 py-14 text-center">
                       <p className="text-muted font-medium mb-3">
-                        {sessions.length === 0
-                          ? "No sessions have been recorded yet."
-                          : "No sessions match your filters."}
+                        {hasFilters
+                          ? "No sessions match your filters."
+                          : "No sessions have been recorded yet."}
                       </p>
-                      {sessions.length === 0 && (
+                      {!hasFilters && (
                         <Button variant="subtle" size="sm" onClick={() => router.push("/history")}>
                           Start a session →
                         </Button>
@@ -203,7 +227,7 @@ export default function SessionsPage() {
                     </td>
                   </tr>
                 ) : (
-                  filtered.map((s) => {
+                  sessions.map((s) => {
                     const ready = hasResults(s);
                     return (
                       <tr
@@ -222,7 +246,14 @@ export default function SessionsPage() {
                           {fmtDuration(s.start_time, s.end_time)}
                         </td>
                         <td className="px-6 py-4">
-                          <Pill tone={STATUS_TONE[s.sync_status] || "neutral"}>{s.sync_status || "unknown"}</Pill>
+                          <div className="flex flex-wrap items-center gap-1.5">
+                            <Pill tone={STATUS_TONE[s.sync_status] || "neutral"}>{s.sync_status || "unknown"}</Pill>
+                            {s.sync_status === "completed" && (
+                              <Pill tone={s.has_active_commentary ? "good" : "warn"}>
+                                {s.has_active_commentary ? "Commentary" : "No commentary"}
+                              </Pill>
+                            )}
+                          </div>
                         </td>
                         <td className="px-6 py-4 text-right">
                           {ready ? (
@@ -240,6 +271,25 @@ export default function SessionsPage() {
               </tbody>
             </table>
           </div>
+
+          {!isLoading && !error && totalSessions > 0 && (
+            <div className="flex flex-col gap-3 border-t border-border px-6 py-4 text-sm sm:flex-row sm:items-center sm:justify-between">
+              <span className="text-muted">
+                Showing {(page - 1) * PAGE_SIZE + 1}–{(page - 1) * PAGE_SIZE + sessions.length} of {totalSessions} sessions
+              </span>
+              <div className="flex items-center gap-3">
+                <Button variant="ghost" size="sm" disabled={page <= 1} onClick={() => setPage((p) => p - 1)}>
+                  Previous
+                </Button>
+                <span className="font-mono text-xs text-muted">
+                  Page {page} of {totalPages}
+                </span>
+                <Button variant="ghost" size="sm" disabled={page >= totalPages} onClick={() => setPage((p) => p + 1)}>
+                  Next
+                </Button>
+              </div>
+            </div>
+          )}
         </Card>
       </PageContainer>
     </main>

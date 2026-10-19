@@ -335,15 +335,10 @@ export async function getSessionReportPdf(sessionId) {
 // All ML calls go through the authenticated backend (/api/ml/...), which enforces
 // the JWT and per-clinic row-level security before proxying to ml_service. The ML
 // service is not publicly reachable.
-// Returns a readiness snapshot: whether a valence/arousal model is trained yet and
-// how much OASIS-labelled EEG has accumulated toward training one.
+// Returns a readiness snapshot: how much OASIS-labelled EEG has accumulated toward
+// training valence/arousal models.
 export async function getPhase1Status() {
   const res = await fetchWithAuth(`${BASE_URL}/ml/phase1/status`);
-  return res;
-}
-// Current trained model + version history (metrics for the model card).
-export async function getPhase1Model() {
-  const res = await fetchWithAuth(`${BASE_URL}/ml/phase1/model`);
   return res;
 }
 // Completed sessions + their prediction status (session picker).
@@ -352,9 +347,9 @@ export async function getPhase1Sessions() {
   return res;
 }
 // One session's predicted valence/arousal trajectory.
-// A session can hold predictions from both the population model and its client's
-// personal model; the response carries ONE model's rows (personal by default) plus
-// `available_models` for the switch. Pass modelVersion to pick the other.
+// A session can hold predictions from more than one version of its client's
+// personal model; the response carries ONE version's rows (the newest by default)
+// plus `available_models` for the switch. Pass modelVersion to pick another.
 export async function getPhase1Predictions(sessionId, modelVersion) {
   const q = modelVersion != null ? `?model_version=${modelVersion}` : "";
   const res = await fetchWithAuth(`${BASE_URL}/ml/phase1/predictions/${sessionId}${q}`);
@@ -365,9 +360,10 @@ export async function getPhase1ClientSessions(clientId) {
   const res = await fetchWithAuth(`${BASE_URL}/ml/phase1/clients/${clientId}/sessions`);
   return res;
 }
-// Train a model. Like every ML call it goes through the authenticated backend
-// (/api/ml/train), which is the only path exposed to ml_service.
-export async function trainPhase1Model({ clientId, sessionIds } = {}) {
+// Train one client's personal model (clientId is required). Like every ML call it
+// goes through the authenticated backend (/api/ml/train), which is the only path
+// exposed to ml_service.
+export async function trainPhase1Model({ clientId, sessionIds }) {
   const res = await fetchWithAuth(`${BASE_URL}/ml/train`, {
     method: "POST",
     body: JSON.stringify({ client_id: clientId, session_ids: sessionIds }),
@@ -409,6 +405,46 @@ export async function createClient(clientData) {
 export async function getClient(clientId) {
   const res = await fetchWithAuth(`${BASE_URL}/clients/${clientId}`);
   return res;
+}
+
+// CLIENT HISTORIES (versioned intake questionnaire; one draft + one active per client).
+// GET /active and /draft 404 when none exists. PUT /draft replaces the whole draft.
+export async function getClientActiveHistory(clientId) {
+  return fetchWithAuth(`${BASE_URL}/clients/${clientId}/histories/active`);
+}
+export async function getClientHistories(clientId) {
+  return fetchWithAuth(`${BASE_URL}/clients/${clientId}/histories`);
+}
+export async function saveClientHistoryDraft(clientId, history) {
+  return fetchWithAuth(`${BASE_URL}/clients/${clientId}/histories/draft`, {
+    method: "PUT",
+    body: JSON.stringify(history),
+  });
+}
+export async function publishClientHistoryDraft(clientId) {
+  return fetchWithAuth(`${BASE_URL}/clients/${clientId}/histories/draft/publish`, {
+    method: "POST",
+  });
+}
+
+// SESSION COMMENTARIES (technician's post-session notes for the PDF report; one draft + one
+// active per session). GET /active and /draft 404 when none exists.
+export async function getSessionActiveCommentary(sessionId) {
+  return fetchWithAuth(`${BASE_URL}/sessions/${sessionId}/commentaries/active`);
+}
+export async function getSessionCommentaryDraft(sessionId) {
+  return fetchWithAuth(`${BASE_URL}/sessions/${sessionId}/commentaries/draft`);
+}
+export async function saveSessionCommentaryDraft(sessionId, commentary) {
+  return fetchWithAuth(`${BASE_URL}/sessions/${sessionId}/commentaries/draft`, {
+    method: "PUT",
+    body: JSON.stringify(commentary),
+  });
+}
+export async function publishSessionCommentaryDraft(sessionId) {
+  return fetchWithAuth(`${BASE_URL}/sessions/${sessionId}/commentaries/draft/publish`, {
+    method: "POST",
+  });
 }
 
 

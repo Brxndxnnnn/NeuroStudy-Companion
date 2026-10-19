@@ -19,6 +19,9 @@ import TimeSeriesChart from "@/components/TimeSeriesChart";
 import BandProfileChart from "@/components/BandProfileChart";
 import StimulusModal from "@/components/StimulusModal";
 import QuestionnaireResults from "@/components/QuestionnaireResults";
+import SessionCommentary from "@/components/SessionCommentary";
+
+const COMMENTARY_HINT = "Publish the session commentary first — the PDF report can only be generated once it is done.";
 
 const CHANNELS = [
   { key: "fp1_left_front", prefix: "fp1", label: "Fp1", color: "--ch-fp1" },
@@ -267,6 +270,8 @@ export default function SessionResults() {
   const [sessionId, setSessionId] = useState(null);
   const [pollTimedOut, setPollTimedOut] = useState(false);
   const [pdfGenerating, setPdfGenerating] = useState(false);
+  const [hasCommentary, setHasCommentary] = useState(false);
+  const [commentaryOpen, setCommentaryOpen] = useState(false);
   const [ellipticChannel, setEllipticChannel] = useState("fp1");
   const [ellipticStat, setEllipticStat] = useState("std");
   const [ellipticRange, setEllipticRange] = useState({ from: 0, to: 0 });
@@ -331,6 +336,7 @@ export default function SessionResults() {
         const session = sData.session || sData;
         if (session.client_name) setPatientName(session.client_name);
         setSessionId(sessionId);
+        setHasCommentary(Boolean(session.has_active_commentary));
         setFeaturesStatus(session.features_status ?? null);
         setFeaturesError(session.features_error || "");
 
@@ -827,12 +833,27 @@ export default function SessionResults() {
   // ITP2 requirement #6 — downloads the clinical PDF report. The response is a binary blob, not
   // JSON (unlike every other api.js call on this page), so it's handled separately here rather
   // than through the shared load effect above.
+  const needsCommentary = Boolean(sessionId) && !hasCommentary;
+
   const handleGeneratePdf = async () => {
     if (!sessionId || pdfGenerating) return;
+    // The report is printed from the technician's commentary; the backend refuses (409)
+    // without a published one, so point at the editor instead of failing.
+    if (!hasCommentary) {
+      toast.error("Publish the session commentary first — it's printed in the report.");
+      setCommentaryOpen(true);
+      return;
+    }
     setPdfGenerating(true);
     const toastId = toast.loading("Generating PDF report…");
     try {
       const res = await getSessionReportPdf(sessionId);
+      if (res.status === 409) {
+        setHasCommentary(false);
+        toast.error("Publish the session commentary first — it's printed in the report.", { id: toastId });
+        setCommentaryOpen(true);
+        return;
+      }
       if (!res.ok) throw new Error(`Report generation failed (${res.status})`);
       const blob = await res.blob();
       const url = URL.createObjectURL(blob);
@@ -864,9 +885,30 @@ export default function SessionResults() {
         patient={patientName}
         right={
           <div className="flex items-center gap-2">
-            <Button variant="primary" size="sm" onClick={handleGeneratePdf} disabled={pdfGenerating || !sessionId}>
-              {pdfGenerating ? "Generating…" : "Generate PDF"}
+            <Button variant="subtle" size="sm" onClick={() => setCommentaryOpen(true)} disabled={!sessionId}>
+              Commentary
+              <span
+                className={`ml-2 inline-block h-2 w-2 rounded-full ${hasCommentary ? "bg-good" : "bg-warn"}`}
+                aria-label={hasCommentary ? "Published" : "Not published"}
+              />
             </Button>
+            {/* A disabled button swallows hover and click, so the hint lives on a wrapper and the
+                button itself ignores the pointer. */}
+            <span
+              title={needsCommentary ? COMMENTARY_HINT : undefined}
+              onClick={needsCommentary ? () => toast(COMMENTARY_HINT, { icon: "ℹ️" }) : undefined}
+              className={needsCommentary ? "cursor-not-allowed" : undefined}
+            >
+              <Button
+                variant="primary"
+                size="sm"
+                onClick={handleGeneratePdf}
+                disabled={pdfGenerating || !sessionId || needsCommentary}
+                className={needsCommentary ? "pointer-events-none" : ""}
+              >
+                {pdfGenerating ? "Generating…" : "Generate PDF"}
+              </Button>
+            </span>
             <Button variant="ghost" size="sm" onClick={() => router.push("/history")}>Done</Button>
           </div>
         }
@@ -1744,7 +1786,19 @@ export default function SessionResults() {
             )}
           </>
         )}
+
       </div>
+
+      {commentaryOpen && sessionId && (
+        <SessionCommentary
+          sessionId={sessionId}
+          onClose={() => setCommentaryOpen(false)}
+          onPublished={() => {
+            setHasCommentary(true);
+            setCommentaryOpen(false);
+          }}
+        />
+      )}
 
       {selectedEvent != null && events[selectedEvent] && (
         <StimulusModal event={events[selectedEvent]} onClose={() => setSelectedEvent(null)} />

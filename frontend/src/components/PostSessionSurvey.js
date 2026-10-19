@@ -10,7 +10,7 @@ import LikertSurvey, { allAnswered as allSurveyAnswered } from "@/components/Lik
 
 
 // App-chrome strings (not part of the BFI-2 instrument — safe to translate directly;
-// the instrument text lives in LikertSurvey.js). English-fallback per key.
+// the instrument text comes from the questionnaire record). English-fallback per key.
 const UI = {
   title:        { en: "Post-session survey", ms: "Tinjauan selepas sesi", zh: "疗程后问卷" },
   loading:      { en: "Loading survey…", ms: "Memuatkan tinjauan…", zh: "正在加载问卷…" },
@@ -32,7 +32,7 @@ const BFI_CODE = "bfi2";
 const WHO5_CODE = "who5";
 
 /**
- * The BFI-style post-session survey: fetches the active questionnaire, lets
+ * The BFI-2 post-session survey: fetches the BFI-2 questionnaire (by code), lets
  * the technician switch language, and submits answers for `sessionId`.
  *
  * Shared by the standalone /questionare page and the survey step inside the
@@ -47,6 +47,7 @@ const WHO5_CODE = "who5";
  */
 export default function PostSessionSurvey({ sessionId, onSubmitted }) {
   const [language, setLanguage] = useState("en");
+  // { questionnaire_id, options, instructions, ... } from GET /api/questionnaires.
   const [questionnaire, setQuestionnaire] = useState(null);
   const [questions, setQuestions] = useState([]);
   const [answers, setAnswers] = useState({});

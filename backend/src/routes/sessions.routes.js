@@ -1,9 +1,15 @@
 import { Router } from 'express'
 import sessionController from '../controllers/session.controller.js'
+import sessionCommentariesRouter from './sessionCommentaries.routes.js'
+import questionnaireController from '../controllers/questionnaire.controller.js'
 import requirePermission from '../middleware/requirePermission.js'
+import validateRequest from '../middleware/validateRequest.js'
+import { sessionIdValidation } from '../validators/questionnaire.validators.js'
 import PERMS from '../constants/permissions.js'
 
 const router = Router()
+
+router.use('/:session_id/commentaries', sessionCommentariesRouter)
 
 /**
  * @openapi
@@ -456,6 +462,9 @@ router.get(
  *      waveform snapshot, an alpha-band POWER table, per-channel Power-vs-Frequency spectra, and
  *      an absolute band-power table — scoped to our 4 real electrodes (Fp1/Fp2/T3/T4).
  *
+ *      The session must have a published commentary (client requirement); otherwise 409.
+ *      Requires both session and session-commentary read permissions.
+ *
  *      **Note**: The `session_id` must be a valid UUID.
  *    tags: [Sessions]
  *    security:
@@ -471,11 +480,67 @@ router.get(
  *          application/pdf: {}
  *      404:
  *        description: Could not find session with the provided session_id
+ *      409:
+ *        description: The session has no published commentary yet
  */
 router.get(
     '/:session_id/report.pdf',
     requirePermission(PERMS.SESSIONS_READ_OWN_CLINIC),
+    // The report requires (and will later show) the session commentary.
+    requirePermission(PERMS.SESSION_COMMENTARIES_READ_OWN_CLINIC),
     sessionController.getSessionReportPdf
+)
+
+/**
+ * @openapi
+ * /api/sessions/{session_id}/questionnaires:
+ *   get:
+ *     summary: Get a session's questionnaire answers and scores (BFI-2, WHO-5)
+ *     description: |
+ *       Every questionnaire in presentation order, including ones not yet answered
+ *       (`answered_items: 0`, `scores: null`). Scores come from the
+ *       `session_questionnaire_scores` view:
+ *
+ *       - `scores.total`: WHO-5 raw score (0-25) and `percentage_score` (raw x 4).
+ *       - `scores.domains` / `scores.facets`: BFI-2 `mean_score` (1-5) per domain
+ *         (with `domain_name`) and per facet, reverse-keyed items already flipped.
+ *
+ *       Each answer has its `answer_value` and the `item_score` it contributes.
+ *     tags: [Sessions]
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - { in: path, name: session_id, required: true, schema: { type: string, format: uuid } }
+ *     responses:
+ *       200:
+ *         description: The session's questionnaires
+ *         content:
+ *           application/json:
+ *             example:
+ *               - questionnaire_id: "31ed48e7-614d-489b-930f-0143ff11c8e2"
+ *                 code: "who5"
+ *                 name: "WHO-5 Well-being Index"
+ *                 scale_min: 0
+ *                 scale_max: 5
+ *                 expected_items: 5
+ *                 answered_items: 5
+ *                 is_complete: true
+ *                 submitted_at: "2026-10-15T08:00:00.000Z"
+ *                 scores:
+ *                   total: { raw_score: 18, mean_score: 3.6, percentage_score: 72, answered_items: 5, expected_items: 5, is_complete: true }
+ *                   domains: []
+ *                   facets: []
+ *                 answers:
+ *                   - { question_no: 1, answer_value: 4, item_score: 4, domain: null, facet: null, is_reverse_scored: false }
+ *       404:
+ *         description: Session not found
+ */
+router.get(
+    '/:session_id/questionnaires',
+    requirePermission(PERMS.SESSIONS_READ_OWN_CLINIC),
+    sessionIdValidation,
+    validateRequest,
+    questionnaireController.getSessionQuestionnaires
 )
 
 export default router

@@ -1,17 +1,18 @@
 """
 workers/prediction_jobs.py
 
-Runs the current Phase 1 model over completed sessions automatically, writing per
-session valence/arousal predictions. This is the INFERENCE half of Phase 1 — the
-thing that fires when a session finishes. Training (producing the model this serves)
-is a separate, occasional job; see phase1/train.py and the cron in app/main.py.
+Runs each client's current Phase 1 model over their completed sessions
+automatically, writing per session valence/arousal predictions. This is the
+INFERENCE half of Phase 1 — the thing that fires when a session finishes. Training
+(producing the model this serves) is a separate, technician-started job; see
+phase1/train.py.
 
 It follows the exact shape of workers/feature_jobs.py — same 'completed' trigger,
 same atomic claim, same status/stale machinery — for the same reasons documented
-there. The one addition: if NO model has been trained yet, there is nothing to
-serve, so the worker does nothing and leaves sessions unclaimed (predictions_status
-stays NULL) rather than marking them failed. They get picked up on the first tick
-after a model is trained.
+there. The one addition: if a session's client has NO model yet, there is nothing
+to serve, so the worker leaves that session unclaimed (predictions_status stays
+NULL) rather than marking it failed. It gets picked up on the first tick after that
+client's model is trained.
 """
 
 from __future__ import annotations
@@ -22,7 +23,7 @@ import os
 from sqlalchemy import text
 
 from app.database import engine
-from app.data_access import phase1_store, queries
+from app.data_access import phase1_store
 from app.phase1 import inference
 
 log = logging.getLogger(__name__)
@@ -62,17 +63,27 @@ def reclaim_stale(conn) -> int:
     return len(ids)
 
 
-def pending_sessions(conn, limit: int = BATCH) -> list[str]:
-    """Completed recordings that have no predictions yet."""
+def pending_sessions(conn, limit: int = BATCH) -> list[tuple[str, dict]]:
+    """
+    Completed recordings that have no predictions yet AND whose client has a model
+    to run them under, each paired with that model's ml_models row.
+
+    The join is what keeps the queue moving: a session whose client has no model
+    cannot be predicted, and if such sessions were returned they would fill the
+    batch on every tick and starve the ones that can be.
+    """
     rows = conn.execute(text("""
-        SELECT session_id
-        FROM   sessions
-        WHERE  sync_status = 'completed'
-          AND  predictions_status IS NULL
-        ORDER  BY start_time ASC
+        SELECT s.session_id, m.model_version, m.artifact_path
+        FROM   sessions s
+        JOIN   ml_models m ON m.client_id = s.client_id AND m.is_current
+        WHERE  s.sync_status = 'completed'
+          AND  s.predictions_status IS NULL
+        ORDER  BY s.start_time ASC
         LIMIT  :limit
-    """), {"limit": limit}).all()
-    return [str(r[0]) for r in rows]
+    """), {"limit": limit}).mappings().all()
+    return [(str(r["session_id"]),
+             {"model_version": r["model_version"], "artifact_path": r["artifact_path"]})
+            for r in rows]
 
 
 def process_session(session_id: str, model: dict, bundle: dict) -> bool:
@@ -138,30 +149,18 @@ def tick() -> int:
     """
     One poll cycle. Does nothing until a model exists for a session to be run under.
 
-    Each session is predicted with ITS OWN CLIENT'S model when that client has one,
-    falling back to the population model otherwise — so a client with a personal
-    model gets personal predictions automatically on their next recording, rather
-    than waiting for someone to regenerate them by hand.
+    Each session is predicted with ITS OWN CLIENT'S model — so a client with a
+    model gets predictions automatically on their next recording, rather than
+    waiting for someone to regenerate them by hand. A session whose client has no
+    model yet is left unclaimed for a later tick.
     """
     with engine.begin() as conn:
         reclaim_stale(conn)
         todo = pending_sessions(conn)
-        if not todo:
-            return 0
-        # Resolve the owning model per session up front, in one connection.
-        resolved = []
-        for sid in todo:
-            client_id = queries.fetch_session_client(conn, sid)
-            model = phase1_store.current_model_for(conn, client_id)
-            if model is not None:
-                resolved.append((sid, model))
-
-    if not resolved:
-        return 0  # nothing trained yet — leave sessions unclaimed for a later tick
 
     cache: dict = {}
     done = 0
-    for sid, model in resolved:
+    for sid, model in todo:
         bundle = _load_cached(model, cache)
         if bundle is None:
             continue  # artifact unreadable; leave unclaimed and retry next tick
@@ -174,8 +173,8 @@ def predict_sessions_with_model(model: dict, session_ids: list[str]) -> dict:
     """
     Run one specific model over specific sessions, on demand.
 
-    This is the technician-initiated path used straight after a personal model is
-    generated, so their Insights tab has personal predictions without waiting for a
+    This is the technician-initiated path used straight after a client's model is
+    generated, so their Insights tab has predictions without waiting for a
     background pass.
 
     ⚠ Deliberately does NOT touch sessions.predictions_status /
@@ -221,7 +220,7 @@ def requeue(conn, session_ids: list[str] | None = None) -> int:
     """
     Clear predictions_status so sessions are re-inferred on the next tick. With no
     arguments, requeues every completed session — the lever for recomputing all
-    predictions against a newly promoted model. Safe because writes are idempotent
+    predictions against newly trained models. Safe because writes are idempotent
     (replace_session_predictions deletes the (session, model) rows first).
     """
     if session_ids:
@@ -237,3 +236,4 @@ def requeue(conn, session_ids: list[str] | None = None) -> int:
             RETURNING session_id
         """))
     return len(result.all())
+

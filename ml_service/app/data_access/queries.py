@@ -194,7 +194,7 @@ def fetch_labelled_image_events(conn, session_id: str) -> list[dict]:
 #
 # Defaults to 1 — INCLUDE EVERYTHING — deliberately. Every session recorded before the
 # fix is version 1, so defaulting to 2 would drop the training set to zero the moment
-# this deploys and quietly stop the weekly cron producing models at all. Raise it to 2
+# this deploys and quietly leave every client with nothing to train on. Raise it to 2
 # via PHASE1_MIN_TIMELINE_VERSION once enough post-fix sessions have accumulated; the
 # mix is logged on every train so the decision is informed rather than guessed.
 MIN_TIMELINE_VERSION = int(os.getenv("PHASE1_MIN_TIMELINE_VERSION", "1"))
@@ -259,18 +259,6 @@ def fetch_timeline_version_mix(conn, session_ids: list[str]) -> dict:
         GROUP  BY 1 ORDER BY 1
     """), {"ids": session_ids}).mappings().all()
     return {int(r["v"]): int(r["n"]) for r in rows}
-
-
-def fetch_session_client(conn, session_id: str) -> str | None:
-    """
-    Which client a session belongs to, so inference can resolve whose model to
-    serve. NULL client_id is possible on old/unclaimed rows — the caller falls back
-    to the population model in that case.
-    """
-    row = conn.execute(text("""
-        SELECT client_id FROM sessions WHERE session_id = :sid
-    """), {"sid": session_id}).mappings().first()
-    return str(row["client_id"]) if row and row["client_id"] else None
 
 
 # ── eeg_readings (quality gating only) ────────────────────────────────────────
