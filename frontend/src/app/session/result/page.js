@@ -18,6 +18,7 @@ import EegStripChart from "@/components/EegStripChart";
 import TimeSeriesChart from "@/components/TimeSeriesChart";
 import BandProfileChart from "@/components/BandProfileChart";
 import StimulusModal from "@/components/StimulusModal";
+import QuestionnaireResults from "@/components/QuestionnaireResults";
 import SessionCommentary from "@/components/SessionCommentary";
 
 const COMMENTARY_HINT = "Publish the session commentary first — the PDF report can only be generated once it is done.";
@@ -927,6 +928,11 @@ export default function SessionResults() {
             </Pill>
           )}
         </div>
+        
+        {/* BFI-2 and WHO-5 questionnaire results */}
+        {sessionId && (
+          <QuestionnaireResults sessionId={sessionId} />
+        )}
 
         {isLoading ? (
           <Card className="p-16 flex flex-col items-center justify-center gap-3 text-muted">
