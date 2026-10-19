@@ -61,7 +61,8 @@
              Dot/label x:Names are unchanged from the old vertical checklist (DotPgX / TxtPgX) so
              RefreshLiveState's progress logic in MainWindow.xaml.cs did not need to change — only
              SetStep's rendering did (Border+numeral+connecting line instead of a plain Ellipse). -->
-        <Border Grid.Row="1" Style="{StaticResource Card}" Padding="24,16" Margin="0,0,0,12">
+        <StackPanel Grid.Row="1">
+        <Border Style="{StaticResource Card}" Padding="24,16" Margin="0,0,0,12">
             <Grid>
                 <Grid.ColumnDefinitions>
                     <ColumnDefinition Width="Auto"/>
@@ -151,6 +152,31 @@
                 <TextBlock Grid.Row="1" Grid.Column="10" x:Name="TxtPgSurvey" Text="Survey saved" FontSize="12" FontWeight="SemiBold" Opacity="0.55" HorizontalAlignment="Center" Margin="0,7,0,0"/>
             </Grid>
         </Border>
+
+        <!-- Questionnaire scores (BFI-2 domains, WHO-5 well-being), read from the
+             session_questionnaire_scores view once the website starts saving answers. Display-only. -->
+        <Border x:Name="PanelScores" Style="{StaticResource Card}" Padding="24,12" Margin="0,0,0,12" Visibility="Collapsed">
+            <Grid>
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="Auto" MinWidth="230"/>
+                    <ColumnDefinition Width="*"/>
+                </Grid.ColumnDefinitions>
+                <StackPanel Grid.Column="0" Margin="0,0,24,0">
+                    <TextBlock Style="{StaticResource CardTitle}" Text="WHO-5 WELL-BEING"/>
+                    <StackPanel Orientation="Horizontal">
+                        <TextBlock x:Name="TxtWho5Score" Text="—" FontSize="26" FontFamily="Consolas" FontWeight="Bold"/>
+                        <TextBlock x:Name="TxtWho5Raw" Text="" Foreground="{StaticResource Muted2}" FontSize="14" VerticalAlignment="Bottom" Margin="10,0,0,4"/>
+                    </StackPanel>
+                    <TextBlock x:Name="TxtWho5Note" Text="" FontSize="12" FontWeight="SemiBold" Margin="0,2,0,0"/>
+                </StackPanel>
+                <StackPanel Grid.Column="1">
+                    <TextBlock Style="{StaticResource CardTitle}" Text="BFI-2 PERSONALITY (MEAN SCORE, 1–5)"/>
+                    <UniformGrid x:Name="BfiGrid" Columns="5"/>
+                    <TextBlock x:Name="TxtBfiNote" Text="" Foreground="{StaticResource Muted2}" FontSize="12" Margin="0,4,0,0"/>
+                </StackPanel>
+            </Grid>
+        </Border>
+        </StackPanel>
 
         <!-- ══════════════════════════ BODY ══════════════════════════ -->
         <Grid Grid.Row="2">

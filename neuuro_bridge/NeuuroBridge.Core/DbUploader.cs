@@ -74,12 +74,35 @@ namespace NeuuroBridge
         public bool ImagesShown;           // ≥1 image event exists
         public bool QuestionsShown;        // ≥1 math-question event exists
         public bool Ended;                 // sync_status = 'completed'
-        public bool SurveySubmitted;       // ≥1 questionnaire response row exists
+        public bool SurveyStarted;         // ≥1 questionnaire response row exists
+        // Every questionnaire (BFI-2, then WHO-5) fully answered. This, not SurveyStarted, is what
+        // ends the journey: the website submits the questionnaires one after the other.
+        public bool SurveySubmitted;
+        public int AnsweredTotal;          // answered items across all questionnaires (change detection)
+        public List<QuestionnaireScore> Scores;   // total/domain rows of session_questionnaire_scores
         // ≥1 post-math protocol phase event exists (client requirement #3's second baseline
         // block: countdown_post -> baseline2_closed -> countdown_b2 -> baseline2_open). Lets the
         // stepper show "Baseline 2" as active instead of jumping straight from Math to Done —
         // see db/migrations/016_session_phase_markers.sql for the phase vocabulary.
         public bool Baseline2Shown;
+    }
+
+    /// <summary>
+    /// One row of the session_questionnaire_scores view (migration 024), display-only. WHO-5 has a
+    /// single "total" row (RawScore 0-25, PercentageScore = raw x 4); BFI-2 has a "domain" row per
+    /// domain E/A/C/N/O with a MeanScore of 1-5.
+    /// </summary>
+    public struct QuestionnaireScore
+    {
+        public string Code;             // "bfi2" | "who5"
+        public string Level;            // "total" | "domain"
+        public string Domain;           // BFI-2 domain letter, null for totals
+        public int RawScore;
+        public decimal MeanScore;
+        public decimal PercentageScore;
+        public int AnsweredItems;
+        public int ExpectedItems;
+        public bool IsComplete;
     }
 
     /// <summary>
@@ -545,17 +568,77 @@ namespace NeuuroBridge
                             p.RecordingConfirmed = rd.GetBoolean(1);
                             p.ImagesShown = rd.GetBoolean(2);
                             p.QuestionsShown = rd.GetBoolean(3);
-                            p.SurveySubmitted = rd.GetBoolean(4);
+                            p.SurveyStarted = rd.GetBoolean(4);
+                            p.SurveySubmitted = p.SurveyStarted;   // refined below by the per-questionnaire read
                             p.Baseline2Shown = rd.GetBoolean(5);
                             p.Claimed = p.SyncStatus == "claimed" || p.SyncStatus == "recording" || p.SyncStatus == "completed";
                             p.Ended = p.SyncStatus == "completed";
                             p.Known = true;
                         }
                     }
+
+                    // Questionnaire completion and scores are best-effort extras: if this read fails
+                    // (e.g. migration 024 grants not applied yet) the checklist keeps working.
+                    if (p.Known && p.SurveyStarted)
+                    {
+                        try { ReadQuestionnaireScores(conn, sessionId, ref p); }
+                        catch { /* keep SurveySubmitted = SurveyStarted, no scores */ }
+                    }
                 }
             }
             catch { /* advisory only — a failed read means "unknown this tick" */ }
             return p;
+        }
+
+        // SurveySubmitted = every questionnaire has all of its items answered; Scores = the total and
+        // domain rows (facets are website-only detail). Same connection as TryReadProgress.
+        private static void ReadQuestionnaireScores(NpgsqlConnection conn, Guid sessionId, ref SessionProgress p)
+        {
+            int questionnaires = 0, complete = 0, answeredTotal = 0;
+            using (var cmd = new NpgsqlCommand(
+                "SELECT (SELECT COUNT(*) FROM questionnaire_questions qq WHERE qq.questionnaire_id = q.questionnaire_id), " +
+                "(SELECT COUNT(*) FROM session_questionnaire_responses r " +
+                " WHERE r.session_id = @sid AND r.questionnaire_id = q.questionnaire_id) " +
+                "FROM questionnaires q", conn))
+            {
+                cmd.Parameters.AddWithValue("sid", NpgsqlDbType.Uuid, sessionId);
+                using (var rd = cmd.ExecuteReader())
+                    while (rd.Read())
+                    {
+                        long expected = rd.GetInt64(0), answered = rd.GetInt64(1);
+                        questionnaires++;
+                        answeredTotal += (int)answered;
+                        if (expected > 0 && answered >= expected) complete++;
+                    }
+            }
+            p.AnsweredTotal = answeredTotal;
+            p.SurveySubmitted = questionnaires > 0 && complete == questionnaires;
+
+            var scores = new List<QuestionnaireScore>();
+            using (var cmd = new NpgsqlCommand(
+                "SELECT questionnaire_code, score_level, domain, raw_score, mean_score, percentage_score, " +
+                "answered_items, expected_items, is_complete " +
+                "FROM session_questionnaire_scores " +
+                "WHERE session_id = @sid AND score_level IN ('total','domain') " +
+                "ORDER BY questionnaire_code, domain", conn))
+            {
+                cmd.Parameters.AddWithValue("sid", NpgsqlDbType.Uuid, sessionId);
+                using (var rd = cmd.ExecuteReader())
+                    while (rd.Read())
+                        scores.Add(new QuestionnaireScore
+                        {
+                            Code = rd.GetString(0),
+                            Level = rd.GetString(1),
+                            Domain = rd.IsDBNull(2) ? null : rd.GetString(2),
+                            RawScore = rd.GetInt32(3),
+                            MeanScore = rd.GetDecimal(4),
+                            PercentageScore = rd.GetDecimal(5),
+                            AnsweredItems = rd.GetInt32(6),
+                            ExpectedItems = rd.GetInt32(7),
+                            IsComplete = rd.GetBoolean(8)
+                        });
+            }
+            p.Scores = scores;
         }
 
         /// <summary>
