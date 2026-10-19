@@ -216,6 +216,14 @@ export async function getSession(sessionId) {
   const res = await fetchWithAuth(`${BASE_URL}/sessions/${sessionId}`);
   return res;
 }
+
+export async function getSessionQuestionnaires(sessionId) {
+  const res = await fetchWithAuth(
+    `${BASE_URL}/sessions/${encodeURIComponent(sessionId)}/questionnaires`
+  );
+  return res;
+}
+
 export async function pairSession(pairingCode, clientId) {
   const res = await fetchWithAuth(`${BASE_URL}/sessions/pair`, {
     method: "PATCH",

@@ -1,5 +1,5 @@
 "use client";
-import { useState, useEffect } from "react";
+import { useState, useEffect, useRef  } from "react";
 import {
   getQuestionnaires,
   getQuestionnaireQuestions,
@@ -47,7 +47,6 @@ const WHO5_CODE = "who5";
  */
 export default function PostSessionSurvey({ sessionId, onSubmitted }) {
   const [language, setLanguage] = useState("en");
-  const [questionnaireId, setQuestionnaireId] = useState("");
   const [questionnaire, setQuestionnaire] = useState(null);
   const [questions, setQuestions] = useState([]);
   const [answers, setAnswers] = useState({});
@@ -61,6 +60,19 @@ export default function PostSessionSurvey({ sessionId, onSubmitted }) {
   const [who5Questions, setWho5Questions] = useState([]);
   const [who5Answers, setWho5Answers] = useState({});
   const [step, setStep] = useState("bfi");
+
+  // Move to top when moving to next step
+  const surveyTopRef = useRef(null);
+
+  useEffect(() => {
+    if (step === "who5") {
+      surveyTopRef.current?.scrollIntoView({
+        behavior: "smooth",
+        block: "start",
+      });
+    }
+  }, [step]);
+
 
   // Fetch once. The API returns every language's statement text in one payload
   // (the backend defaults to all languages when none is requested), so switching
@@ -96,7 +108,6 @@ export default function PostSessionSurvey({ sessionId, onSubmitted }) {
         }
 
         // Save BFI metadata and load existing questions
-        setQuestionnaireId(bfi.questionnaire_id);
         setQuestionnaire(bfi);
         await fetchQuestionsForSurvey(bfi.questionnaire_id);
 
@@ -255,7 +266,10 @@ const ready =
           )}
 
           {/*Current questionnaire indicator */}
-          <p className="mb-5 text-sm font-semibold text-accent">
+          <p
+            ref={surveyTopRef}
+            className="mb-5 text-sm font-semibold text-accent"
+          >
             {tr(
               isWho5 ? "stepWho5" : "stepBfi",
               language

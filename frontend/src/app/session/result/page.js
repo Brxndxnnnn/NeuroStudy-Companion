@@ -18,6 +18,7 @@ import EegStripChart from "@/components/EegStripChart";
 import TimeSeriesChart from "@/components/TimeSeriesChart";
 import BandProfileChart from "@/components/BandProfileChart";
 import StimulusModal from "@/components/StimulusModal";
+import QuestionnaireResults from "@/components/QuestionnaireResults";
 
 const CHANNELS = [
   { key: "fp1_left_front", prefix: "fp1", label: "Fp1", color: "--ch-fp1" },
@@ -885,6 +886,11 @@ export default function SessionResults() {
             </Pill>
           )}
         </div>
+        
+        {/* BFI-2 and WHO-5 questionnaire results */}
+        {sessionId && (
+          <QuestionnaireResults sessionId={sessionId} />
+        )}
 
         {isLoading ? (
           <Card className="p-16 flex flex-col items-center justify-center gap-3 text-muted">
