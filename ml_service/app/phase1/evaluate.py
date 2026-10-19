@@ -34,10 +34,10 @@ from dataclasses import dataclass
 
 import numpy as np
 from sklearn.base import clone
-from sklearn.ensemble import RandomForestRegressor
-from sklearn.linear_model import Ridge
 from sklearn.model_selection import GroupKFold, KFold
 from sklearn.metrics import mean_absolute_error, r2_score
+
+from app.phase1 import models
 
 TARGETS = ("valence", "arousal")
 
@@ -74,17 +74,10 @@ class Result:
 
 def make_models() -> dict:
     """
-    Classical models only. With a few hundred distinct images (and, under the
-    client's fixed-24 protocol, possibly only 24 distinct LABELS), a deep network
-    has orders of magnitude more capacity than the data can constrain — it would
-    memorise, and the grouped CV would simply report that it had.
+    Every model that can be built here, by name. The algorithms themselves live in
+    phase1/models.py — that is the place to add or retune one.
     """
-    return {
-        "ridge": Ridge(alpha=1.0),
-        "random_forest": RandomForestRegressor(
-            n_estimators=300, min_samples_leaf=2, random_state=0, n_jobs=-1,
-        ),
-    }
+    return models.make_models()
 
 
 def _per_session_zscore(
@@ -212,7 +205,7 @@ def demonstrate_leakage(
     it is the most persuasive argument available for why the grouped split is not
     negotiable, and it is far more convincing than the assertion.
     """
-    model = model or Ridge(alpha=1.0)
+    model = model or models.build("ridge")
     honest = cross_validate(X, y, groups, sessions, model, model_name, grouped=True)
     leaky = cross_validate(X, y, groups, sessions, model, model_name, grouped=False)
     return honest, leaky

@@ -20,7 +20,7 @@ import joblib
 import numpy as np
 
 from app.core.config import settings
-from app.phase1 import evaluate
+from app.phase1 import evaluate, models
 from app.phase1.config import DEFAULT, Phase1Config
 from app.phase1.dataset import build_dataset
 from app.phase1.features import feature_names
@@ -28,8 +28,10 @@ from app.data_access import phase1_store, queries
 
 log = logging.getLogger(__name__)
 
-# Which model to serve. Ridge is the sane default at this data scale; override with
-# PHASE1_MODEL=random_forest if wanted.
+# Which model a train fits and serves. Ridge is the sane default at this data scale;
+# set PHASE1_MODEL to any name in phase1/models.py (random_forest, svm, xgboost, mlp)
+# to change it. Only NEW trains are affected — a client keeps the model they already
+# have until they are retrained.
 DEFAULT_ALGO = os.getenv("PHASE1_MODEL", "ridge")
 
 # Minimum distinct images before a retrain is worth doing at all. Below 2 there is
@@ -198,9 +200,9 @@ def train_and_save(
         )
         return None
 
-    if algo not in evaluate.make_models():
-        raise ValueError(f"Unknown model '{algo}'. Choices: "
-                         f"{list(evaluate.make_models())}")
+    # Fail before the CV rather than after it: an unknown name, or one whose library
+    # is not installed, raises here.
+    model = models.build(algo)
 
     # Honest generalisation score, when there are enough images to hold some out.
     # GroupKFold needs n_splits <= n_distinct_images, so clamp it — otherwise a
@@ -209,7 +211,7 @@ def train_and_save(
         n_splits = min(5, n_images)
         res = evaluate.cross_validate(
             X, y, groups, sessions,
-            evaluate.make_models()[algo], algo,
+            model, algo,
             n_splits=n_splits, grouped=True,
         )
         cv = {"r2": res.r2, "mae": res.mae}
@@ -219,8 +221,8 @@ def train_and_save(
 
     # Final model: fit on everything, using the same per-session normalisation the
     # CV used (and that inference will apply to a new session against itself).
+    # cross_validate() only ever fitted clones, so `model` is still unfitted here.
     Xn = evaluate.per_session_zscore(X, sessions)
-    model = evaluate.make_models()[algo]
     model.fit(Xn, y)
 
     bundle = {

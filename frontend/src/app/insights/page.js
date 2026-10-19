@@ -190,6 +190,15 @@ function modelVerdict(m) {
   return { tone: "warn", text: "This model does not yet predict better than simply guessing the average rating." };
 }
 
+/* Display names for ml_models.algo — the keys of ml_service/app/phase1/models.py. */
+const ALGO_LABELS = {
+  ridge: "Ridge regression",
+  random_forest: "Random forest",
+  svm: "Support vector machine",
+  xgboost: "XGBoost",
+  mlp: "Neural network (MLP)",
+};
+
 /* The trained-model metric grid + accuracy panel + verdict. */
 function ModelMetrics({ model }) {
   const verdict = modelVerdict(model);
@@ -198,7 +207,7 @@ function ModelMetrics({ model }) {
       <div className="grid grid-cols-2 gap-x-6 gap-y-4 sm:grid-cols-3">
         <Metric
           label="Algorithm"
-          value={model.algo === "ridge" ? "Ridge regression" : model.algo === "random_forest" ? "Random forest" : model.algo}
+          value={ALGO_LABELS[model.algo] ?? model.algo}
           hint="Chosen for small datasets"
         />
         {/* The regression's SAMPLE SIZE — not a count of what survived from any one

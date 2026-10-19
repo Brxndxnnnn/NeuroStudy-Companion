@@ -17,6 +17,10 @@ pandas
 # ── Machine learning ───────────────────────────────────────────────────────────
 scikit-learn
 joblib
+# xgboost-cpu is the same library (still `import xgboost`) without the ~300 MB of
+# NVIDIA GPU packages the plain Linux wheel pulls in. It has no macOS build.
+xgboost-cpu; sys_platform != "darwin"
+xgboost; sys_platform == "darwin"
 
 # ── Scheduling (periodic retraining) ──────────────────────────────────────────
 apscheduler

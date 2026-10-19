@@ -267,7 +267,11 @@ extraction by hand.
 
 ### Training (`ml_service/app/phase1/train.py`)
 
-- Default algorithm `ridge` (`PHASE1_MODEL`); alternatives in `evaluate.make_models()`.
+- Default algorithm `ridge` (`PHASE1_MODEL`). Every algorithm is registered in
+  `phase1/models.py`: `ridge` (baseline), `random_forest` / `svm` / `xgboost` (Tier 1),
+  `mlp` (Tier 2). Changing `PHASE1_MODEL` affects new trains only — a client keeps
+  their existing model until retrained. `cnn_lstm` is not implemented: it needs the raw
+  epoch signal rather than the feature vector.
 - **Sample size is the number of distinct images, not epochs or sessions.** Repeat
   sessions over the same set add repeated measurements of the same labels.
 - Cross-validation is **grouped by image** so the same image cannot appear in both
