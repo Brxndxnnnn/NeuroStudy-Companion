@@ -526,6 +526,71 @@ namespace NeuuroBridge.Wpf
                 pg.Ended ? StepState.Done : pg.Baseline2Shown ? StepState.Active : StepState.Pending);
             SetStep(DotPgSurvey, NumPgSurvey, TxtPgSurvey, null,
                 pg.SurveySubmitted ? StepState.Done : pg.Ended ? StepState.Active : StepState.Pending);
+
+            RefreshQuestionnaireScores(pg);
+        }
+
+        // WHO's screening cut-off: a percentage score below 50 (raw below 13) suggests poor well-being.
+        private const decimal Who5LowPercent = 50m;
+        private static readonly string[] BfiDomainOrder = { "E", "A", "C", "N", "O" };
+        private static readonly Dictionary<string, string> BfiDomainNames = new Dictionary<string, string>
+        {
+            { "E", "Extraversion" }, { "A", "Agreeableness" }, { "C", "Conscientiousness" },
+            { "N", "Neg. Emotionality" }, { "O", "Open-Mindedness" }
+        };
+
+        // Shows the scores panel once any questionnaire has been saved; the numbers fill in as the
+        // website submits BFI-2 and then WHO-5.
+        private void RefreshQuestionnaireScores(SessionProgress pg)
+        {
+            var scores = pg.Scores;
+            if (!pg.SurveyStarted || scores == null)
+            {
+                PanelScores.Visibility = Visibility.Collapsed;
+                return;
+            }
+            PanelScores.Visibility = Visibility.Visible;
+
+            var who5 = scores.Find(s => s.Code == "who5" && s.Level == "total");
+            if (who5.Code == null)
+            {
+                TxtWho5Score.Text = "—";
+                TxtWho5Raw.Text = "";
+                TxtWho5Note.Text = "waiting for the WHO-5 answers";
+                TxtWho5Note.Foreground = (Brush)FindResource("Muted2");
+            }
+            else
+            {
+                TxtWho5Score.Text = who5.PercentageScore.ToString("0.#") + " / 100";
+                TxtWho5Raw.Text = "raw " + who5.RawScore + " / 25";
+                bool low = who5.PercentageScore < Who5LowPercent;
+                TxtWho5Note.Text = who5.IsComplete
+                    ? (low ? "Low well-being (below 50)" : "Within normal range")
+                    : "partial: " + who5.AnsweredItems + " of " + who5.ExpectedItems + " items";
+                TxtWho5Note.Foreground = (Brush)FindResource(!who5.IsComplete ? "Warn" : low ? "Warn" : "Good");
+            }
+
+            BfiGrid.Children.Clear();
+            bool anyBfi = false, bfiPartial = false;
+            foreach (var d in BfiDomainOrder)
+            {
+                var row = scores.Find(s => s.Code == "bfi2" && s.Level == "domain" && s.Domain == d);
+                if (row.Code != null) { anyBfi = true; if (!row.IsComplete) bfiPartial = true; }
+                var cell = new StackPanel { Margin = new Thickness(0, 0, 8, 0) };
+                cell.Children.Add(new TextBlock
+                {
+                    Text = row.Code == null ? "—" : row.MeanScore.ToString("0.00"),
+                    FontSize = 20, FontFamily = new FontFamily("Consolas"), FontWeight = FontWeights.Bold
+                });
+                cell.Children.Add(new TextBlock
+                {
+                    Text = BfiDomainNames[d], FontSize = 11, Foreground = (Brush)FindResource("Muted2"),
+                    TextTrimming = TextTrimming.CharacterEllipsis
+                });
+                BfiGrid.Children.Add(cell);
+            }
+            TxtBfiNote.Text = !anyBfi ? "waiting for the BFI-2 answers"
+                : bfiPartial ? "partial: some BFI-2 items are still unanswered" : "";
         }
 
         private enum StepState { Pending, Active, Done }
@@ -575,6 +640,7 @@ namespace NeuuroBridge.Wpf
             SetStep(DotPgMath, NumPgMath, TxtPgMath, LinePgMath, StepState.Pending);
             SetStep(DotPgEnd, NumPgEnd, TxtPgEnd, LinePgEnd, StepState.Pending);
             SetStep(DotPgSurvey, NumPgSurvey, TxtPgSurvey, null, StepState.Pending);
+            PanelScores.Visibility = Visibility.Collapsed;
         }
 
         private void RefreshDeviceList()

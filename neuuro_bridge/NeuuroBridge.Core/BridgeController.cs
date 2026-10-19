@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Collections.Generic;
 using System.Globalization;
 using System.IO;
@@ -707,14 +707,16 @@ namespace NeuuroBridge
                 Progress = p;
                 if (old.Claimed != p.Claimed || old.RecordingConfirmed != p.RecordingConfirmed ||
                     old.ImagesShown != p.ImagesShown || old.QuestionsShown != p.QuestionsShown ||
-                    old.Ended != p.Ended || old.SurveySubmitted != p.SurveySubmitted)
+                    old.Ended != p.Ended || old.SurveySubmitted != p.SurveySubmitted ||
+                    old.AnsweredTotal != p.AnsweredTotal)
                 {
                     if (!old.Claimed && p.Claimed) Log?.Invoke("[progress] paired with website");
                     if (!old.RecordingConfirmed && p.RecordingConfirmed) Log?.Invoke("[progress] recording confirmed to website");
                     if (!old.ImagesShown && p.ImagesShown) Log?.Invoke("[progress] website is showing images");
                     if (!old.QuestionsShown && p.QuestionsShown) Log?.Invoke("[progress] website is showing math questions");
                     if (!old.Ended && p.Ended) Log?.Invoke("[progress] session ended on website");
-                    if (!old.SurveySubmitted && p.SurveySubmitted) Log?.Invoke("[progress] survey submitted — responses stored in DB");
+                    if (old.AnsweredTotal != p.AnsweredTotal && !p.SurveySubmitted) Log?.Invoke("[progress] questionnaire answers received (" + p.AnsweredTotal + " items so far)");
+                    if (!old.SurveySubmitted && p.SurveySubmitted) Log?.Invoke("[progress] all questionnaires submitted — scores read from DB");
                     ProgressChanged?.Invoke();
                 }
                 if (p.Ended && p.SurveySubmitted)
