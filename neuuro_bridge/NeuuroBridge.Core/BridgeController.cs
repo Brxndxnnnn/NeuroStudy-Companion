@@ -372,7 +372,7 @@ namespace NeuuroBridge
                 _streaming = false;
                 SessionActive = false;
                 StopSyncPoll();
-                StopProgressPoll();
+                StopProgressPollUnlessSurveyPending();
                 StopSummaryPoll();
                 StopEventsPoll();
                 // The link is gone; drop the parameter request so Windows is not holding a fast
@@ -425,7 +425,7 @@ namespace NeuuroBridge
             StopSession();
             if (_draining) FinalizeStop();   // device is going away — don't wait out the rest of the drain window
             StopSyncPoll();          // StopSession only stops it if recording; stop here for the preview-only case
-            StopProgressPoll();      // progress tracking ends with the connection, not the recording
+            StopProgressPollUnlessSurveyPending();   // see there: the survey outlives the BLE link
             StopSummaryPoll();
             StopEventsPoll();
             StopStreaming();
@@ -472,6 +472,8 @@ namespace NeuuroBridge
             _prepared = true;
             _recordingConfirmed = false;
             _recordingAnnounced = false;
+            // A new session replaces whatever survey a previous disconnected one was still waiting on.
+            if (KeepsTrackingAfterDisconnect) StopProgressPoll();
             GenerateSession(_connAddress);   // local + instant: session_id + pairing code + created time
             SetSyncStatus("unclaimed");      // optimistic; the poll confirms/updates from the DB
             Progress = default(SessionProgress);   // fresh session — clear the last session's checklist
@@ -693,6 +695,35 @@ namespace NeuuroBridge
         {
             try { _progressPoll?.Dispose(); } catch { /* ignore */ }
             _progressPoll = null;
+            KeepsTrackingAfterDisconnect = false;
+        }
+
+        // How long after a disconnect the progress poll keeps waiting for the questionnaires.
+        private static readonly TimeSpan SurveyWaitAfterDisconnect = TimeSpan.FromMinutes(30);
+        private DateTime _surveyWaitUntilUtc;
+
+        /// <summary>True while the bridge is still watching the database for the technician's
+        /// questionnaires even though the band has disconnected (see
+        /// <see cref="StopProgressPollUnlessSurveyPending"/>). The UI keeps the checklist and the scores
+        /// panel on screen instead of clearing them.</summary>
+        public bool KeepsTrackingAfterDisconnect { get; private set; }
+
+        // The band can drop (idle timeout, reconnect budget spent) while the technician is still
+        // answering the website's questionnaires, which happens after recording ends. The questionnaire
+        // progress and scores come from the database, not the band, so a claimed session whose survey
+        // isn't finished keeps its poll for a while; it stops itself once everything is answered, after
+        // the wait above, or when the next session is prepared.
+        private void StopProgressPollUnlessSurveyPending()
+        {
+            var p = Progress;
+            if (_progressPoll != null && p.Claimed && !p.SurveySubmitted)
+            {
+                KeepsTrackingAfterDisconnect = true;
+                _surveyWaitUntilUtc = DateTime.UtcNow + SurveyWaitAfterDisconnect;
+                Log?.Invoke("[progress] band disconnected — still watching the database for the questionnaires");
+                return;
+            }
+            StopProgressPoll();
         }
 
         private void PollProgress()
@@ -718,6 +749,12 @@ namespace NeuuroBridge
                     if (old.AnsweredTotal != p.AnsweredTotal && !p.SurveySubmitted) Log?.Invoke("[progress] questionnaire answers received (" + p.AnsweredTotal + " items so far)");
                     if (!old.SurveySubmitted && p.SurveySubmitted) Log?.Invoke("[progress] all questionnaires submitted — scores read from DB");
                     ProgressChanged?.Invoke();
+                }
+                if (KeepsTrackingAfterDisconnect && DateTime.UtcNow > _surveyWaitUntilUtc)
+                {
+                    Log?.Invoke("[progress] gave up waiting for the questionnaires after the band disconnected");
+                    StopProgressPoll();
+                    return;
                 }
                 if (p.Ended && p.SurveySubmitted)
                 {
