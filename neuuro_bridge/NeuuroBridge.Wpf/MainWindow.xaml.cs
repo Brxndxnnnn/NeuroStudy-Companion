@@ -24,7 +24,7 @@ namespace NeuuroBridge.Wpf
 
         private bool _logOpen;
 
-        // Persists the in-app log to disk alongside the SDK's own numbered log files, so things
+        // Persists the in-app log to disk (BridgeLogs.Directory, outside the install folder), so things
         // like BleConnectionTuner's "was the faster interval actually granted?" outcome survive
         // past the session instead of only ever existing in the (never-saved) on-screen log box.
         // Readable timestamp filename, unlike the SDK's raw-tick names, for easy eyeballing side by
@@ -50,6 +50,7 @@ namespace NeuuroBridge.Wpf
             // Controller events marshal to whatever thread is current at Initialize() — the UI
             // thread here — but guard with Ui() anyway in case a callback slips in off-thread.
             _ctl.Log += m => Ui(() => AppendLog(m));
+            App.RecoveredError += m => Ui(() => AppendLog(m));
             _ctl.Initialized += () => Ui(() => { Log("SDK initialized."); BtnScan.IsEnabled = true; });
             _ctl.DevicesChanged += () => Ui(RefreshDeviceList);
             _ctl.Connected += (addr, id) => Ui(() => OnConnected(addr, id));
@@ -255,6 +256,16 @@ namespace NeuuroBridge.Wpf
                 e.Cancel = true;
                 return;
             }
+            var db = _ctl.Db;
+            if (db != null && db.IsFinishingUpload &&
+                MessageBox.Show($"{db.UnsentEegFrames} s of EEG from the last session has not reached the database yet " +
+                                "(it is still retrying). Exiting now loses it. Exit anyway?", "Exit",
+                    MessageBoxButton.YesNo, MessageBoxImage.Warning) != MessageBoxResult.Yes)
+            {
+                e.Cancel = true;
+                return;
+            }
+            KeepAwake(false);
             try { _ctl.Dispose(); } catch { }
             try { _logFile?.Dispose(); } catch { }
         }
@@ -382,6 +393,9 @@ namespace NeuuroBridge.Wpf
         // ── Periodic refresh ─────────────────────────────────────────────────
         private void RefreshLiveState()
         {
+            RefreshLinkHealth();
+            KeepAwake(IsBusy);
+
             // Recording indicator + elapsed (blink the dot for a "live" feel).
             if (_ctl.SessionActive)
             {
@@ -409,11 +423,24 @@ namespace NeuuroBridge.Wpf
             }
             else
             {
-                if (!_ctl.SessionActive)
+                // EEG queued beyond a few seconds means the DB is not taking it right now. It is kept
+                // and retried (see DbUploader's Flush notes), so say that rather than "streaming".
+                int backlog = db.UnsentEegFrames;
+                if (db.IsFinishingUpload)
+                {
+                    TxtDbState.Text = $"DB unreachable — {backlog} s of EEG still to upload, retrying. Keep the bridge open.";
+                    TxtDbState.Foreground = Bad;
+                }
+                else if (!_ctl.SessionActive)
                 {
                     // Prepared on connect but not recording yet vs. after a stop.
                     TxtDbState.Text = db.RawRowsSent > 0 ? "stopped" : "ready — not recording";
                     TxtDbState.Foreground = Mut;
+                }
+                else if (backlog > DbBacklogWarnFrames)
+                {
+                    TxtDbState.Text = $"DB unreachable — {backlog} s of EEG queued (kept, retrying)";
+                    TxtDbState.Foreground = Warn;
                 }
                 else { TxtDbState.Text = db.ClockAnchored ? "clock-synced — streaming" : "NOT connected"; TxtDbState.Foreground = db.ClockAnchored ? Good : Bad; }
                 TxtRawRows.Text = db.RawRowsSent.ToString("N0");
@@ -482,6 +509,10 @@ namespace NeuuroBridge.Wpf
             }
             TxtSignal.Text = s.SignalReady == null ? "(no data)" : s.SignalReady.Value ? "READY" : "settling…";
             TxtBattery.Text = s.Battery == null ? "(no data)" : s.Battery + "%";
+            int? battery = _ctl.BatteryPercent;
+            TxtBattery.Foreground = battery <= BridgeController.BatteryCriticalPercent ? Bad
+                                  : battery <= BridgeController.BatteryLowPercent ? Warn
+                                  : (Brush)FindResource("Ink");
             LivePanel.SetVitals(s.HeartRate, s.Spo2);
 
             var rows = new List<string>();
@@ -687,9 +718,8 @@ namespace NeuuroBridge.Wpf
         {
             try
             {
-                string dir = System.IO.Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "logs");
-                Directory.CreateDirectory(dir);
-                string path = System.IO.Path.Combine(dir, $"bridge_{DateTime.Now:yyyyMMdd_HHmmss}.txt");
+                // Outside the install folder so updates don't wipe it (see BridgeLogs).
+                string path = System.IO.Path.Combine(BridgeLogs.Directory, $"bridge_{DateTime.Now:yyyyMMdd_HHmmss}.txt");
                 _logFile = new StreamWriter(path, append: true) { AutoFlush = true };
             }
             catch { _logFile = null; /* in-app log box still works without it */ }
@@ -709,6 +739,58 @@ namespace NeuuroBridge.Wpf
 
         // Status indicators are always a coloured dot + a label, set together — keep them in sync.
         private void SetConn(string text, Brush dot) { ConnPill.Text = text; ConnDot.Fill = dot; }
+
+        // ── Link health on the connection pill ───────────────────────────────
+        // The pill is set by the connect/disconnect events; these two conditions are ongoing, so the
+        // refresh tick keeps them current and hands the pill back to "Connected" once they clear.
+        private bool _linkWarningShown;
+
+        private void RefreshLinkHealth()
+        {
+            if (_ctl.IsReconnecting)
+            {
+                int secs = (int)_ctl.ReconnectElapsed.TotalSeconds;
+                SetConn(_ctl.SessionActive
+                    ? $"Band lost — reconnecting ({secs} s), recording kept open"
+                    : $"Band lost — reconnecting ({secs} s)", Warn);
+                _linkWarningShown = true;
+            }
+            else if (_ctl.EegStalledSeconds > 0)
+            {
+                SetConn($"Connected — no EEG for {(int)_ctl.EegStalledSeconds} s", Warn);
+                _linkWarningShown = true;
+            }
+            else if (_linkWarningShown)
+            {
+                _linkWarningShown = false;
+                if (_ctl.IsConnected) SetConn("Connected", Good);
+            }
+        }
+
+        // ── Keep Windows awake while the bridge is working ───────────────────
+        // Sleep mid-session takes the Bluetooth radio and the network down with it. While busy, ask
+        // Windows not to sleep (the display may still turn off). The request belongs to the calling
+        // thread, which is why it is always made from the UI thread's refresh tick.
+        [System.Runtime.InteropServices.DllImport("kernel32.dll")]
+        private static extern uint SetThreadExecutionState(uint esFlags);
+        private const uint EsContinuous = 0x80000000, EsSystemRequired = 0x00000001;
+        private bool _keepingAwake;
+
+        private void KeepAwake(bool on)
+        {
+            if (on == _keepingAwake) return;
+            _keepingAwake = on;
+            SetThreadExecutionState(on ? EsContinuous | EsSystemRequired : EsContinuous);
+        }
+
+        /// <summary>True while a band is connected or reconnecting, a session is recording, or EEG is
+        /// still being uploaded — the bridge must not sleep, update or close quietly then.</summary>
+        internal bool IsBusy =>
+            _ctl.IsConnected || _ctl.IsReconnecting || _ctl.SessionActive || (_ctl.Db?.IsFinishingUpload ?? false);
+
+        // Above this many queued seconds of EEG while recording, the DB card says the DB is not
+        // keeping up instead of "streaming" (a couple of seconds is normal flush batching).
+        private const int DbBacklogWarnFrames = 5;
         private void SetAuth(string text, Brush dot) { TxtAuth.Text = text; AuthDot.Fill = dot; }
 
         // While connected but not yet claimed by the website, show the "waiting to pair" hint, and

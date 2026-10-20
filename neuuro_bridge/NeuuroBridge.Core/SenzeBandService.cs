@@ -78,10 +78,34 @@ namespace NeuuroBridge
         private readonly Stopwatch _reconnectClock = new Stopwatch();
         private const int ReconnectBudgetMs = 60_000;   // give up after ~60 s of a missing band
         private const int ReconnectDelayMs = 1500;      // backoff between reconnect attempts
+        private const int ReconnectLogEveryMs = 30_000; // past the budget, log progress this often (not every attempt)
+        private long _lastReconnectLogMs;
+
+        /// <summary>
+        /// While true, a dropped link is retried for as long as it takes instead of giving up after
+        /// <see cref="ReconnectBudgetMs"/>. The controller sets it while a recording is in progress: a
+        /// band that is switched off or out of range for a minute should not end the session behind the
+        /// technician's back — the gap is recorded honestly, and the technician (or the website ending
+        /// the session) decides when it is over. Read on every attempt, so clearing it mid-outage lets
+        /// the ordinary budget apply from then on.
+        /// </summary>
+        public volatile bool KeepReconnecting;
+
+        // ── Authentication retry ────────────────────────────────────────────
+        // Raw EEG stays locked until Neeuro's servers approve the device, and that round trip happens
+        // on every (re)connect. A failed or timed-out attempt used to wait for the next MCU report or a
+        // manual Re-auth — after a mid-session reconnect that meant the rest of the recording was lost.
+        private static readonly int[] AuthRetryDelaysMs = { 2000, 5000, 10000, 20000, 30000 };   // last repeats
+        private int _authFailures;
+        private Timer _authRetryTimer;
 
         public bool IsConnected => !string.IsNullOrEmpty(_connectedAddress);
         public bool IsInitialized => _initialized;
         public bool IsAuthenticated => _isAuthenticated;
+        /// <summary>True while a dropped link is being recovered.</summary>
+        public bool IsReconnecting => _reconnecting;
+        /// <summary>How long the current link recovery has been running (zero when not reconnecting).</summary>
+        public TimeSpan ReconnectElapsed => _reconnecting ? _reconnectClock.Elapsed : TimeSpan.Zero;
 
         // ── Events ──────────────────────────────────────────────────────────
         public event Action OnInitialized;
@@ -183,7 +207,31 @@ namespace NeuuroBridge
             _mcuId = null;
             _authAttempted = false;
             _isAuthenticated = false;
+            CancelAuthRetry();
             try { DeviceAuthentication.instance.OnDisconnect(); } catch { /* ignore */ }
+        }
+
+        private void CancelAuthRetry()
+        {
+            _authFailures = 0;
+            var t = _authRetryTimer; _authRetryTimer = null;
+            try { t?.Dispose(); } catch { }
+        }
+
+        // Called after a failed or timed-out authentication: try again with backoff for as long as
+        // the band stays connected. A success, disconnect or new connection cancels it.
+        private void ScheduleAuthRetry()
+        {
+            if (!IsConnected) return;
+            int delay = AuthRetryDelaysMs[Math.Min(_authFailures, AuthRetryDelaysMs.Length - 1)];
+            _authFailures++;
+            Log($"Authentication will be retried in {delay / 1000} s (attempt {_authFailures + 1}) — raw EEG stays locked until it succeeds.");
+            var t = new Timer(_ => Post(() =>
+            {
+                if (IsConnected && !_isAuthenticated) Authenticate();
+            }), null, delay, Timeout.Infinite);
+            var old = _authRetryTimer; _authRetryTimer = t;
+            try { old?.Dispose(); } catch { }
         }
 
         private void CancelConnectRetry()
@@ -209,7 +257,9 @@ namespace NeuuroBridge
             _reconnectAddress = droppedAddress;
             _connectedAddress = "";          // link is down — block stream commands until restored
             _isAuthenticated = false;
+            CancelAuthRetry();
             _reconnectClock.Restart();
+            _lastReconnectLogMs = 0;
             Log("Link dropped — reconnecting to " + _reconnectDeviceId + " (up to " + (ReconnectBudgetMs / 1000) + " s)...");
             Post(() => OnConnectionInterrupted?.Invoke(droppedAddress));
             ScheduleReconnectAttempt();
@@ -225,13 +275,27 @@ namespace NeuuroBridge
         private void ReconnectAttempt()
         {
             if (!_reconnecting) return;
-            if (_reconnectClock.ElapsedMilliseconds > ReconnectBudgetMs)
+            long elapsedMs = _reconnectClock.ElapsedMilliseconds;
+            if (elapsedMs > ReconnectBudgetMs)
             {
-                Log("Reconnect budget exhausted — link is gone.");
-                FinishReconnectFailed();
-                return;
+                if (!KeepReconnecting)
+                {
+                    Log("Reconnect budget exhausted — link is gone.");
+                    FinishReconnectFailed();
+                    return;
+                }
+                // Recording in progress: keep trying, but don't flood the log with every attempt.
+                if (elapsedMs - _lastReconnectLogMs >= ReconnectLogEveryMs)
+                {
+                    _lastReconnectLogMs = elapsedMs;
+                    Log($"Band still unreachable after {elapsedMs / 1000} s — still reconnecting because a recording " +
+                        "is in progress. Check the band is switched on, charged and nearby.");
+                }
             }
-            Log("Reconnect attempt to " + _reconnectDeviceId + " ...");
+            else
+            {
+                Log("Reconnect attempt to " + _reconnectDeviceId + " ...");
+            }
             try { SenzeBandWindowsInterface.getSBWIHandler().connectBT(_reconnectDeviceId); }
             catch (Exception ex) { Log("reconnect connectBT error: " + ex.Message); }
             // A failed attempt re-enters ConnectFailCallback, which queues the next try (until budget).
@@ -246,6 +310,7 @@ namespace NeuuroBridge
             _mcuId = null;
             _isAuthenticated = false;
             _authAttempted = false;
+            CancelAuthRetry();
             try { DeviceAuthentication.instance.OnDisconnect(); } catch { }
             Log("Disconnected (reconnect failed): " + addr);
             Post(() => OnDisconnected?.Invoke(addr));
@@ -260,6 +325,22 @@ namespace NeuuroBridge
             SenzeBandConnectInterface.getSBCIHandler().setEEG_Analyzing(true);
             SenzeBandWindowsInterface.getSBWIHandler().sendStartCommand(_connectedAddress);
             Log("Stream started.");
+        }
+
+        /// <summary>
+        /// Re-sends the start command for a link that is up but has stopped delivering EEG (see the
+        /// controller's stall watchdog). Safe from any thread: the SDK call is marshalled like every
+        /// other callback-side action.
+        /// </summary>
+        public void RestartStream()
+        {
+            Post(() =>
+            {
+                if (!IsConnected) return;
+                Log("Re-sending the stream start command (no EEG arriving)...");
+                try { StartStream(); }
+                catch (Exception ex) { Log("Stream restart error: " + ex.Message); }
+            });
         }
 
         public void StopStream()
@@ -398,7 +479,11 @@ namespace NeuuroBridge
                 // manual Re-auth can try again, rather than being blocked by "already attempted".
                 if (!ok) _svc._authAttempted = false;
                 _svc.Log($"Auth result for {address}: {result} {message}");
-                _svc.Post(() => _svc.OnAuthStatus?.Invoke(ok, result + " " + message));
+                _svc.Post(() =>
+                {
+                    if (ok) _svc.CancelAuthRetry(); else _svc.ScheduleAuthRetry();
+                    _svc.OnAuthStatus?.Invoke(ok, result + " " + message);
+                });
             }
 
             public void timeUp(object obj)
@@ -406,7 +491,11 @@ namespace NeuuroBridge
                 _svc._isAuthenticated = false;
                 _svc._authAttempted = false;   // allow a retry instead of staying stuck unauthenticated
                 _svc.Log("Authentication timed out.");
-                _svc.Post(() => _svc.OnAuthStatus?.Invoke(false, "timeout"));
+                _svc.Post(() =>
+                {
+                    _svc.ScheduleAuthRetry();
+                    _svc.OnAuthStatus?.Invoke(false, "timeout");
+                });
             }
         }
 
@@ -418,7 +507,22 @@ namespace NeuuroBridge
         private void OnRawInt(int[] data)
         {
             var frame = new RawEegFrame { IntSamples = (int[])data.Clone(), ArrivalUtc = DateTime.UtcNow };
+            Interlocked.Exchange(ref _lastRawArrivalTicks, frame.ArrivalUtc.Ticks);
             Post(() => OnRawEeg?.Invoke(frame));
+        }
+
+        // Stamped on the SDK's own callback thread, so the stall watchdog sees the band stop sending
+        // even when the thread that processes frames is busy.
+        private long _lastRawArrivalTicks;
+
+        /// <summary>When the SDK last delivered a raw EEG frame (default if none yet).</summary>
+        public DateTime LastRawArrivalUtc
+        {
+            get
+            {
+                long t = Interlocked.Read(ref _lastRawArrivalTicks);
+                return t == 0 ? default(DateTime) : new DateTime(t, DateTimeKind.Utc);
+            }
         }
 
         private void OnRawFloat(float[] data)
@@ -463,6 +567,7 @@ namespace NeuuroBridge
             _connectedDeviceID = id;
             _isAuthenticated = false;
             _authAttempted = false;
+            CancelAuthRetry();      // a fresh link starts its own auth (and retry) sequence
             if (wasReconnecting)
             {
                 Log("Reconnected: " + id + " @ " + address);
@@ -513,6 +618,7 @@ namespace NeuuroBridge
             _mcuId = null;
             _isAuthenticated = false;
             _authAttempted = false;
+            CancelAuthRetry();
             try { DeviceAuthentication.instance.OnDisconnect(); } catch { }
             Log("Disconnected/failed: " + address);
             Post(() => OnDisconnected?.Invoke(address));
@@ -552,6 +658,7 @@ namespace NeuuroBridge
             _intentionalDisconnect = true;
             CancelConnectRetry();
             CancelReconnect();
+            CancelAuthRetry();
             try
             {
                 if (!string.IsNullOrEmpty(_connectedAddress))
