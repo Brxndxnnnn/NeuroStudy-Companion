@@ -18,7 +18,7 @@ namespace NeuuroBridge
     /// <summary>
     /// Buffers filtered EEG frames and computes per-channel band powers via a
     /// Cooley-Tukey radix-2 FFT, using a sliding OVERLAPPING window: each window is still a full
-    /// FftSize samples (so frequency resolution, binHz = SampleRate/FftSize = 1.0 Hz, is unchanged),
+    /// FftSize samples (so frequency resolution, binHz = SampleRate/FftSize ≈ 0.98 Hz, is unchanged),
     /// but only FftStep of those samples are new — the rest carry over from the previous window.
     /// Fires OnBandPowers every FftStep samples (~SampleRate/FftStep ≈ 3.9/s) instead of every
     /// FftSize, giving band powers roughly every ~256ms instead of every ~1s without requiring the
@@ -29,8 +29,11 @@ namespace NeuuroBridge
     /// </summary>
     public class EegProcessor
     {
-        public const int SampleRate  = 256;
-        public const int FftSize     = 256;   // window length; binHz = SampleRate/FftSize = 1.0 Hz
+        // The SenzeBand's true rate (DbUploader and the 100 Hz low-pass use the same 250). This was
+        // 256, which mislabelled every frequency by 2.4% — e.g. the 8–13 Hz alpha band was really
+        // being integrated over ~7.8–12.7 Hz.
+        public const int SampleRate  = 250;
+        public const int FftSize     = 256;   // window length (power of two); binHz = 250/256 ≈ 0.98 Hz
         public const int FftStep     = 64;    // slide amount; new-output rate = SampleRate/FftStep
         public const int ChannelCount = 4;
 
@@ -118,17 +121,24 @@ namespace NeuuroBridge
             double[] re = new double[n];
             double[] im = new double[n];
 
+            // Remove the window's mean first. Our filtered stream is a low-pass of the raw ADC signal,
+            // so it still carries the electrode's DC offset; through the Hann window's main lobe that
+            // offset leaked into the lowest bins and inflated delta (0.5–4 Hz) power.
+            double mean = 0;
+            for (int i = 0; i < n; i++) mean += samples[i];
+            mean /= n;
+
             // Hanning window — reduces spectral leakage at band edges.
             for (int i = 0; i < n; i++)
             {
                 double w = 0.5 * (1.0 - Math.Cos(2.0 * Math.PI * i / (n - 1)));
-                re[i] = samples[i] * w;
+                re[i] = (samples[i] - mean) * w;
             }
 
             Fft(re, im);
 
             // One-sided power spectrum: power[k] maps to frequency k * (SampleRate/N) Hz.
-            double binHz = (double)SampleRate / n;   // 1.0 Hz for N=256 @ 256 Hz
+            double binHz = (double)SampleRate / n;   // ≈ 0.98 Hz for N=256 @ 250 Hz
             int half = n / 2;
             double[] power = new double[half];
             for (int k = 0; k < half; k++)

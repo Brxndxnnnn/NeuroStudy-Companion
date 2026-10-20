@@ -16,11 +16,13 @@ namespace NeuuroBridge
     /// capture. Streaming starts on connect for preview; opening a DB session is a separate step.
     /// The console app and the WPF app both drive this; neither owns SDK/DB wiring directly.
     ///
-    /// Threading: SDK callbacks arrive on whatever <see cref="SynchronizationContext"/> was
-    /// current when <see cref="Initialize"/> ran. In WPF (initialised on the UI thread) the
-    /// events below therefore raise on the UI thread, so handlers can touch UI directly.
-    /// Per-sample DB timestamps are captured synchronously in the SDK layer, so upload
-    /// fidelity does not depend on which thread these events run on.
+    /// Threading: connection, scan, auth and status callbacks arrive on whatever
+    /// <see cref="SynchronizationContext"/> was current when <see cref="Initialize"/> ran (the UI
+    /// thread in WPF). High-rate EEG data callbacks (raw/filtered frames, PPG, SDK cognitive values,
+    /// impedance) arrive in order on SenzeBandService's dedicated EEG data thread, so the
+    /// <see cref="RawFrame"/>, <see cref="FftBandPowers"/>, blink/clench events raise THERE — UI
+    /// subscribers must marshal (MainWindow.Ui does). Per-sample DB timestamps are captured
+    /// synchronously in the SDK layer, so upload fidelity does not depend on either thread.
     /// </summary>
     public class BridgeController : IDisposable
     {
@@ -94,7 +96,8 @@ namespace NeuuroBridge
         // messages go to the same sink as everything else, so a refused request is visible in the
         // session log rather than being silently absent.
         private readonly BleConnectionTuner _bleTuner;
-        private DbUploader _db;
+        // Read on the EEG data thread, swapped on the UI/timer threads.
+        private volatile DbUploader _db;
 
         private readonly object _devLock = new object();
         private readonly Dictionary<string, SenzeBandDeviceInfo> _devices = new Dictionary<string, SenzeBandDeviceInfo>();
@@ -114,7 +117,7 @@ namespace NeuuroBridge
         private DateTime _lastEventPollUtc;      // cursor: only fetch events with shown_at after this
         private string _dbConnString;           // cached for the progress poll (avoids re-reading .env every tick)
         private Guid _sessionGuid;
-        private bool _draining;                 // Stop clicked; still accepting in-flight raw/filt/band frames (see StopGraceMs)
+        private volatile bool _draining;        // Stop clicked; still accepting in-flight raw/filt/band frames (see StopGraceMs)
         private Timer _stopGraceTimer;           // one-shot; fires FinalizeStop after the drain window
         private long _tailLostSamples;           // raw samples rejected AFTER the drain window closed (see TailLossSeconds)
         // How long to keep accepting raw/filt/band frames after Stop before actually closing the
@@ -242,7 +245,9 @@ namespace NeuuroBridge
         // ── State accessors ──────────────────────────────────────────────────
         public bool IsConnected => _svc.IsConnected;
         public bool IsAuthenticated => _svc.IsAuthenticated;
-        public bool SessionActive { get; private set; }
+        // Volatile: written on the UI/timer threads, read for every frame on the EEG data thread.
+        private volatile bool _sessionActive;
+        public bool SessionActive { get => _sessionActive; private set => _sessionActive = value; }
         /// <summary>True once the SDK stream is live (preview), independent of whether a DB session is recording.</summary>
         public bool IsStreaming => _streaming;
         public bool IsCapturing => _capturing;
@@ -1016,13 +1021,20 @@ namespace NeuuroBridge
         private void DetectBlink(float[] filtered)
         {
             int spc = filtered.Length / ChannelCount;
+            if (spc == 0) return;
             float peak = 0;
             for (int ch = 0; ch <= 1; ch++) // Fp1, Fp2 — frontal channels only
             {
                 int baseIdx = ch * spc;
+                // Measure the deflection from this frame's own baseline, not from zero. The filtered
+                // stream is a low-pass of the raw signal and keeps the electrode's DC offset, so an
+                // absolute threshold fired on the offset rather than on blinks.
+                double mean = 0;
+                for (int i = 0; i < spc; i++) mean += filtered[baseIdx + i];
+                mean /= spc;
                 for (int i = 0; i < spc; i++)
                 {
-                    float abs = Math.Abs(filtered[baseIdx + i]);
+                    float abs = (float)Math.Abs(filtered[baseIdx + i] - mean);
                     if (abs > peak) peak = abs;
                 }
             }

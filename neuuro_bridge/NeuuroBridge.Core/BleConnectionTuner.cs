@@ -2,6 +2,8 @@ using System;
 using System.Globalization;
 using System.Threading.Tasks;
 using Windows.Devices.Bluetooth;
+using Windows.Devices.Bluetooth.GenericAttributeProfile;
+using Windows.Foundation.Metadata;
 
 namespace NeuuroBridge
 {
@@ -49,6 +51,7 @@ namespace NeuuroBridge
         private readonly object _gate = new object();
         private BluetoothLEDevice _device;
         private BluetoothLEPreferredConnectionParametersRequest _request;
+        private GattSession _session;
 
         public BleConnectionTuner(Action<string> log)
         {
@@ -100,8 +103,13 @@ namespace NeuuroBridge
 
                 // ThroughputOptimized asks for the shortest interval Windows will negotiate.
                 // The peripheral is free to refuse, in which case this silently changes nothing.
+                LogLinkParameters(device, "before tuning");
+
                 var request = device.RequestPreferredConnectionParameters(
                     BluetoothLEPreferredConnectionParameters.ThroughputOptimized);
+                device.ConnectionStatusChanged += OnConnectionStatusChanged;
+                if (HasConnectionParameterApi)
+                    device.ConnectionParametersChanged += OnConnectionParametersChanged;
 
                 lock (_gate)
                 {
@@ -110,6 +118,13 @@ namespace NeuuroBridge
                 }
                 _log("[ble] requested ThroughputOptimized connection parameters — " +
                      "held for the lifetime of this connection.");
+
+                await OpenGattSession(device);
+
+                // The peripheral answers the request asynchronously; ConnectionParametersChanged logs
+                // the outcome when it does, and this catches the case where nothing ever changes.
+                await Task.Delay(3000);
+                if (ReferenceEquals(CurrentDevice, device)) LogLinkParameters(device, "3 s after tuning");
             }
             catch (Exception ex)
             {
@@ -125,13 +140,133 @@ namespace NeuuroBridge
         {
             BluetoothLEPreferredConnectionParametersRequest request;
             BluetoothLEDevice device;
+            GattSession session;
             lock (_gate)
             {
-                request = _request; device = _device;
-                _request = null; _device = null;
+                request = _request; device = _device; session = _session;
+                _request = null; _device = null; _session = null;
             }
             if (request != null) { try { request.Dispose(); } catch { /* ignore */ } }
-            if (device != null) { try { device.Dispose(); } catch { /* ignore */ } }
+            if (session != null)
+            {
+                try { session.MaxPduSizeChanged -= OnMaxPduSizeChanged; } catch { /* ignore */ }
+                // MaintainConnection must be dropped before the technician's own disconnect, or
+                // Windows would keep holding the link the SDK is trying to close.
+                try { session.MaintainConnection = false; } catch { /* ignore */ }
+                try { session.Dispose(); } catch { /* ignore */ }
+            }
+            if (device != null)
+            {
+                try { device.ConnectionStatusChanged -= OnConnectionStatusChanged; } catch { /* ignore */ }
+                if (HasConnectionParameterApi)
+                {
+                    try { device.ConnectionParametersChanged -= OnConnectionParametersChanged; } catch { /* ignore */ }
+                }
+                try { device.Dispose(); } catch { /* ignore */ }
+            }
+        }
+
+        // ── Link diagnostics ─────────────────────────────────────────────────
+        // The packet-loss investigation has been stuck on one unknown: Windows granting the request
+        // says nothing about whether the SenzeBand accepted a shorter interval. Windows 11 exposes
+        // what was actually negotiated, so log it on connect, whenever it changes, and alongside
+        // Windows' own view of every connect/disconnect (which can differ in timing from the SDK's).
+
+        // BluetoothLEDevice.GetConnectionParameters / ConnectionParametersChanged / GetConnectionPhy
+        // arrived in Windows 11 (build 22000). On Windows 10 these are skipped, not fatal.
+        private static readonly bool HasConnectionParameterApi = SafeIsMethodPresent(
+            "Windows.Devices.Bluetooth.BluetoothLEDevice", "GetConnectionParameters");
+
+        private static bool SafeIsMethodPresent(string type, string method)
+        {
+            try { return ApiInformation.IsMethodPresent(type, method); }
+            catch { return false; }
+        }
+
+        private BluetoothLEDevice CurrentDevice { get { lock (_gate) return _device; } }
+
+        private void LogLinkParameters(BluetoothLEDevice device, string when)
+        {
+            if (!HasConnectionParameterApi)
+            {
+                _log($"[ble] link parameters ({when}): not available before Windows 11.");
+                return;
+            }
+            try
+            {
+                var p = device.GetConnectionParameters();
+                string phy = DescribePhy(device);
+                // Interval is in 1.25 ms units and link timeout in 10 ms units (Bluetooth Core spec).
+                double intervalMs = p.ConnectionInterval * 1.25;
+                _log($"[ble] link parameters ({when}): interval {intervalMs:F2} ms, peripheral latency " +
+                     $"{p.ConnectionLatency}, supervision timeout {p.LinkTimeout * 10} ms{phy}. " +
+                     (intervalMs <= 15.0
+                         ? "Throughput-optimised interval is in effect."
+                         : "Still a slow interval — the band (or Windows) has not applied the faster one."));
+            }
+            catch (Exception ex)
+            {
+                _log($"[ble] link parameters ({when}) unavailable: {ex.Message}");
+            }
+        }
+
+        private static string DescribePhy(BluetoothLEDevice device)
+        {
+            try
+            {
+                var phy = device.GetConnectionPhy();
+                var tx = phy.TransmitInfo;
+                string name = tx.IsUncoded2MPhy ? "2M" : tx.IsUncoded1MPhy ? "1M" : tx.IsCodedPhy ? "Coded" : "unknown";
+                return $", PHY {name}";
+            }
+            catch { return ""; }
+        }
+
+        private void OnConnectionParametersChanged(BluetoothLEDevice sender, object args)
+            => LogLinkParameters(sender, "changed");
+
+        private void OnConnectionStatusChanged(BluetoothLEDevice sender, object args)
+        {
+            try
+            {
+                _log($"[ble] Windows reports the link as {sender.ConnectionStatus} " +
+                     $"at {DateTime.Now:HH:mm:ss.fff}.");
+            }
+            catch { /* diagnostics only */ }
+        }
+
+        // GattSession gives the negotiated packet size (MTU) and, optionally, MaintainConnection,
+        // which asks Windows to hold the link open and restore it if it drops. How that interacts
+        // with the vendor SDK's own connection handling is unknown, so it is OFF unless the env key
+        // BLE_MAINTAIN_CONNECTION=true is set — an experiment to measure, not a default.
+        private async Task OpenGattSession(BluetoothLEDevice device)
+        {
+            try
+            {
+                var session = await GattSession.FromDeviceIdAsync(device.BluetoothDeviceId);
+                if (session == null) return;
+                session.MaxPduSizeChanged += OnMaxPduSizeChanged;
+                bool maintain = string.Equals(EnvConfig.FindDotEnvValue("BLE_MAINTAIN_CONNECTION")?.Trim(), "true",
+                                              StringComparison.OrdinalIgnoreCase);
+                if (maintain && session.CanMaintainConnection) session.MaintainConnection = true;
+                lock (_gate)
+                {
+                    if (!ReferenceEquals(_device, device)) { session.Dispose(); return; }   // released meanwhile
+                    _session = session;
+                }
+                _log($"[ble] GATT max PDU {session.MaxPduSize} bytes" +
+                     (maintain ? (session.MaintainConnection ? "; MaintainConnection ON (experiment)." : "; MaintainConnection not supported.") : "."));
+            }
+            catch (Exception ex)
+            {
+                _log("[ble] GATT session diagnostics unavailable: " + ex.Message);
+            }
+        }
+
+        private void OnMaxPduSizeChanged(GattSession sender, object args)
+        {
+            try { _log($"[ble] GATT max PDU changed to {sender.MaxPduSize} bytes."); }
+            catch { /* diagnostics only */ }
         }
 
         public void Dispose() => Release();
