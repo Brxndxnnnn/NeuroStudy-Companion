@@ -709,10 +709,16 @@ namespace NeuuroBridge.Wpf
                 Foreground = SeverityBrush(m)
             };
             LogBox.Document.Blocks.Add(para);
+            // Keep the on-screen log bounded: it grew for the whole day, and every append and scroll
+            // got slower on the same thread that processes EEG. The full log is still on disk.
+            var blocks = LogBox.Document.Blocks;
+            while (blocks.Count > MaxLogLines) blocks.Remove(blocks.FirstBlock);
             LogBox.ScrollToEnd();
 
             try { _logFile?.WriteLine(line); } catch { /* best-effort — never let logging break the app */ }
         }
+
+        private const int MaxLogLines = 2000;
 
         private void OpenLogFile()
         {

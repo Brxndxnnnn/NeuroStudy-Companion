@@ -1016,13 +1016,20 @@ namespace NeuuroBridge
         private void DetectBlink(float[] filtered)
         {
             int spc = filtered.Length / ChannelCount;
+            if (spc == 0) return;
             float peak = 0;
             for (int ch = 0; ch <= 1; ch++) // Fp1, Fp2 — frontal channels only
             {
                 int baseIdx = ch * spc;
+                // Measure the deflection from this frame's own baseline, not from zero. The filtered
+                // stream is a low-pass of the raw signal and keeps the electrode's DC offset, so an
+                // absolute threshold fired on the offset rather than on blinks.
+                double mean = 0;
+                for (int i = 0; i < spc; i++) mean += filtered[baseIdx + i];
+                mean /= spc;
                 for (int i = 0; i < spc; i++)
                 {
-                    float abs = Math.Abs(filtered[baseIdx + i]);
+                    float abs = (float)Math.Abs(filtered[baseIdx + i] - mean);
                     if (abs > peak) peak = abs;
                 }
             }
