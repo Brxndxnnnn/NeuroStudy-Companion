@@ -238,7 +238,9 @@ namespace NeuuroBridge.Wpf
             TxtPairing.Text = "—"; TxtSessionId.Text = "—"; TxtStarted.Text = "—";
             BtnCopyPairing.IsEnabled = false;
             TxtSyncStatus.Text = "—"; SyncDot.Fill = Mut;
-            ResetProgressSteps();
+            // If the technician is still answering the questionnaires, the checklist and scores panel
+            // stay (the controller keeps polling the database); otherwise reset them.
+            if (!_ctl.KeepsTrackingAfterDisconnect) ResetProgressSteps();
             TxtQualitySummary.Visibility = Visibility.Collapsed;
             TxtDbSummary.Visibility = Visibility.Collapsed;
             LivePanel.Clear();
