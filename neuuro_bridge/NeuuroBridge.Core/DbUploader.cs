@@ -1,7 +1,9 @@
 ﻿using System;
 using System.Collections.Concurrent;
 using System.Collections.Generic;
+using System.Linq;
 using System.Threading;
+using System.Threading.Tasks;
 using Npgsql;
 using NpgsqlTypes;
 
@@ -866,6 +868,48 @@ namespace NeuuroBridge
         }
 
         // ── Flush ────────────────────────────────────────────────────────────
+        //
+        // WHY BATCHES ARE HELD UNTIL THEY COMMIT
+        // -------------------------------------
+        // The COPY methods used to dequeue rows while writing them. A COPY that failed half-way (clinic
+        // Wi-Fi blip, droplet restart) threw those rows away, and the raw/filtered sample counters had
+        // already advanced past them, so the hole was never even counted as a gap. After an outage the
+        // first flush dequeued the whole backlog at once, so a second failure lost all of it.
+        //
+        // Now each stream moves rows into its own pending list and only clears it once the COPY has
+        // committed. A failed COPY leaves the list (and the counter state) exactly as it was, so the next
+        // tick rebuilds byte-identical rows — same timestamps — and tries again. COPY is atomic, so a
+        // failure means nothing from that batch was stored; the one exception is a commit whose reply was
+        // lost, which the retry sees as a duplicate key (23505) and treats as already done.
+
+        // Rows taken off a queue for the COPY in flight. Only touched under _ioLock.
+        private readonly List<RawEegFrameRecord> _rawPending = new List<RawEegFrameRecord>();
+        private readonly List<FilteredEegFrameRecord> _filtPending = new List<FilteredEegFrameRecord>();
+        private readonly List<EegReadingRow> _eegPending = new List<EegReadingRow>();
+        private readonly List<BandPowerRow> _bandPending = new List<BandPowerRow>();
+
+        // Upper bound per COPY, so catching up after an outage is several modest COPYs rather than one
+        // huge one (a raw frame is ~1 s of signal, so 120 frames is ~2 minutes / ~30,000 rows).
+        private const int MaxFramesPerCopy = 120;
+        private const int MaxRowsPerCopy = 5000;
+
+        // How long Dispose keeps trying to upload what is still queued when the DB is unreachable at
+        // the moment a session ends, before giving up and counting it as dropped.
+        private static readonly TimeSpan FinalFlushRetryWindow = TimeSpan.FromMinutes(10);
+        private const int FinalFlushRetryIntervalMs = 5000;
+        private volatile bool _finishingUpload;
+
+        /// <summary>True while anything is still waiting to be written to the DB.</summary>
+        public bool HasUnsentData =>
+            !_rawQ.IsEmpty || !_filtQ.IsEmpty || !_eegQ.IsEmpty || !_bandQ.IsEmpty ||
+            _rawPending.Count > 0 || _filtPending.Count > 0 || _eegPending.Count > 0 || _bandPending.Count > 0;
+
+        /// <summary>Filtered EEG frames (~1 s each) not yet stored — the stream ML trains on.</summary>
+        public int UnsentEegFrames => _filtQ.Count + _filtPending.Count;
+
+        /// <summary>True after the session ended while queued EEG is still being retried in the background.</summary>
+        public bool IsFinishingUpload => _finishingUpload;
+
         private void StartFlushTimer()
         {
             if (_flushTimer != null) return;
@@ -882,216 +926,297 @@ namespace NeuuroBridge
             finally { Monitor.Exit(_ioLock); }
         }
 
-        /// <summary>Drains all queues to the DB. Caller must hold <see cref="_ioLock"/>.</summary>
+        /// <summary>Writes one batch of each stream to the DB. Caller must hold <see cref="_ioLock"/>.
+        /// Throws on a transient failure; whatever did not commit stays pending for the next call.</summary>
         private void Flush()
         {
-            if (_eegQ.IsEmpty && _bandQ.IsEmpty && _rawQ.IsEmpty && _filtQ.IsEmpty) return;
+            if (!HasUnsentData) return;
             EnsureOpen();
 
-            int eeg = CopyEeg();
-            int band = CopyBand();
+            // The two sample streams first: they are what ML trains on and what the gap figures describe.
             int raw = CopyRaw();
             int filt = CopyFiltered();
-            if (eeg > 0)  Interlocked.Add(ref _eegRowsSent, eeg);
-            if (band > 0) Interlocked.Add(ref _bandRowsSent, band);
+            int band = CopyBand();
+            int eeg = CopyEeg();
             if (raw > 0)  Interlocked.Add(ref _rawRowsSent, raw);
             if (filt > 0) Interlocked.Add(ref _filtRowsSent, filt);
+            if (band > 0) Interlocked.Add(ref _bandRowsSent, band);
+            if (eeg > 0)  Interlocked.Add(ref _eegRowsSent, eeg);
+        }
+
+        private static void Fill<T>(ConcurrentQueue<T> q, List<T> pending, int max)
+        {
+            while (pending.Count < max && q.TryDequeue(out var item)) pending.Add(item);
+        }
+
+        // The previous attempt at this exact batch committed but its reply was lost.
+        private static bool IsAlreadyStored(Exception ex) => ex is PostgresException pg && pg.SqlState == "23505";
+
+        // The server rejected the rows themselves (bad data, missing column, permission). Retrying the
+        // same batch can never succeed and would block every later batch behind it.
+        private static bool IsRejected(Exception ex) =>
+            ex is PostgresException pg && pg.SqlState != "23505" &&
+            (pg.SqlState.StartsWith("22") || pg.SqlState.StartsWith("23") || pg.SqlState.StartsWith("42"));
+
+        // Where each frame of a batch sits on the stream's sample-counter timeline, and the counter
+        // state after it. Computed BEFORE writing, so the outcome of a COPY (stored, already stored,
+        // rejected, failed) never depends on how far the write loop got.
+        private struct TimelinePlan
+        {
+            public bool Anchored;
+            public long BaseTicks, EndIndex, GapSamples, Resyncs;
+            public long[] StartIndex;   // per frame; unused for frames with no samples
+            public int Rows;
         }
 
         /// <summary>
-        /// Expands every queued raw frame into one row per sample and bulk-COPYs them into
-        /// eeg_raw_samples. Per-sample time comes from a monotonic SAMPLE COUNTER
-        /// (base + index/sampleRate), NOT the frame's arrival time: the SenzeBand samples
-        /// continuously at a true 250 Hz but BLE delivers frames in uneven bursts, so anchoring
-        /// to arrival warps the timeline (a 38 s stream spread across 53 s). The counter
-        /// reconstructs a uniform 250 Hz axis with exact, µs-aligned, strictly-increasing
-        /// timestamps (so the (session_id, time) PK can never collide). A drift guard against
-        /// real arrival time resynchronises the counter when frames are GENUINELY lost, inserting
-        /// a real gap rather than silently compressing everything after it. Channel columns map
+        /// Lays a batch of frames onto a uniform 250 Hz axis. Per-sample time comes from a monotonic
+        /// SAMPLE COUNTER (base + index/sampleRate), NOT the frame's arrival time: the SenzeBand samples
+        /// continuously at a true 250 Hz but BLE delivers frames in uneven bursts, so anchoring to arrival
+        /// warps the timeline (a 38 s stream spread across 53 s). The counter reconstructs exact,
+        /// µs-aligned, strictly-increasing timestamps (so the (session_id, time) PK can never collide). A
+        /// drift guard against real arrival time resynchronises the counter when frames are GENUINELY
+        /// lost, inserting a real gap rather than silently compressing everything after it.
+        /// </summary>
+        private static TimelinePlan PlanTimeline(IList<DateTime> frameEnds, IList<int> spcs,
+            bool anchored, long baseTicks, long index, long periodTicks, long maxDriftTicks)
+        {
+            var plan = new TimelinePlan { StartIndex = new long[spcs.Count] };
+            for (int k = 0; k < spcs.Count; k++)
+            {
+                int spc = spcs[k];
+                if (spc <= 0) continue;
+                long endTicks = frameEnds[k].Ticks;
+
+                if (!anchored)
+                {
+                    // Index 0 = the first sample of the first frame. Snap to µs so every derived
+                    // timestamp is µs-aligned (the DB stores no finer) and uniquely keyed.
+                    baseTicks = endTicks - (long)(spc - 1) * periodTicks;
+                    baseTicks -= baseTicks % (TimeSpan.TicksPerMillisecond / 1000);
+                    index = 0;
+                    anchored = true;
+                }
+
+                // If arrival time has run far ahead of where the counter says this frame's last
+                // sample should sit, frames were genuinely dropped upstream — jump the counter
+                // forward (insert a real gap) so we don't compress the rest of the timeline.
+                long counterLastTicks = baseTicks + (index + spc - 1) * periodTicks;
+                if (endTicks - counterLastTicks > maxDriftTicks)
+                {
+                    long resyncIndex = (long)Math.Round((double)(endTicks - baseTicks) / periodTicks) - (spc - 1);
+                    if (resyncIndex > index)
+                    {
+                        plan.GapSamples += resyncIndex - index;
+                        index = resyncIndex;
+                        plan.Resyncs++;
+                    }
+                }
+
+                plan.StartIndex[k] = index;
+                index += spc;
+                plan.Rows += spc;
+            }
+            plan.Anchored = anchored;
+            plan.BaseTicks = baseTicks;
+            plan.EndIndex = index;
+            return plan;
+        }
+
+        private static int Spc(Array samples) =>
+            samples == null || samples.Length < ChannelCount ? 0 : samples.Length / ChannelCount;
+
+        /// <summary>
+        /// Expands the pending raw frames into one row per sample (timestamps from
+        /// <see cref="PlanTimeline"/>) and bulk-COPYs them into eeg_raw_samples. Channel columns map
         /// the SDK frame order [0]=Fp1 [1]=Fp2 [2]=T4 [3]=T3 onto fp1,fp2,t3,t4 (note t3/t4 swap).
+        /// The counter state is only committed once the batch is settled (see the Flush notes above).
         /// </summary>
         private int CopyRaw()
         {
-            if (_rawQ.IsEmpty) return 0;
+            Fill(_rawQ, _rawPending, MaxFramesPerCopy);
+            if (_rawPending.Count == 0) return 0;
             long periodTicks = TimeSpan.TicksPerSecond / _sampleRate;   // 40000 ticks = 4 ms @ 250 Hz (µs-aligned)
-            long maxDriftTicks = RawDriftTicks;
-            int n = 0;
-            using (var w = _conn.BeginBinaryImport(
-                "COPY eeg_raw_samples (session_id, time, fp1, fp2, t3, t4) FROM STDIN (FORMAT BINARY)"))
+            var plan = PlanTimeline(
+                _rawPending.Select(f => f.FrameEnd).ToList(), _rawPending.Select(f => Spc(f.Samples)).ToList(),
+                _rawAnchored, _rawBaseTicks, _rawSampleIndex, periodTicks, RawDriftTicks);
+
+            int n = plan.Rows;
+            try
             {
-                while (_rawQ.TryDequeue(out var f))
+                using (var w = _conn.BeginBinaryImport(
+                    "COPY eeg_raw_samples (session_id, time, fp1, fp2, t3, t4) FROM STDIN (FORMAT BINARY)"))
                 {
-                    var samples = f.Samples;
-                    if (samples == null || samples.Length < ChannelCount) continue;
-                    int spc = samples.Length / ChannelCount;   // samples per channel in this frame
-
-                    if (!_rawAnchored)
+                    for (int k = 0; k < _rawPending.Count; k++)
                     {
-                        // Index 0 = the first sample of the first frame. Snap to µs so every derived
-                        // timestamp is µs-aligned (the DB stores no finer) and uniquely keyed.
-                        _rawBaseTicks = f.FrameEnd.Ticks - (long)(spc - 1) * periodTicks;
-                        _rawBaseTicks -= _rawBaseTicks % (TimeSpan.TicksPerMillisecond / 1000);
-                        _rawSampleIndex = 0;
-                        _rawAnchored = true;
-                    }
-
-                    // If arrival time has run far ahead of where the counter says this frame's last
-                    // sample should sit, frames were genuinely dropped upstream — jump the counter
-                    // forward (insert a real gap) so we don't compress the rest of the timeline.
-                    long counterLastTicks = _rawBaseTicks + (_rawSampleIndex + spc - 1) * periodTicks;
-                    if (f.FrameEnd.Ticks - counterLastTicks > maxDriftTicks)
-                    {
-                        long resyncIndex = (long)Math.Round((double)(f.FrameEnd.Ticks - _rawBaseTicks) / periodTicks) - (spc - 1);
-                        if (resyncIndex > _rawSampleIndex)
+                        var samples = _rawPending[k].Samples;
+                        int spc = Spc(samples);
+                        for (int i = 0; i < spc; i++)
                         {
-                            Interlocked.Add(ref _rawGapSamples, resyncIndex - _rawSampleIndex);
-                            _rawSampleIndex = resyncIndex;
-                            Interlocked.Increment(ref _rawResyncs);
+                            long t = plan.BaseTicks + (plan.StartIndex[k] + i) * periodTicks;   // exact, uniform, µs-aligned
+                            w.StartRow();
+                            w.Write(_sessionId, NpgsqlDbType.Uuid);
+                            w.Write(new DateTime(t, DateTimeKind.Utc), NpgsqlDbType.TimestampTz);
+                            w.Write(samples[FrameIdx.Fp1 * spc + i], NpgsqlDbType.Integer);
+                            w.Write(samples[FrameIdx.Fp2 * spc + i], NpgsqlDbType.Integer);
+                            w.Write(samples[FrameIdx.T3  * spc + i], NpgsqlDbType.Integer);
+                            w.Write(samples[FrameIdx.T4  * spc + i], NpgsqlDbType.Integer);
                         }
                     }
-
-                    for (int i = 0; i < spc; i++)
-                    {
-                        long t = _rawBaseTicks + _rawSampleIndex * periodTicks;   // exact, uniform, µs-aligned
-                        _rawSampleIndex++;
-
-                        w.StartRow();
-                        w.Write(_sessionId, NpgsqlDbType.Uuid);
-                        w.Write(new DateTime(t, DateTimeKind.Utc), NpgsqlDbType.TimestampTz);
-                        w.Write(samples[FrameIdx.Fp1 * spc + i], NpgsqlDbType.Integer);
-                        w.Write(samples[FrameIdx.Fp2 * spc + i], NpgsqlDbType.Integer);
-                        w.Write(samples[FrameIdx.T3  * spc + i], NpgsqlDbType.Integer);
-                        w.Write(samples[FrameIdx.T4  * spc + i], NpgsqlDbType.Integer);
-                        n++;
-                    }
+                    w.Complete();
                 }
-                w.Complete();
             }
+            catch (Exception ex) when (IsAlreadyStored(ex))
+            {
+                _log("Raw EEG batch was already stored by an earlier attempt — not writing it twice.");
+            }
+            catch (Exception ex) when (IsRejected(ex))
+            {
+                // Keep the timeline (commit the counters) but drop the rows, and say so.
+                _log($"Raw EEG batch of {_rawPending.Count} frame(s) rejected by the DB ({ex.Message}) — dropped.");
+                Interlocked.Add(ref _rawDropped, _rawPending.Count);
+                n = 0;
+            }
+            // Anything else propagates: the batch and counters stay as they were for the retry.
+
+            _rawAnchored = plan.Anchored;
+            _rawBaseTicks = plan.BaseTicks;
+            _rawSampleIndex = plan.EndIndex;
+            if (plan.GapSamples > 0) Interlocked.Add(ref _rawGapSamples, plan.GapSamples);
+            if (plan.Resyncs > 0) Interlocked.Add(ref _rawResyncs, plan.Resyncs);
+            _rawPending.Clear();
             return n;
         }
 
         /// <summary>
-        /// Filtered-stream twin of <see cref="CopyRaw"/>: expands every queued filtered frame into one
-        /// row per sample and bulk-COPYs them into eeg_filtered_samples. Uses the SAME monotonic 250 Hz
-        /// sample-counter clock (uniform, µs-aligned, strictly increasing) and the SAME drift/resync guard
-        /// as the raw path — but on its own independent anchor (filtered arrives on a separate SDK callback)
-        /// and writes SDK-filtered µV floats (real) instead of raw ADC counts. Channel columns map the SDK
-        /// frame order [0]=Fp1 [1]=Fp2 [2]=T4 [3]=T3 onto fp1,fp2,t3,t4 (note t3/t4 swap), identical to raw.
+        /// Filtered-stream twin of <see cref="CopyRaw"/>: same timeline plan (on its own independent
+        /// anchor, with the tighter <see cref="FiltDriftTicks"/>) and the same commit-only-when-settled
+        /// handling, writing our low-pass-filtered µV floats (real) to eeg_filtered_samples instead of
+        /// raw ADC counts. Channel columns as in raw (note t3/t4 swap).
         /// </summary>
         private int CopyFiltered()
         {
-            if (_filtQ.IsEmpty) return 0;
+            Fill(_filtQ, _filtPending, MaxFramesPerCopy);
+            if (_filtPending.Count == 0) return 0;
             long periodTicks = TimeSpan.TicksPerSecond / _sampleRate;
-            long maxDriftTicks = FiltDriftTicks;
-            int n = 0;
-            using (var w = _conn.BeginBinaryImport(
-                "COPY eeg_filtered_samples (session_id, time, fp1, fp2, t3, t4) FROM STDIN (FORMAT BINARY)"))
+            var plan = PlanTimeline(
+                _filtPending.Select(f => f.FrameEnd).ToList(), _filtPending.Select(f => Spc(f.Samples)).ToList(),
+                _filtAnchored, _filtBaseTicks, _filtSampleIndex, periodTicks, FiltDriftTicks);
+
+            int n = plan.Rows;
+            try
             {
-                while (_filtQ.TryDequeue(out var f))
+                using (var w = _conn.BeginBinaryImport(
+                    "COPY eeg_filtered_samples (session_id, time, fp1, fp2, t3, t4) FROM STDIN (FORMAT BINARY)"))
                 {
-                    var samples = f.Samples;
-                    if (samples == null || samples.Length < ChannelCount) continue;
-                    int spc = samples.Length / ChannelCount;
-
-                    if (!_filtAnchored)
+                    for (int k = 0; k < _filtPending.Count; k++)
                     {
-                        _filtBaseTicks = f.FrameEnd.Ticks - (long)(spc - 1) * periodTicks;
-                        _filtBaseTicks -= _filtBaseTicks % (TimeSpan.TicksPerMillisecond / 1000);
-                        _filtSampleIndex = 0;
-                        _filtAnchored = true;
-                    }
-
-                    // Same drift/resync guard as CopyRaw — see there for the rationale.
-                    long counterLastTicks = _filtBaseTicks + (_filtSampleIndex + spc - 1) * periodTicks;
-                    if (f.FrameEnd.Ticks - counterLastTicks > maxDriftTicks)
-                    {
-                        long resyncIndex = (long)Math.Round((double)(f.FrameEnd.Ticks - _filtBaseTicks) / periodTicks) - (spc - 1);
-                        if (resyncIndex > _filtSampleIndex)
+                        var samples = _filtPending[k].Samples;
+                        int spc = Spc(samples);
+                        for (int i = 0; i < spc; i++)
                         {
-                            Interlocked.Add(ref _filtGapSamples, resyncIndex - _filtSampleIndex);
-                            _filtSampleIndex = resyncIndex;
-                            Interlocked.Increment(ref _filtResyncs);
+                            long t = plan.BaseTicks + (plan.StartIndex[k] + i) * periodTicks;
+                            w.StartRow();
+                            w.Write(_sessionId, NpgsqlDbType.Uuid);
+                            w.Write(new DateTime(t, DateTimeKind.Utc), NpgsqlDbType.TimestampTz);
+                            w.Write(samples[FrameIdx.Fp1 * spc + i], NpgsqlDbType.Real);
+                            w.Write(samples[FrameIdx.Fp2 * spc + i], NpgsqlDbType.Real);
+                            w.Write(samples[FrameIdx.T3  * spc + i], NpgsqlDbType.Real);
+                            w.Write(samples[FrameIdx.T4  * spc + i], NpgsqlDbType.Real);
                         }
                     }
+                    w.Complete();
+                }
+            }
+            catch (Exception ex) when (IsAlreadyStored(ex))
+            {
+                _log("Filtered EEG batch was already stored by an earlier attempt — not writing it twice.");
+            }
+            catch (Exception ex) when (IsRejected(ex))
+            {
+                _log($"Filtered EEG batch of {_filtPending.Count} frame(s) rejected by the DB ({ex.Message}) — dropped.");
+                Interlocked.Add(ref _filtDropped, _filtPending.Count);
+                n = 0;
+            }
 
-                    for (int i = 0; i < spc; i++)
+            _filtAnchored = plan.Anchored;
+            _filtBaseTicks = plan.BaseTicks;
+            _filtSampleIndex = plan.EndIndex;
+            if (plan.GapSamples > 0) Interlocked.Add(ref _filtGapSamples, plan.GapSamples);
+            if (plan.Resyncs > 0) Interlocked.Add(ref _filtResyncs, plan.Resyncs);
+            _filtPending.Clear();
+            return n;
+        }
+
+        /// <summary>COPYs one pending batch of a row-per-item table; same retry rules as the sample streams.</summary>
+        private int CopyRows<T>(ConcurrentQueue<T> q, List<T> pending, string label, string copySql,
+                                Action<NpgsqlBinaryImporter, T> writeRow)
+        {
+            Fill(q, pending, MaxRowsPerCopy);
+            if (pending.Count == 0) return 0;
+            int n = pending.Count;
+            try
+            {
+                using (var w = _conn.BeginBinaryImport(copySql))
+                {
+                    foreach (var r in pending)
                     {
-                        long t = _filtBaseTicks + _filtSampleIndex * periodTicks;   // exact, uniform, µs-aligned
-                        _filtSampleIndex++;
-
                         w.StartRow();
-                        w.Write(_sessionId, NpgsqlDbType.Uuid);
-                        w.Write(new DateTime(t, DateTimeKind.Utc), NpgsqlDbType.TimestampTz);
-                        w.Write(samples[FrameIdx.Fp1 * spc + i], NpgsqlDbType.Real);
-                        w.Write(samples[FrameIdx.Fp2 * spc + i], NpgsqlDbType.Real);
-                        w.Write(samples[FrameIdx.T3  * spc + i], NpgsqlDbType.Real);
-                        w.Write(samples[FrameIdx.T4  * spc + i], NpgsqlDbType.Real);
-                        n++;
+                        writeRow(w, r);
                     }
+                    w.Complete();
                 }
-                w.Complete();
             }
+            catch (Exception ex) when (IsAlreadyStored(ex))
+            {
+                _log(label + " batch was already stored by an earlier attempt — not writing it twice.");
+            }
+            catch (Exception ex) when (IsRejected(ex))
+            {
+                _log($"{label} batch of {pending.Count} row(s) rejected by the DB ({ex.Message}) — dropped.");
+                Interlocked.Add(ref _dropped, pending.Count);
+                n = 0;
+            }
+            pending.Clear();
             return n;
         }
 
-        private int CopyEeg()
-        {
-            if (_eegQ.IsEmpty) return 0;
-            int n = 0;
-            using (var w = _conn.BeginBinaryImport(
-                "COPY eeg_readings (session_id, time, " +
-                "fp1_raw_last, fp2_raw_last, t3_raw_last, t4_raw_last, " +
-                "fp1_raw_pkpk, fp2_raw_pkpk, t3_raw_pkpk, t4_raw_pkpk, " +
-                "fp1_filt_last, fp2_filt_last, t3_filt_last, t4_filt_last, " +
-                "fp1_filt_pkpk, fp2_filt_pkpk, t3_filt_pkpk, t4_filt_pkpk) FROM STDIN (FORMAT BINARY)"))
+        private int CopyEeg() => CopyRows(_eegQ, _eegPending, "EEG summary",
+            "COPY eeg_readings (session_id, time, " +
+            "fp1_raw_last, fp2_raw_last, t3_raw_last, t4_raw_last, " +
+            "fp1_raw_pkpk, fp2_raw_pkpk, t3_raw_pkpk, t4_raw_pkpk, " +
+            "fp1_filt_last, fp2_filt_last, t3_filt_last, t4_filt_last, " +
+            "fp1_filt_pkpk, fp2_filt_pkpk, t3_filt_pkpk, t4_filt_pkpk) FROM STDIN (FORMAT BINARY)",
+            (w, r) =>
             {
-                while (_eegQ.TryDequeue(out var r))
-                {
-                    w.StartRow();
-                    w.Write(_sessionId, NpgsqlDbType.Uuid);
-                    w.Write(r.Time, NpgsqlDbType.TimestampTz);
-                    WriteChannels(w, r.RawLast);
-                    WriteChannels(w, r.RawPkpk);
-                    WriteChannels(w, r.FiltLast);
-                    WriteChannels(w, r.FiltPkpk);
-                    n++;
-                }
-                w.Complete();
-            }
-            return n;
-        }
+                w.Write(_sessionId, NpgsqlDbType.Uuid);
+                w.Write(r.Time, NpgsqlDbType.TimestampTz);
+                WriteChannels(w, r.RawLast);
+                WriteChannels(w, r.RawPkpk);
+                WriteChannels(w, r.FiltLast);
+                WriteChannels(w, r.FiltPkpk);
+            });
 
-        private int CopyBand()
-        {
-            if (_bandQ.IsEmpty) return 0;
-            int n = 0;
-            using (var w = _conn.BeginBinaryImport(
-                "COPY band_powers (session_id, time, attention, relaxation, mental_workload, signal_quality, " +
-                "heart_rate, spo2, " +
-                "fp1_alpha, fp1_beta, fp1_delta, fp1_theta, fp1_gamma, " +
-                "fp2_alpha, fp2_beta, fp2_delta, fp2_theta, fp2_gamma, " +
-                "t3_alpha, t3_beta, t3_delta, t3_theta, t3_gamma, " +
-                "t4_alpha, t4_beta, t4_delta, t4_theta, t4_gamma) FROM STDIN (FORMAT BINARY)"))
+        private int CopyBand() => CopyRows(_bandQ, _bandPending, "Band power",
+            "COPY band_powers (session_id, time, attention, relaxation, mental_workload, signal_quality, " +
+            "heart_rate, spo2, " +
+            "fp1_alpha, fp1_beta, fp1_delta, fp1_theta, fp1_gamma, " +
+            "fp2_alpha, fp2_beta, fp2_delta, fp2_theta, fp2_gamma, " +
+            "t3_alpha, t3_beta, t3_delta, t3_theta, t3_gamma, " +
+            "t4_alpha, t4_beta, t4_delta, t4_theta, t4_gamma) FROM STDIN (FORMAT BINARY)",
+            (w, r) =>
             {
-                while (_bandQ.TryDequeue(out var r))
-                {
-                    w.StartRow();
-                    w.Write(_sessionId, NpgsqlDbType.Uuid);
-                    w.Write(r.Time, NpgsqlDbType.TimestampTz);
-                    WriteReal(w, r.Attention);
-                    WriteReal(w, r.Relaxation);
-                    WriteReal(w, r.MentalWorkload);
-                    w.Write(r.SignalQuality, NpgsqlDbType.Integer);
-                    WriteNullableInt(w, r.HeartRate);
-                    WriteNullableInt(w, r.Spo2);
-                    foreach (int ch in SchemaChannelOrder)
-                        WriteBand(w, r.Bands, ch);
-                    n++;
-                }
-                w.Complete();
-            }
-            return n;
-        }
+                w.Write(_sessionId, NpgsqlDbType.Uuid);
+                w.Write(r.Time, NpgsqlDbType.TimestampTz);
+                WriteReal(w, r.Attention);
+                WriteReal(w, r.Relaxation);
+                WriteReal(w, r.MentalWorkload);
+                w.Write(r.SignalQuality, NpgsqlDbType.Integer);
+                WriteNullableInt(w, r.HeartRate);
+                WriteNullableInt(w, r.Spo2);
+                foreach (int ch in SchemaChannelOrder)
+                    WriteBand(w, r.Bands, ch);
+            });
 
         private static void WriteBand(NpgsqlBinaryImporter w, BandPowers[] bands, int ch)
         {
@@ -1324,37 +1449,95 @@ namespace NeuuroBridge
             if (_disposed) return;
             _disposed = true;
             try { _flushTimer?.Dispose(); } catch { /* ignore */ }
+
+            bool drained;
+            lock (_ioLock) drained = TryDrain();
+            if (drained)
+            {
+                lock (_ioLock) Close();
+                return;
+            }
+
+            // The DB is unreachable right as the session ended. Closing now would throw away whatever
+            // is still queued, so keep this uploader alive and retry in the background; Close() runs
+            // once it has all landed, or when the retry window runs out.
+            _finishingUpload = true;
+            _log($"Could not upload the last {UnsentEegFrames} second(s) of EEG yet — retrying in the background " +
+                 $"for up to {FinalFlushRetryWindow.TotalMinutes:F0} min. Keep the bridge open and online.");
+            Task.Run(() => RetryFinalUpload());
+        }
+
+        // Writes batches until everything queued is stored. Caller holds _ioLock. False if the DB
+        // failed part-way; what did not land stays pending.
+        private bool TryDrain()
+        {
+            try
+            {
+                while (HasUnsentData) Flush();
+                return true;
+            }
+            catch (Exception ex)
+            {
+                _lastError = ex.Message;
+                _log("Final flush error: " + ex.Message);
+                ResetConnection();
+                return false;
+            }
+        }
+
+        private void RetryFinalUpload()
+        {
+            var deadline = DateTime.UtcNow + FinalFlushRetryWindow;
+            while (DateTime.UtcNow < deadline)
+            {
+                Thread.Sleep(FinalFlushRetryIntervalMs);
+                lock (_ioLock)
+                {
+                    if (!TryDrain()) continue;
+                    _log("Remaining EEG uploaded after the DB came back.");
+                    Close();
+                    _finishingUpload = false;
+                    return;
+                }
+            }
             lock (_ioLock)
             {
-                // ORDER IS LOAD-BEARING, and all four steps must happen on this one open
-                // connection before it closes:
-                //   1. Flush            — the last EEG rows land, advancing the sample counters to
-                //                         the final frame that actually arrived.
-                //   2. SealTrailingGap  — measures the tail dropout FROM that counter position, so
-                //                         it has to follow the flush, not precede it.
-                //   3. Diagnostics      — reads the now-final counts, including the tail gap.
-                //   4. Mark completed   — the "all my rows are in" signal every downstream worker
-                //                         gates on. Last, so nothing observes it early.
-                try { Flush(); }
-                catch (Exception ex) { _log("Final flush error: " + ex.Message); }
-
-                // Monitor is reentrant, so SealTrailingGap taking _ioLock again is safe here.
-                if (_sealStopUtc != default(DateTime))
-                {
-                    try { SealTrailingGap(_sealStopUtc); }
-                    catch (Exception ex) { _log("Trailing-gap seal failed: " + ex.Message); }
-                }
-
-                if (_markCompletedOnDispose)
-                {
-                    WriteSessionDiagnostics(_bridgeVersion);
-                    MarkCompletedInternal();
-                }
-                ResetConnection();
+                int lost = UnsentEegFrames;
+                Interlocked.Add(ref _filtDropped, _filtQ.Count + _filtPending.Count);
+                Interlocked.Add(ref _rawDropped, _rawQ.Count + _rawPending.Count);
+                _log($"ERROR: gave up uploading the last {lost} second(s) of EEG — the DB stayed unreachable " +
+                     $"for {FinalFlushRetryWindow.TotalMinutes:F0} min.");
+                Close();
+                _finishingUpload = false;
             }
+        }
+
+        // Steps 2-4 of closing out, after everything has been flushed. Caller holds _ioLock.
+        private void Close()
+        {
+            // ORDER IS LOAD-BEARING, and all of it must happen on one open connection after the
+            // final flush (TryDrain) has advanced the sample counters to the last frame that arrived:
+            //   1. SealTrailingGap  — measures the tail dropout FROM that counter position.
+            //   2. Diagnostics      — reads the now-final counts, including the tail gap.
+            //   3. Mark completed   — the "all my rows are in" signal every downstream worker
+            //                         gates on. Last, so nothing observes it early.
+            // Monitor is reentrant, so SealTrailingGap taking _ioLock again is safe here.
+            if (_sealStopUtc != default(DateTime))
+            {
+                try { SealTrailingGap(_sealStopUtc); }
+                catch (Exception ex) { _log("Trailing-gap seal failed: " + ex.Message); }
+            }
+
+            if (_markCompletedOnDispose)
+            {
+                WriteSessionDiagnostics(_bridgeVersion);
+                MarkCompletedInternal();
+            }
+            ResetConnection();
+
             _log($"DB uploader stopped. Sent {EegRowsSent} eeg + {BandRowsSent} band + {RawRowsSent} raw + {FiltRowsSent} filt rows" +
                  (Dropped > 0 || RawDropped > 0 || FiltDropped > 0
-                     ? $", dropped {Dropped} summary / {RawDropped} raw / {FiltDropped} filt frames (queue overflow)."
+                     ? $", dropped {Dropped} summary / {RawDropped} raw / {FiltDropped} filt frames."
                      : ".") +
                  $"  Frames accepted: {RawFramesIn} raw / {FiltFramesIn} filt" +
                  (RawResyncs > 0 || FiltResyncs > 0
