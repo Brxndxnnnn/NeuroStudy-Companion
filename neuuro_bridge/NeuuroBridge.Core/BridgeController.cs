@@ -16,11 +16,13 @@ namespace NeuuroBridge
     /// capture. Streaming starts on connect for preview; opening a DB session is a separate step.
     /// The console app and the WPF app both drive this; neither owns SDK/DB wiring directly.
     ///
-    /// Threading: SDK callbacks arrive on whatever <see cref="SynchronizationContext"/> was
-    /// current when <see cref="Initialize"/> ran. In WPF (initialised on the UI thread) the
-    /// events below therefore raise on the UI thread, so handlers can touch UI directly.
-    /// Per-sample DB timestamps are captured synchronously in the SDK layer, so upload
-    /// fidelity does not depend on which thread these events run on.
+    /// Threading: connection, scan, auth and status callbacks arrive on whatever
+    /// <see cref="SynchronizationContext"/> was current when <see cref="Initialize"/> ran (the UI
+    /// thread in WPF). High-rate EEG data callbacks (raw/filtered frames, PPG, SDK cognitive values,
+    /// impedance) arrive in order on SenzeBandService's dedicated EEG data thread, so the
+    /// <see cref="RawFrame"/>, <see cref="FftBandPowers"/>, blink/clench events raise THERE — UI
+    /// subscribers must marshal (MainWindow.Ui does). Per-sample DB timestamps are captured
+    /// synchronously in the SDK layer, so upload fidelity does not depend on either thread.
     /// </summary>
     public class BridgeController : IDisposable
     {
@@ -94,7 +96,8 @@ namespace NeuuroBridge
         // messages go to the same sink as everything else, so a refused request is visible in the
         // session log rather than being silently absent.
         private readonly BleConnectionTuner _bleTuner;
-        private DbUploader _db;
+        // Read on the EEG data thread, swapped on the UI/timer threads.
+        private volatile DbUploader _db;
 
         private readonly object _devLock = new object();
         private readonly Dictionary<string, SenzeBandDeviceInfo> _devices = new Dictionary<string, SenzeBandDeviceInfo>();
@@ -114,7 +117,7 @@ namespace NeuuroBridge
         private DateTime _lastEventPollUtc;      // cursor: only fetch events with shown_at after this
         private string _dbConnString;           // cached for the progress poll (avoids re-reading .env every tick)
         private Guid _sessionGuid;
-        private bool _draining;                 // Stop clicked; still accepting in-flight raw/filt/band frames (see StopGraceMs)
+        private volatile bool _draining;        // Stop clicked; still accepting in-flight raw/filt/band frames (see StopGraceMs)
         private Timer _stopGraceTimer;           // one-shot; fires FinalizeStop after the drain window
         private long _tailLostSamples;           // raw samples rejected AFTER the drain window closed (see TailLossSeconds)
         // How long to keep accepting raw/filt/band frames after Stop before actually closing the
@@ -188,6 +191,36 @@ namespace NeuuroBridge
 
         private bool _wired;
 
+        // ── EEG stall watchdog ────────────────────────────────────────────────
+        // A link can stay "connected" while the band stops sending EEG — no disconnect callback ever
+        // fires, so nothing used to notice until the session's rows came up short. Raw frames arrive
+        // about once a second, so several seconds of silence after authentication is a real stall.
+        // The watchdog re-sends the stream start command a few times and tells the technician.
+        private const double StallAfterSeconds = 5.0;
+        private static readonly double[] StallRestartAtSeconds = { 5.0, 15.0, 30.0 };
+        private Timer _stallWatchdog;
+        private long _authOkTicks;              // when authentication last succeeded (stall clock starts here)
+        private int _stallRestarts;
+        private bool _stallReported;
+        private double _stalledSeconds;
+
+        /// <summary>Seconds since the band last delivered EEG while it should be streaming (0 = flowing).</summary>
+        public double EegStalledSeconds => _stalledSeconds;
+        /// <summary>True while a dropped link is being recovered.</summary>
+        public bool IsReconnecting => _svc.IsReconnecting;
+        /// <summary>How long the current link recovery has been running.</summary>
+        public TimeSpan ReconnectElapsed => _svc.ReconnectElapsed;
+
+        // ── Battery warnings ──────────────────────────────────────────────────
+        // A band running flat is one of the likeliest causes of a mid-session drop. Each threshold is
+        // logged once per connection as the level falls through it.
+        public const int BatteryLowPercent = 20;
+        public const int BatteryCriticalPercent = 10;
+        private int _batteryWarnedAt = int.MaxValue;   // lowest threshold already warned about this connection
+
+        /// <summary>Last battery level as a number, if the band has reported one that parses.</summary>
+        public int? BatteryPercent { get; private set; }
+
         // ── Events (raised on the SDK callback's marshalled thread) ───────────
         public event Action<string> Log;
         public event Action Initialized;
@@ -212,7 +245,9 @@ namespace NeuuroBridge
         // ── State accessors ──────────────────────────────────────────────────
         public bool IsConnected => _svc.IsConnected;
         public bool IsAuthenticated => _svc.IsAuthenticated;
-        public bool SessionActive { get; private set; }
+        // Volatile: written on the UI/timer threads, read for every frame on the EEG data thread.
+        private volatile bool _sessionActive;
+        public bool SessionActive { get => _sessionActive; private set => _sessionActive = value; }
         /// <summary>True once the SDK stream is live (preview), independent of whether a DB session is recording.</summary>
         public bool IsStreaming => _streaming;
         public bool IsCapturing => _capturing;
@@ -313,6 +348,8 @@ namespace NeuuroBridge
             {
                 _connAddress = addr; _connDeviceID = id;
                 lock (_devLock) { _devices.TryGetValue(id, out var d); _connDevice = d; }
+                _batteryWarnedAt = int.MaxValue;   // a new connection warns about its own battery afresh
+                StartStallWatchdog();
                 Connected?.Invoke(addr, id);
                 // Ask Windows for a faster BLE interval before any streaming begins. The default
                 // ~30 ms interval carries ~32 of the ~40 notifications/s the headset wants to send,
@@ -371,6 +408,8 @@ namespace NeuuroBridge
                 if (_draining) FinalizeStop();
                 _streaming = false;
                 SessionActive = false;
+                _svc.KeepReconnecting = false;
+                StopStallWatchdog();
                 StopSyncPoll();
                 StopProgressPollUnlessSurveyPending();
                 StopSummaryPoll();
@@ -386,7 +425,7 @@ namespace NeuuroBridge
             _svc.OnSignalReady += ready => { lock (_stateLock) _signalReady = ready; SignalStateChanged?.Invoke(); };
             _svc.OnChannelStatus += ch => { lock (_stateLock) _channels = ch; SignalStateChanged?.Invoke(); };
             _svc.OnImpedance += imp => { lock (_stateLock) _impedance = imp; SignalStateChanged?.Invoke(); };
-            _svc.OnBattery += b => { lock (_stateLock) _battery = b; SignalStateChanged?.Invoke(); };
+            _svc.OnBattery += b => { lock (_stateLock) _battery = b; CheckBattery(b); SignalStateChanged?.Invoke(); };
             _svc.OnSpo2HeartRate += v =>
             {
                 if (v == null || v.Length < 2) return;
@@ -400,7 +439,12 @@ namespace NeuuroBridge
             // powers, live cache, CSV) now comes from our own documented 100Hz low-pass
             // (HandleRawEeg -> ApplyLowPass), not the SDK's own onboard filter. OnFilteredEeg is
             // deliberately no longer consumed for any of this — see HandleRawEeg.
-            _svc.OnAuthStatus += (ok, detail) => AuthChanged?.Invoke(ok, detail);
+            _svc.OnAuthStatus += (ok, detail) =>
+            {
+                // EEG only flows once authenticated, so that is when the stall clock starts.
+                Interlocked.Exchange(ref _authOkTicks, ok ? DateTime.UtcNow.Ticks : 0);
+                AuthChanged?.Invoke(ok, detail);
+            };
 
             _svc.OnAttention += v => { lock (_stateLock) _sdkAttention = v; SdkCognitiveChanged?.Invoke(); };
             _svc.OnRelaxation += v => { lock (_stateLock) _sdkRelaxation = v; SdkCognitiveChanged?.Invoke(); };
@@ -424,6 +468,8 @@ namespace NeuuroBridge
         {
             StopSession();
             if (_draining) FinalizeStop();   // device is going away — don't wait out the rest of the drain window
+            _svc.KeepReconnecting = false;   // the technician chose to end the link
+            StopStallWatchdog();
             StopSyncPoll();          // StopSession only stops it if recording; stop here for the preview-only case
             StopProgressPollUnlessSurveyPending();   // see there: the survey outlives the BLE link
             StopSummaryPoll();
@@ -526,6 +572,9 @@ namespace NeuuroBridge
             RecordingStopUtc = default(DateTime);
             Interlocked.Exchange(ref _tailLostSamples, 0);
             SessionActive = true;
+            // While recording, a lost band is retried until it comes back or the session is ended,
+            // instead of the session being closed after a minute (see SenzeBandService.KeepReconnecting).
+            _svc.KeepReconnecting = true;
             StartSummaryPoll();
             if (_db != null && _db.MarkRecording()) _recordingAnnounced = true;
             SessionStarted?.Invoke();
@@ -544,6 +593,7 @@ namespace NeuuroBridge
             if (!SessionActive) return;
             RecordingStopUtc = DateTime.UtcNow;   // freeze the recording window for expected-row math
             SessionActive = false;
+            _svc.KeepReconnecting = false;        // no recording to protect any more: normal reconnect budget
             _draining = true;
             StopSyncPoll();
             StopSummaryPoll();
@@ -604,6 +654,80 @@ namespace NeuuroBridge
         // ── Sync-status poll: reads sessions.sync_status and drives the coordinated-start
         //    handshake. ~1 s cadence so the web's Start/End is detected near-instantly; the read
         //    itself is non-blocking (Monitor.TryEnter) so it never contends with the write path. ──
+        // ── EEG stall watchdog (see the field notes) ──
+        private void StartStallWatchdog()
+        {
+            _stallRestarts = 0;
+            _stallReported = false;
+            _stalledSeconds = 0;
+            if (_stallWatchdog != null) return;
+            _stallWatchdog = new Timer(_ => CheckStall(), null, 1000, 1000);
+        }
+
+        private void StopStallWatchdog()
+        {
+            try { _stallWatchdog?.Dispose(); } catch { /* ignore */ }
+            _stallWatchdog = null;
+            _stalledSeconds = 0;
+        }
+
+        private void CheckStall()
+        {
+            try
+            {
+                // Only meaningful while the link is up, authenticated and supposed to be streaming. A
+                // reconnect has its own handling and UI; before authentication no EEG is expected.
+                long authTicks = Interlocked.Read(ref _authOkTicks);
+                if (!_svc.IsConnected || _svc.IsReconnecting || !_svc.IsAuthenticated || !_streaming || authTicks == 0)
+                {
+                    _stalledSeconds = 0;
+                    return;
+                }
+
+                long lastTicks = Math.Max(_svc.LastRawArrivalUtc.Ticks, authTicks);
+                double silent = (DateTime.UtcNow.Ticks - lastTicks) / (double)TimeSpan.TicksPerSecond;
+                if (silent < StallAfterSeconds)
+                {
+                    if (_stallReported)
+                        Log?.Invoke($"[watchdog] EEG is arriving again (stopped for {_stalledSeconds:F0} s).");
+                    _stallReported = false;
+                    _stallRestarts = 0;
+                    _stalledSeconds = 0;
+                    return;
+                }
+
+                _stalledSeconds = silent;
+                if (!_stallReported)
+                {
+                    _stallReported = true;
+                    Log?.Invoke($"[watchdog] No EEG from the band for {silent:F0} s although it is connected" +
+                                (SessionActive ? " — this part of the recording is being lost." : ".") +
+                                " Check the band is worn and switched on.");
+                }
+                if (_stallRestarts < StallRestartAtSeconds.Length && silent >= StallRestartAtSeconds[_stallRestarts])
+                {
+                    _stallRestarts++;
+                    _svc.RestartStream();
+                }
+            }
+            catch { /* advisory: never let the watchdog take the bridge down */ }
+        }
+
+        private void CheckBattery(string reported)
+        {
+            if (!double.TryParse(reported?.Trim().TrimEnd('%'), NumberStyles.Float, CultureInfo.InvariantCulture, out var pct))
+                return;
+            int level = (int)Math.Round(pct);
+            BatteryPercent = level;
+            int threshold = level <= BatteryCriticalPercent ? BatteryCriticalPercent
+                          : level <= BatteryLowPercent ? BatteryLowPercent : int.MaxValue;
+            if (threshold >= _batteryWarnedAt) return;
+            _batteryWarnedAt = threshold;
+            Log?.Invoke(threshold == BatteryCriticalPercent
+                ? $"WARNING: band battery critical ({level}%) — it may switch off mid-session. Charge it before recording."
+                : $"WARNING: band battery low ({level}%) — charge it before the next session.");
+        }
+
         private void StartSyncPoll()
         {
             if (_syncPoll != null) return;
@@ -855,7 +979,7 @@ namespace NeuuroBridge
                 float[] filtered = ApplyLowPass(frame.IntSamples);
                 lock (_stateLock) _lastFiltered = filtered;
                 _processor.AddFilteredFrame(filtered);
-                UploadFilteredFrame(filtered);
+                UploadFilteredFrame(filtered, frame.ArrivalUtc);
                 if (_capturing) lock (_captureLock) _capFilt.Add((DateTime.UtcNow, filtered));
                 DetectBlink(filtered);
             }
@@ -897,13 +1021,20 @@ namespace NeuuroBridge
         private void DetectBlink(float[] filtered)
         {
             int spc = filtered.Length / ChannelCount;
+            if (spc == 0) return;
             float peak = 0;
             for (int ch = 0; ch <= 1; ch++) // Fp1, Fp2 — frontal channels only
             {
                 int baseIdx = ch * spc;
+                // Measure the deflection from this frame's own baseline, not from zero. The filtered
+                // stream is a low-pass of the raw signal and keeps the electrode's DC offset, so an
+                // absolute threshold fired on the offset rather than on blinks.
+                double mean = 0;
+                for (int i = 0; i < spc; i++) mean += filtered[baseIdx + i];
+                mean /= spc;
                 for (int i = 0; i < spc; i++)
                 {
-                    float abs = Math.Abs(filtered[baseIdx + i]);
+                    float abs = (float)Math.Abs(filtered[baseIdx + i] - mean);
                     if (abs > peak) peak = abs;
                 }
             }
@@ -983,15 +1114,20 @@ namespace NeuuroBridge
 
         // Streams our own 100Hz-low-pass-filtered (µV) frames to eeg_filtered_samples (see
         // ApplyLowPass), mirroring the raw path. The array is a fresh per-call allocation (not
-        // shared/mutated elsewhere) and carries no SDK arrival stamp — so DbNow at handler time
-        // anchors the per-sample counter clock.
-        private void UploadFilteredFrame(float[] frame)
+        // shared/mutated elsewhere).
+        //
+        // Stamped with the SOURCE raw frame's arrival time, exactly like the raw stream. It used to
+        // take DbNow at handler time, but handlers run wherever the SDK's callbacks are marshalled
+        // (the UI thread in the WPF app), so any UI stall longer than the filtered drift tolerance
+        // (700 ms) made this stream record a gap that never happened and shifted everything after it
+        // later than the image/question events — on the very stream ml_service trains on.
+        private void UploadFilteredFrame(float[] frame, DateTime arrivalUtc)
         {
             if (frame == null) return;
             // Local ref: StopSession may dispose _db on another thread mid-frame.
             var db = _db;
             if ((SessionActive || _draining) && db != null && db.Streaming)
-                db.EnqueueFiltered(db.DbNow, frame);
+                db.EnqueueFiltered(db.ToDbTime(arrivalUtc), frame);
         }
 
         private void UploadBandPowers(BandPowers[] powers)
@@ -1197,6 +1333,7 @@ namespace NeuuroBridge
         public void Dispose()
         {
             _streaming = false;
+            StopStallWatchdog();
             StopSyncPoll();
             StopProgressPoll();
             StopSummaryPoll();

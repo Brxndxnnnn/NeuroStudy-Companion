@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Concurrent;
 using System.Diagnostics;
 using System.Threading;
 using NeeuroOSWindows;
@@ -44,6 +45,20 @@ namespace NeuuroBridge
         private SenzeBandService() { }
 
         private SynchronizationContext _context;
+
+        // ── EEG data thread ─────────────────────────────────────────────────
+        // Every SDK callback used to be Posted to the context captured at Initialize — in the WPF app,
+        // the UI thread. So the 100 Hz low-pass, FFT, artefact detection and DB queueing all shared a
+        // thread with chart rendering, the log box and modal dialogs, and any UI hiccup delayed the
+        // EEG pipeline behind it. High-rate data callbacks now go to one dedicated thread instead: it
+        // keeps their order (one consumer, FIFO — the filters are stateful and need it) and is never
+        // blocked by the UI. Connection, scan, auth and status callbacks stay on the original context,
+        // which is what the UI-facing handlers expect. Controller events raised from this thread are
+        // marshalled to the UI by MainWindow.Ui() as before.
+        private readonly BlockingCollection<Action> _dataQueue = new BlockingCollection<Action>();
+        private Thread _dataThread;
+        private const int DataBacklogWarn = 50;   // ~50 s of frames waiting = processing can't keep up
+        private long _lastBacklogWarnTicks;
         private string _connectedAddress = "";
         private string _connectedDeviceID = "";
         private string _license = "";
@@ -78,10 +93,34 @@ namespace NeuuroBridge
         private readonly Stopwatch _reconnectClock = new Stopwatch();
         private const int ReconnectBudgetMs = 60_000;   // give up after ~60 s of a missing band
         private const int ReconnectDelayMs = 1500;      // backoff between reconnect attempts
+        private const int ReconnectLogEveryMs = 30_000; // past the budget, log progress this often (not every attempt)
+        private long _lastReconnectLogMs;
+
+        /// <summary>
+        /// While true, a dropped link is retried for as long as it takes instead of giving up after
+        /// <see cref="ReconnectBudgetMs"/>. The controller sets it while a recording is in progress: a
+        /// band that is switched off or out of range for a minute should not end the session behind the
+        /// technician's back — the gap is recorded honestly, and the technician (or the website ending
+        /// the session) decides when it is over. Read on every attempt, so clearing it mid-outage lets
+        /// the ordinary budget apply from then on.
+        /// </summary>
+        public volatile bool KeepReconnecting;
+
+        // ── Authentication retry ────────────────────────────────────────────
+        // Raw EEG stays locked until Neeuro's servers approve the device, and that round trip happens
+        // on every (re)connect. A failed or timed-out attempt used to wait for the next MCU report or a
+        // manual Re-auth — after a mid-session reconnect that meant the rest of the recording was lost.
+        private static readonly int[] AuthRetryDelaysMs = { 2000, 5000, 10000, 20000, 30000 };   // last repeats
+        private int _authFailures;
+        private Timer _authRetryTimer;
 
         public bool IsConnected => !string.IsNullOrEmpty(_connectedAddress);
         public bool IsInitialized => _initialized;
         public bool IsAuthenticated => _isAuthenticated;
+        /// <summary>True while a dropped link is being recovered.</summary>
+        public bool IsReconnecting => _reconnecting;
+        /// <summary>How long the current link recovery has been running (zero when not reconnecting).</summary>
+        public TimeSpan ReconnectElapsed => _reconnecting ? _reconnectClock.Elapsed : TimeSpan.Zero;
 
         // ── Events ──────────────────────────────────────────────────────────
         public event Action OnInitialized;
@@ -114,6 +153,7 @@ namespace NeuuroBridge
         {
             _license = licenseCode ?? "";
             _context = SynchronizationContext.Current ?? new SynchronizationContext();
+            StartDataThread();
             Log("Initialize()");
             SenzeBandWindowsInterface.getSBWIHandler().initializeSBWI(
                 ConnectedCallback,
@@ -155,8 +195,7 @@ namespace NeuuroBridge
             _connectAttempts++;
             if (_connectAttempts == 1) Log("Connecting to " + _connectTargetId + " ...");
             else Log("Retrying connect to " + _connectTargetId + " (attempt " + _connectAttempts + "/" + MaxConnectAttempts + ")...");
-            try { SenzeBandWindowsInterface.getSBWIHandler().connectBT(_connectTargetId); }
-            catch (Exception ex) { Log("connectBT error: " + ex.Message); }
+            TimedConnectBT(_connectTargetId, "connect");
         }
 
         public void Disconnect()
@@ -183,7 +222,31 @@ namespace NeuuroBridge
             _mcuId = null;
             _authAttempted = false;
             _isAuthenticated = false;
+            CancelAuthRetry();
             try { DeviceAuthentication.instance.OnDisconnect(); } catch { /* ignore */ }
+        }
+
+        private void CancelAuthRetry()
+        {
+            _authFailures = 0;
+            var t = _authRetryTimer; _authRetryTimer = null;
+            try { t?.Dispose(); } catch { }
+        }
+
+        // Called after a failed or timed-out authentication: try again with backoff for as long as
+        // the band stays connected. A success, disconnect or new connection cancels it.
+        private void ScheduleAuthRetry()
+        {
+            if (!IsConnected) return;
+            int delay = AuthRetryDelaysMs[Math.Min(_authFailures, AuthRetryDelaysMs.Length - 1)];
+            _authFailures++;
+            Log($"Authentication will be retried in {delay / 1000} s (attempt {_authFailures + 1}) — raw EEG stays locked until it succeeds.");
+            var t = new Timer(_ => Post(() =>
+            {
+                if (IsConnected && !_isAuthenticated) Authenticate();
+            }), null, delay, Timeout.Infinite);
+            var old = _authRetryTimer; _authRetryTimer = t;
+            try { old?.Dispose(); } catch { }
         }
 
         private void CancelConnectRetry()
@@ -201,6 +264,21 @@ namespace NeuuroBridge
             _reconnectClock.Reset();
         }
 
+        // connectBT runs on the context captured at Initialize (the UI thread in WPF). Whether it
+        // returns at once and reports back through the callbacks, or blocks until the radio answers,
+        // is undocumented. Reconnect attempts land ~10 s apart in real logs, which would mean a frozen
+        // UI during each attempt if it blocks. Since EEG processing now has its own thread, a block
+        // only freezes the UI — but measure it, so the next step is decided on evidence.
+        private void TimedConnectBT(string deviceId, string what)
+        {
+            var sw = Stopwatch.StartNew();
+            try { SenzeBandWindowsInterface.getSBWIHandler().connectBT(deviceId); }
+            catch (Exception ex) { Log(what + " connectBT error: " + ex.Message); }
+            sw.Stop();
+            if (sw.ElapsedMilliseconds >= 500)
+                Log($"[diag] {what} connectBT blocked its calling thread for {sw.ElapsedMilliseconds} ms.");
+        }
+
         // ── Mid-session reconnect loop ──────────────────────────────────────
         private void BeginReconnect(string droppedAddress)
         {
@@ -209,7 +287,9 @@ namespace NeuuroBridge
             _reconnectAddress = droppedAddress;
             _connectedAddress = "";          // link is down — block stream commands until restored
             _isAuthenticated = false;
+            CancelAuthRetry();
             _reconnectClock.Restart();
+            _lastReconnectLogMs = 0;
             Log("Link dropped — reconnecting to " + _reconnectDeviceId + " (up to " + (ReconnectBudgetMs / 1000) + " s)...");
             Post(() => OnConnectionInterrupted?.Invoke(droppedAddress));
             ScheduleReconnectAttempt();
@@ -225,15 +305,28 @@ namespace NeuuroBridge
         private void ReconnectAttempt()
         {
             if (!_reconnecting) return;
-            if (_reconnectClock.ElapsedMilliseconds > ReconnectBudgetMs)
+            long elapsedMs = _reconnectClock.ElapsedMilliseconds;
+            if (elapsedMs > ReconnectBudgetMs)
             {
-                Log("Reconnect budget exhausted — link is gone.");
-                FinishReconnectFailed();
-                return;
+                if (!KeepReconnecting)
+                {
+                    Log("Reconnect budget exhausted — link is gone.");
+                    FinishReconnectFailed();
+                    return;
+                }
+                // Recording in progress: keep trying, but don't flood the log with every attempt.
+                if (elapsedMs - _lastReconnectLogMs >= ReconnectLogEveryMs)
+                {
+                    _lastReconnectLogMs = elapsedMs;
+                    Log($"Band still unreachable after {elapsedMs / 1000} s — still reconnecting because a recording " +
+                        "is in progress. Check the band is switched on, charged and nearby.");
+                }
             }
-            Log("Reconnect attempt to " + _reconnectDeviceId + " ...");
-            try { SenzeBandWindowsInterface.getSBWIHandler().connectBT(_reconnectDeviceId); }
-            catch (Exception ex) { Log("reconnect connectBT error: " + ex.Message); }
+            else
+            {
+                Log("Reconnect attempt to " + _reconnectDeviceId + " ...");
+            }
+            TimedConnectBT(_reconnectDeviceId, "reconnect");
             // A failed attempt re-enters ConnectFailCallback, which queues the next try (until budget).
         }
 
@@ -246,6 +339,7 @@ namespace NeuuroBridge
             _mcuId = null;
             _isAuthenticated = false;
             _authAttempted = false;
+            CancelAuthRetry();
             try { DeviceAuthentication.instance.OnDisconnect(); } catch { }
             Log("Disconnected (reconnect failed): " + addr);
             Post(() => OnDisconnected?.Invoke(addr));
@@ -260,6 +354,22 @@ namespace NeuuroBridge
             SenzeBandConnectInterface.getSBCIHandler().setEEG_Analyzing(true);
             SenzeBandWindowsInterface.getSBWIHandler().sendStartCommand(_connectedAddress);
             Log("Stream started.");
+        }
+
+        /// <summary>
+        /// Re-sends the start command for a link that is up but has stopped delivering EEG (see the
+        /// controller's stall watchdog). Safe from any thread: the SDK call is marshalled like every
+        /// other callback-side action.
+        /// </summary>
+        public void RestartStream()
+        {
+            Post(() =>
+            {
+                if (!IsConnected) return;
+                Log("Re-sending the stream start command (no EEG arriving)...");
+                try { StartStream(); }
+                catch (Exception ex) { Log("Stream restart error: " + ex.Message); }
+            });
         }
 
         public void StopStream()
@@ -286,10 +396,10 @@ namespace NeuuroBridge
             // Required no-op delegates: connectingToNewDevice() invokes these
             // unconditionally; leaving any unassigned throws NullReferenceException
             // inside the SDK during connect.
-            sbci.assignAttentionDelegate(v => Post(() => OnAttention?.Invoke(v)));
-            sbci.assignRelaxationDelegate(v => Post(() => OnRelaxation?.Invoke(v)));
-            sbci.assignMentalWorkloadDelegate(v => Post(() => OnMentalWorkload?.Invoke(v)));
-            sbci.assignABDTDelegate(v => Post(() => OnAbdt?.Invoke(v)));
+            sbci.assignAttentionDelegate(v => PostData(() => OnAttention?.Invoke(v)));
+            sbci.assignRelaxationDelegate(v => PostData(() => OnRelaxation?.Invoke(v)));
+            sbci.assignMentalWorkloadDelegate(v => PostData(() => OnMentalWorkload?.Invoke(v)));
+            sbci.assignABDTDelegate(v => { var c = (float[,])v?.Clone(); PostData(() => OnAbdt?.Invoke(c)); });
             sbci.assignAccDelegate(_ => { });
             sbci.assignMCUDelegate(OnMcu);   // MCU ID is needed to authenticate the device
             sbci.assignFirmwareVerDelegate(_ => { });
@@ -298,10 +408,10 @@ namespace NeuuroBridge
             sbci.assignSenzebandVersionDelegate(_ => { });
             sbci.assignEvokeDelegate(_ => { });
             sbci.assignDirectionDelegate(_ => { });
-            sbci.assignImpedanceDelegate(v => Post(() => OnImpedance?.Invoke(v)));
+            sbci.assignImpedanceDelegate(v => { var c = (float[])v?.Clone(); PostData(() => OnImpedance?.Invoke(c)); });
             sbci.assignCalParamsDelegate(_ => { });
             // SDK reuses its buffer; clone synchronously before the pooled handler (same race as raw).
-            sbci.assignSPO2HeartRateDelegate(v => { var c = (int[])v.Clone(); Post(() => OnSpo2HeartRate?.Invoke(c)); });
+            sbci.assignSPO2HeartRateDelegate(v => { var c = (int[])v?.Clone(); PostData(() => OnSpo2HeartRate?.Invoke(c)); });
             sbci.assignRawData200msDelegate(_ => { });
             sbci.assignFilteredDataDelegate(OnFiltered);   // band-passed, zero-centered EEG
             sbci.assignPPGDataDelegate(_ => { });     // must be assigned: PPG packets NPE grabCharacteristic otherwise
@@ -398,7 +508,11 @@ namespace NeuuroBridge
                 // manual Re-auth can try again, rather than being blocked by "already attempted".
                 if (!ok) _svc._authAttempted = false;
                 _svc.Log($"Auth result for {address}: {result} {message}");
-                _svc.Post(() => _svc.OnAuthStatus?.Invoke(ok, result + " " + message));
+                _svc.Post(() =>
+                {
+                    if (ok) _svc.CancelAuthRetry(); else _svc.ScheduleAuthRetry();
+                    _svc.OnAuthStatus?.Invoke(ok, result + " " + message);
+                });
             }
 
             public void timeUp(object obj)
@@ -406,31 +520,50 @@ namespace NeuuroBridge
                 _svc._isAuthenticated = false;
                 _svc._authAttempted = false;   // allow a retry instead of staying stuck unauthenticated
                 _svc.Log("Authentication timed out.");
-                _svc.Post(() => _svc.OnAuthStatus?.Invoke(false, "timeout"));
+                _svc.Post(() =>
+                {
+                    _svc.ScheduleAuthRetry();
+                    _svc.OnAuthStatus?.Invoke(false, "timeout");
+                });
             }
         }
 
         // ── Raw / filtered EEG callbacks ────────────────────────────────────
-        // The SDK reuses its sample buffer for the next frame, and Post() runs the handler
-        // LATER on a thread-pool thread — so the buffer MUST be cloned and the arrival time
-        // captured here, synchronously, before we hand off. Cloning on the pooled handler
-        // (as before) raced the SDK overwriting the buffer.
+        // The SDK reuses its sample buffer for the next frame, and PostData() runs the handler
+        // LATER on the EEG data thread — so the buffer MUST be cloned and the arrival time
+        // captured here, synchronously, before we hand off. Cloning in the handler (as it once
+        // did) raced the SDK overwriting the buffer.
         private void OnRawInt(int[] data)
         {
             var frame = new RawEegFrame { IntSamples = (int[])data.Clone(), ArrivalUtc = DateTime.UtcNow };
-            Post(() => OnRawEeg?.Invoke(frame));
+            Interlocked.Exchange(ref _lastRawArrivalTicks, frame.ArrivalUtc.Ticks);
+            PostData(() => OnRawEeg?.Invoke(frame));
+        }
+
+        // Stamped on the SDK's own callback thread, so the stall watchdog sees the band stop sending
+        // even when the thread that processes frames is busy.
+        private long _lastRawArrivalTicks;
+
+        /// <summary>When the SDK last delivered a raw EEG frame (default if none yet).</summary>
+        public DateTime LastRawArrivalUtc
+        {
+            get
+            {
+                long t = Interlocked.Read(ref _lastRawArrivalTicks);
+                return t == 0 ? default(DateTime) : new DateTime(t, DateTimeKind.Utc);
+            }
         }
 
         private void OnRawFloat(float[] data)
         {
             var frame = new RawEegFrame { FloatSamples = (float[])data.Clone(), ArrivalUtc = DateTime.UtcNow };
-            Post(() => OnRawEeg?.Invoke(frame));
+            PostData(() => OnRawEeg?.Invoke(frame));
         }
 
         private void OnFiltered(float[] data)
         {
-            var copy = (float[])data.Clone();   // same buffer-reuse race as raw; clone before the pooled handler
-            Post(() => OnFilteredEeg?.Invoke(copy));
+            var copy = (float[])data.Clone();   // same buffer-reuse race as raw; clone before the handler runs
+            PostData(() => OnFilteredEeg?.Invoke(copy));
         }
 
         // ── Scan callbacks ──────────────────────────────────────────────────
@@ -463,6 +596,7 @@ namespace NeuuroBridge
             _connectedDeviceID = id;
             _isAuthenticated = false;
             _authAttempted = false;
+            CancelAuthRetry();      // a fresh link starts its own auth (and retry) sequence
             if (wasReconnecting)
             {
                 Log("Reconnected: " + id + " @ " + address);
@@ -513,6 +647,7 @@ namespace NeuuroBridge
             _mcuId = null;
             _isAuthenticated = false;
             _authAttempted = false;
+            CancelAuthRetry();
             try { DeviceAuthentication.instance.OnDisconnect(); } catch { }
             Log("Disconnected/failed: " + address);
             Post(() => OnDisconnected?.Invoke(address));
@@ -528,6 +663,48 @@ namespace NeuuroBridge
             CanPair = d.canPair,
             IsEnabled = d.isEnabled
         };
+
+        private void StartDataThread()
+        {
+            if (_dataThread != null) return;
+            _dataThread = new Thread(RunDataThread)
+            {
+                IsBackground = true,                      // never keeps the process alive on exit
+                Name = "SenzeBand EEG data",
+                Priority = ThreadPriority.AboveNormal,    // EEG must not wait behind UI or housekeeping work
+            };
+            _dataThread.Start();
+        }
+
+        private void RunDataThread()
+        {
+            foreach (var action in _dataQueue.GetConsumingEnumerable())
+            {
+                try { action(); }
+                catch (Exception ex)
+                {
+                    // One bad frame must not stop every later frame from being processed.
+                    Log("EEG data handler error (frame skipped): " + ex.GetType().Name + ": " + ex.Message);
+                }
+            }
+        }
+
+        private void PostData(Action action)
+        {
+            if (_dataThread == null || _dataQueue.IsAddingCompleted) { Post(action); return; }
+            try { _dataQueue.Add(action); }
+            catch (InvalidOperationException) { return; }   // shutting down
+            int depth = _dataQueue.Count;
+            if (depth > DataBacklogWarn)
+            {
+                long now = DateTime.UtcNow.Ticks;
+                if (now - Interlocked.Read(ref _lastBacklogWarnTicks) > TimeSpan.TicksPerSecond * 30)
+                {
+                    Interlocked.Exchange(ref _lastBacklogWarnTicks, now);
+                    Log($"WARNING: {depth} EEG callbacks waiting to be processed — this PC is not keeping up.");
+                }
+            }
+        }
 
         private void Post(Action action)
         {
@@ -552,6 +729,7 @@ namespace NeuuroBridge
             _intentionalDisconnect = true;
             CancelConnectRetry();
             CancelReconnect();
+            CancelAuthRetry();
             try
             {
                 if (!string.IsNullOrEmpty(_connectedAddress))
@@ -569,6 +747,7 @@ namespace NeuuroBridge
             catch (Exception ex) { Log("Shutdown stopScanning error: " + ex.Message); }
 
             _initialized = false;
+            try { _dataQueue.CompleteAdding(); } catch { /* ignore */ }
         }
     }
 }
