@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Concurrent;
 using System.Diagnostics;
 using System.Threading;
 using NeeuroOSWindows;
@@ -44,6 +45,20 @@ namespace NeuuroBridge
         private SenzeBandService() { }
 
         private SynchronizationContext _context;
+
+        // ── EEG data thread ─────────────────────────────────────────────────
+        // Every SDK callback used to be Posted to the context captured at Initialize — in the WPF app,
+        // the UI thread. So the 100 Hz low-pass, FFT, artefact detection and DB queueing all shared a
+        // thread with chart rendering, the log box and modal dialogs, and any UI hiccup delayed the
+        // EEG pipeline behind it. High-rate data callbacks now go to one dedicated thread instead: it
+        // keeps their order (one consumer, FIFO — the filters are stateful and need it) and is never
+        // blocked by the UI. Connection, scan, auth and status callbacks stay on the original context,
+        // which is what the UI-facing handlers expect. Controller events raised from this thread are
+        // marshalled to the UI by MainWindow.Ui() as before.
+        private readonly BlockingCollection<Action> _dataQueue = new BlockingCollection<Action>();
+        private Thread _dataThread;
+        private const int DataBacklogWarn = 50;   // ~50 s of frames waiting = processing can't keep up
+        private long _lastBacklogWarnTicks;
         private string _connectedAddress = "";
         private string _connectedDeviceID = "";
         private string _license = "";
@@ -138,6 +153,7 @@ namespace NeuuroBridge
         {
             _license = licenseCode ?? "";
             _context = SynchronizationContext.Current ?? new SynchronizationContext();
+            StartDataThread();
             Log("Initialize()");
             SenzeBandWindowsInterface.getSBWIHandler().initializeSBWI(
                 ConnectedCallback,
@@ -179,8 +195,7 @@ namespace NeuuroBridge
             _connectAttempts++;
             if (_connectAttempts == 1) Log("Connecting to " + _connectTargetId + " ...");
             else Log("Retrying connect to " + _connectTargetId + " (attempt " + _connectAttempts + "/" + MaxConnectAttempts + ")...");
-            try { SenzeBandWindowsInterface.getSBWIHandler().connectBT(_connectTargetId); }
-            catch (Exception ex) { Log("connectBT error: " + ex.Message); }
+            TimedConnectBT(_connectTargetId, "connect");
         }
 
         public void Disconnect()
@@ -249,6 +264,21 @@ namespace NeuuroBridge
             _reconnectClock.Reset();
         }
 
+        // connectBT runs on the context captured at Initialize (the UI thread in WPF). Whether it
+        // returns at once and reports back through the callbacks, or blocks until the radio answers,
+        // is undocumented. Reconnect attempts land ~10 s apart in real logs, which would mean a frozen
+        // UI during each attempt if it blocks. Since EEG processing now has its own thread, a block
+        // only freezes the UI — but measure it, so the next step is decided on evidence.
+        private void TimedConnectBT(string deviceId, string what)
+        {
+            var sw = Stopwatch.StartNew();
+            try { SenzeBandWindowsInterface.getSBWIHandler().connectBT(deviceId); }
+            catch (Exception ex) { Log(what + " connectBT error: " + ex.Message); }
+            sw.Stop();
+            if (sw.ElapsedMilliseconds >= 500)
+                Log($"[diag] {what} connectBT blocked its calling thread for {sw.ElapsedMilliseconds} ms.");
+        }
+
         // ── Mid-session reconnect loop ──────────────────────────────────────
         private void BeginReconnect(string droppedAddress)
         {
@@ -296,8 +326,7 @@ namespace NeuuroBridge
             {
                 Log("Reconnect attempt to " + _reconnectDeviceId + " ...");
             }
-            try { SenzeBandWindowsInterface.getSBWIHandler().connectBT(_reconnectDeviceId); }
-            catch (Exception ex) { Log("reconnect connectBT error: " + ex.Message); }
+            TimedConnectBT(_reconnectDeviceId, "reconnect");
             // A failed attempt re-enters ConnectFailCallback, which queues the next try (until budget).
         }
 
@@ -367,10 +396,10 @@ namespace NeuuroBridge
             // Required no-op delegates: connectingToNewDevice() invokes these
             // unconditionally; leaving any unassigned throws NullReferenceException
             // inside the SDK during connect.
-            sbci.assignAttentionDelegate(v => Post(() => OnAttention?.Invoke(v)));
-            sbci.assignRelaxationDelegate(v => Post(() => OnRelaxation?.Invoke(v)));
-            sbci.assignMentalWorkloadDelegate(v => Post(() => OnMentalWorkload?.Invoke(v)));
-            sbci.assignABDTDelegate(v => Post(() => OnAbdt?.Invoke(v)));
+            sbci.assignAttentionDelegate(v => PostData(() => OnAttention?.Invoke(v)));
+            sbci.assignRelaxationDelegate(v => PostData(() => OnRelaxation?.Invoke(v)));
+            sbci.assignMentalWorkloadDelegate(v => PostData(() => OnMentalWorkload?.Invoke(v)));
+            sbci.assignABDTDelegate(v => { var c = (float[,])v?.Clone(); PostData(() => OnAbdt?.Invoke(c)); });
             sbci.assignAccDelegate(_ => { });
             sbci.assignMCUDelegate(OnMcu);   // MCU ID is needed to authenticate the device
             sbci.assignFirmwareVerDelegate(_ => { });
@@ -379,10 +408,10 @@ namespace NeuuroBridge
             sbci.assignSenzebandVersionDelegate(_ => { });
             sbci.assignEvokeDelegate(_ => { });
             sbci.assignDirectionDelegate(_ => { });
-            sbci.assignImpedanceDelegate(v => Post(() => OnImpedance?.Invoke(v)));
+            sbci.assignImpedanceDelegate(v => { var c = (float[])v?.Clone(); PostData(() => OnImpedance?.Invoke(c)); });
             sbci.assignCalParamsDelegate(_ => { });
             // SDK reuses its buffer; clone synchronously before the pooled handler (same race as raw).
-            sbci.assignSPO2HeartRateDelegate(v => { var c = (int[])v.Clone(); Post(() => OnSpo2HeartRate?.Invoke(c)); });
+            sbci.assignSPO2HeartRateDelegate(v => { var c = (int[])v?.Clone(); PostData(() => OnSpo2HeartRate?.Invoke(c)); });
             sbci.assignRawData200msDelegate(_ => { });
             sbci.assignFilteredDataDelegate(OnFiltered);   // band-passed, zero-centered EEG
             sbci.assignPPGDataDelegate(_ => { });     // must be assigned: PPG packets NPE grabCharacteristic otherwise
@@ -500,15 +529,15 @@ namespace NeuuroBridge
         }
 
         // ── Raw / filtered EEG callbacks ────────────────────────────────────
-        // The SDK reuses its sample buffer for the next frame, and Post() runs the handler
-        // LATER on a thread-pool thread — so the buffer MUST be cloned and the arrival time
-        // captured here, synchronously, before we hand off. Cloning on the pooled handler
-        // (as before) raced the SDK overwriting the buffer.
+        // The SDK reuses its sample buffer for the next frame, and PostData() runs the handler
+        // LATER on the EEG data thread — so the buffer MUST be cloned and the arrival time
+        // captured here, synchronously, before we hand off. Cloning in the handler (as it once
+        // did) raced the SDK overwriting the buffer.
         private void OnRawInt(int[] data)
         {
             var frame = new RawEegFrame { IntSamples = (int[])data.Clone(), ArrivalUtc = DateTime.UtcNow };
             Interlocked.Exchange(ref _lastRawArrivalTicks, frame.ArrivalUtc.Ticks);
-            Post(() => OnRawEeg?.Invoke(frame));
+            PostData(() => OnRawEeg?.Invoke(frame));
         }
 
         // Stamped on the SDK's own callback thread, so the stall watchdog sees the band stop sending
@@ -528,13 +557,13 @@ namespace NeuuroBridge
         private void OnRawFloat(float[] data)
         {
             var frame = new RawEegFrame { FloatSamples = (float[])data.Clone(), ArrivalUtc = DateTime.UtcNow };
-            Post(() => OnRawEeg?.Invoke(frame));
+            PostData(() => OnRawEeg?.Invoke(frame));
         }
 
         private void OnFiltered(float[] data)
         {
-            var copy = (float[])data.Clone();   // same buffer-reuse race as raw; clone before the pooled handler
-            Post(() => OnFilteredEeg?.Invoke(copy));
+            var copy = (float[])data.Clone();   // same buffer-reuse race as raw; clone before the handler runs
+            PostData(() => OnFilteredEeg?.Invoke(copy));
         }
 
         // ── Scan callbacks ──────────────────────────────────────────────────
@@ -635,6 +664,48 @@ namespace NeuuroBridge
             IsEnabled = d.isEnabled
         };
 
+        private void StartDataThread()
+        {
+            if (_dataThread != null) return;
+            _dataThread = new Thread(RunDataThread)
+            {
+                IsBackground = true,                      // never keeps the process alive on exit
+                Name = "SenzeBand EEG data",
+                Priority = ThreadPriority.AboveNormal,    // EEG must not wait behind UI or housekeeping work
+            };
+            _dataThread.Start();
+        }
+
+        private void RunDataThread()
+        {
+            foreach (var action in _dataQueue.GetConsumingEnumerable())
+            {
+                try { action(); }
+                catch (Exception ex)
+                {
+                    // One bad frame must not stop every later frame from being processed.
+                    Log("EEG data handler error (frame skipped): " + ex.GetType().Name + ": " + ex.Message);
+                }
+            }
+        }
+
+        private void PostData(Action action)
+        {
+            if (_dataThread == null || _dataQueue.IsAddingCompleted) { Post(action); return; }
+            try { _dataQueue.Add(action); }
+            catch (InvalidOperationException) { return; }   // shutting down
+            int depth = _dataQueue.Count;
+            if (depth > DataBacklogWarn)
+            {
+                long now = DateTime.UtcNow.Ticks;
+                if (now - Interlocked.Read(ref _lastBacklogWarnTicks) > TimeSpan.TicksPerSecond * 30)
+                {
+                    Interlocked.Exchange(ref _lastBacklogWarnTicks, now);
+                    Log($"WARNING: {depth} EEG callbacks waiting to be processed — this PC is not keeping up.");
+                }
+            }
+        }
+
         private void Post(Action action)
         {
             if (_context != null) _context.Post(_ => action(), null);
@@ -676,6 +747,7 @@ namespace NeuuroBridge
             catch (Exception ex) { Log("Shutdown stopScanning error: " + ex.Message); }
 
             _initialized = false;
+            try { _dataQueue.CompleteAdding(); } catch { /* ignore */ }
         }
     }
 }
