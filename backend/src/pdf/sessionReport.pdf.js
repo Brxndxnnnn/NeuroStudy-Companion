@@ -69,16 +69,19 @@ function drawBox(doc, x, y, w, h) {
     doc.rect(x, y, w, h).lineWidth(0.5).strokeColor(BORDER_COLOR).stroke()
 }
 
+// A null point lifts the pen, so a data gap shows as a break rather than a straight line across it.
 function drawLineSeries(doc, points, x, y, w, h, xDomain, yDomain, color) {
-    const real = points.filter((p) => p.v !== null && p.v !== undefined && !Number.isNaN(p.v))
-    if (real.length < 2) return
+    const isReal = (p) => p.v !== null && p.v !== undefined && !Number.isNaN(p.v)
+    if (points.filter(isReal).length < 2) return
     doc.strokeColor(color).lineWidth(0.6)
-    real.forEach((p, i) => {
+    let penDown = false
+    for (const p of points) {
+        if (!isReal(p)) { penDown = false; continue }
         const px = x + scale(p.t, xDomain, w)
         const py = y + scale(p.v, yDomain, h, true)
-        if (i === 0) doc.moveTo(px, py)
-        else doc.lineTo(px, py)
-    })
+        if (penDown) doc.lineTo(px, py)
+        else { doc.moveTo(px, py); penDown = true }
+    }
     doc.stroke()
 }
 
@@ -91,7 +94,7 @@ function drawWaveformLanes(doc, cursorY, waveform) {
     const chartW = doc.page.width - MARGIN * 2 - 36
 
     cursorY = ensureSpace(doc, cursorY, waveform.length * (laneHeight + laneGap) + 16)
-    cursorY = subHeading(doc, cursorY, 'Raw EEG (filtered, µV)')
+    cursorY = subHeading(doc, cursorY, 'EEG (µV, 0.5 Hz high-pass for display)')
 
     for (const ch of waveform) {
         const y = cursorY
