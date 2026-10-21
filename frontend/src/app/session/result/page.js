@@ -12,6 +12,7 @@ import {
 } from "@/utils/api";
 import { Toaster, toast } from "react-hot-toast";
 import { buildEventWindows } from "@/utils/events";
+import { highPassSamples, DISPLAY_HIGH_PASS_HZ } from "@/utils/eegDisplayFilter";
 import { SessionTopBar } from "@/components/TopNav";
 import { Card, CardHeader, Button, Label, Pill, Alert, Spinner, Select } from "@/components/ui";
 import EegStripChart from "@/components/EegStripChart";
@@ -29,6 +30,11 @@ const CHANNELS = [
   { key: "t3_left_temporal", prefix: "t3", label: "T3", color: "--ch-t3" },
   { key: "t4_right_temporal", prefix: "t4", label: "T4", color: "--ch-t4" },
 ];
+const CHANNEL_KEYS = CHANNELS.map((ch) => ch.key);
+
+// EEG chart vertical scale: "auto" fits what's on screen; a number pins every strip to ±that many
+// µV so channels and pages can be compared by eye, as in a clinical EEG viewer.
+const EEG_SCALES = ["auto", 5, 10, 25, 50, 100];
 
 // Ascending frequency — the hue order is CVD-validated in this sequence.
 const BANDS = [
@@ -313,6 +319,11 @@ export default function SessionResults() {
   // "stacked" = one strip per channel, or a single channel prefix to isolate
   // one trace.
   const [eegView, setEegView] = useState("stacked");
+  // "highpass" (default) removes the electrode's DC offset and slow drift for display; "none" shows
+  // the stored values, which the bridge only low-passes.
+  const [eegFilter, setEegFilter] = useState("highpass");
+  const [eegScale, setEegScale] = useState("auto");
+  const [sampleRate, setSampleRate] = useState(250);
 
   useEffect(() => {
     const load = async () => {
@@ -337,6 +348,7 @@ export default function SessionResults() {
         if (session.client_name) setPatientName(session.client_name);
         setSessionId(sessionId);
         setHasCommentary(Boolean(session.has_active_commentary));
+        if (session.sample_rate) setSampleRate(session.sample_rate);
         setFeaturesStatus(session.features_status ?? null);
         setFeaturesError(session.features_error || "");
 
@@ -529,12 +541,19 @@ export default function SessionResults() {
     return CHANNELS.filter((ch) => ch.prefix === eegView);
   }, [eegView]);
 
+  // What the EEG chart and its statistics show. Both modes break the line at dropouts; filtering
+  // happens per contiguous segment so a dropout is never smeared into a fake slow wave.
+  const eegSamples = useMemo(
+    () => highPassSamples(samples, CHANNEL_KEYS, sampleRate, { filter: eegFilter === "highpass" }),
+    [samples, sampleRate, eegFilter]
+  );
+
   // avg / peak / SD per channel over the visible EEG window. Always all four —
   // identical numbers across channels here would mean duplicated data.
   const stats = useMemo(() => {
-    if (!samples.length) return [];
-    return CHANNELS.map((ch) => ({ ...ch, ...channelStats(samples, ch.key, range.from, range.to) }));
-  }, [range, samples]);
+    if (!eegSamples.length) return [];
+    return CHANNELS.map((ch) => ({ ...ch, ...channelStats(eegSamples, ch.key, range.from, range.to) }));
+  }, [range, eegSamples]);
 
   // ── Frequency bands ───────────────────────────────────────────────────────
   // `channel` holds either a channel prefix or "stacked".
@@ -950,9 +969,13 @@ export default function SessionResults() {
               <CardHeader
                 title="Filtered EEG"
                 subtitle={
-                  events.length
-                    ? "The raw signal in µV. Drag to zoom, scroll to pan — the numbers below update to match what's on screen. Shaded bands mark when an image (teal) or question (amber) was shown; click one to see it."
-                    : "The raw signal in µV. Drag to zoom, scroll to pan — the numbers below update to match what's on screen."
+                  (eegFilter === "highpass"
+                    ? `The signal in µV with a ${DISPLAY_HIGH_PASS_HZ} Hz high-pass, which removes the electrode's offset and slow drift so the brain activity is visible. `
+                    : "The stored signal in µV, including the electrode's offset and slow drift. ") +
+                  "Opens on the first 10 s — drag to zoom, scroll to pan; the numbers below update to match. Gaps in the line are dropped data." +
+                  (events.length
+                    ? " Shaded bands mark when an image (teal) or question (amber) was shown; click one to see it."
+                    : "")
                 }
                 actions={
                   <div className="flex flex-wrap items-end gap-3">
@@ -971,6 +994,34 @@ export default function SessionResults() {
                         </Select>
                       </div>
                     </ControlGroup>
+                    <ControlGroup label="Filter">
+                      <div className="w-36">
+                        <Select
+                          aria-label="EEG display filter"
+                          value={eegFilter}
+                          onChange={(e) => setEegFilter(e.target.value)}
+                          size="sm"
+                        >
+                          <option value="highpass">High-pass {DISPLAY_HIGH_PASS_HZ} Hz</option>
+                          <option value="none">None (stored)</option>
+                        </Select>
+                      </div>
+                    </ControlGroup>
+                    <ControlGroup label="Scale">
+                      <div className="w-24">
+                        <Select
+                          aria-label="EEG vertical scale"
+                          value={String(eegScale)}
+                          onChange={(e) => setEegScale(e.target.value === "auto" ? "auto" : Number(e.target.value))}
+                          size="sm"
+                          disabled={eegFilter !== "highpass"}
+                        >
+                          {EEG_SCALES.map((s) => (
+                            <option key={s} value={String(s)}>{s === "auto" ? "Auto" : `±${s} µV`}</option>
+                          ))}
+                        </Select>
+                      </div>
+                    </ControlGroup>
                     {events.length > 0 && (
                       <MarkerToggle on={markers.eeg} onToggle={() => toggleMarkers("eeg")} />
                     )}
@@ -979,8 +1030,9 @@ export default function SessionResults() {
               />
               <div className="p-3 sm:p-4">
                 <EegStripChart
-                  samples={samples}
+                  samples={eegSamples}
                   channels={eegChannels}
+                  halfRangeUv={eegFilter === "highpass" && eegScale !== "auto" ? eegScale : null}
                   events={chartEvents("eeg")}
                   onEventClick={setSelectedEvent}
                   onVisibleRangeChange={onEegRange}

@@ -8,6 +8,7 @@ import sessionModel from '../models/session.model.js'
 import clientHistoryModel from '../models/clientHistory.model.js'
 import sessionCommentaryModel from '../models/sessionCommentary.model.js'
 import { computePowerSpectrum } from '../utils/spectrum.js'
+import { highPassSamples, minMaxDownsample } from '../utils/eegDisplayFilter.js'
 import { ConflictError, NotFoundError } from '../utils/AppError.js'
 
 const CHANNELS = [
@@ -57,14 +58,6 @@ function resolvePhaseWindows(phaseEvents) {
         windows[ev.phase] = { start, end }
     }
     return windows
-}
-
-function downsample(points, maxPoints) {
-    if (points.length <= maxPoints) return points
-    const stride = Math.ceil(points.length / maxPoints)
-    const out = []
-    for (let i = 0; i < points.length; i += stride) out.push(points[i])
-    return out
 }
 
 function average(values) {
@@ -136,7 +129,10 @@ async function buildSessionReportData(sessionId, dbClient) {
             { session_id: sessionId, sample_rate: session.sample_rate, start_time: session.start_time, end_time: session.end_time },
             window.start, window.end, 'filtered', dbClient
         )
-        const samples = eegResult.samples
+        // High-passed for display and the spectrum: the stored stream keeps the electrode's DC offset
+        // and drift, which flattened the printed trace and leaked into every low-frequency bin.
+        // Gap rows (null) break the trace; the spectrum skips them.
+        const samples = highPassSamples(eegResult.samples, CHANNELS.map((ch) => ch.sampleKey), session.sample_rate)
 
         const fftInWindow = fftRows.filter((r) => {
             const t = new Date(r.time)
@@ -163,12 +159,13 @@ async function buildSessionReportData(sessionId, dbClient) {
 
         const spectra = CHANNELS.map((ch) => ({
             channel: ch.label,
-            points: computePowerSpectrum(samples.map((s) => s[ch.sampleKey]), session.sample_rate, 15),
+            points: computePowerSpectrum(
+                samples.map((s) => s[ch.sampleKey]).filter((v) => v !== null), session.sample_rate, 15),
         }))
 
         const waveform = CHANNELS.map((ch) => ({
             channel: ch.label,
-            points: downsample(samples.map((s) => ({ t: s.t_seconds, v: s[ch.sampleKey] })), WAVEFORM_MAX_POINTS),
+            points: minMaxDownsample(samples.map((s) => ({ t: s.t_seconds, v: s[ch.sampleKey] })), WAVEFORM_MAX_POINTS),
         }))
 
         blocks.push({

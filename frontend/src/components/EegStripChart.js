@@ -13,6 +13,10 @@ const NO_EVENTS = [];
 const FLAT_PKPK_UV = 0.5;
 const FLAT_AXIS_UV = 1; // half-height of the pinned axis for a flat channel
 
+// The chart opens on this many seconds, the page length of a clinical EEG viewer. Squeezing a whole
+// session (100k+ samples) into one screen width hides every individual spike.
+const INITIAL_WINDOW_S = 10;
+
 // Peak-to-peak of one channel across the whole session.
 function channelPkPk(samples, key) {
   let min = Infinity;
@@ -44,6 +48,8 @@ function fmtUv(v) {
  *   samples   [{ t_seconds, <channel keys...> }]  ascending in t_seconds
  *   channels  [{ key, label, color }]             one strip each, top→bottom
  *   events    [{ from, to, label, type }]         stimulus windows (seconds); type "image"|"question"
+ *   halfRangeUv  number | null                     pin every strip to ±this many µV; null autoscales
+ *                                                  to the visible window. Null samples break the line.
  *   onVisibleRangeChange(startSec, endSec)         fired on zoom/pan (throttled by ECharts)
  *   onEventClick(index)                            fired when an event band is clicked
  */
@@ -51,6 +57,7 @@ export default function EegStripChart({
   samples,
   channels,
   events = NO_EVENTS,
+  halfRangeUv = null,
   onVisibleRangeChange,
   onEventClick,
 }) {
@@ -77,7 +84,8 @@ export default function EegStripChart({
     };
   };
 
-  const buildOption = () => {
+  // `initial` sets the opening window; theme rebuilds omit it so they don't reset the user's zoom.
+  const buildOption = (initial = false) => {
     const c = themeColors();
     // Channels may pass a CSS custom-property name (e.g. "--ch-fp1"); resolve to a
     // concrete color since the canvas renderer can't read var(). Re-resolved on each
@@ -158,7 +166,9 @@ export default function EegStripChart({
         // its sub-µV dither to fill the strip is what made a dead electrode look alive.
         ...(flat
           ? { min: mid - FLAT_AXIS_UV, max: mid + FLAT_AXIS_UV, scale: false }
-          : { scale: true }),
+          : halfRangeUv
+            ? { min: -halfRangeUv, max: halfRangeUv, scale: false }
+            : { scale: true }),
         axisLine: { show: false },
         axisTick: { show: false },
         axisLabel: { color: c.muted, fontSize: 10, showMinLabel: false, showMaxLabel: false },
@@ -216,10 +226,13 @@ export default function EegStripChart({
           return `<div style="font-family:monospace;font-size:11px;color:${c.muted};margin-bottom:4px">t = ${t.toFixed(2)} s</div>${rows}`;
         },
       },
+      // "filter" (not "none") so an autoscaled y-axis fits the visible window, not the whole session.
       dataZoom: [
-        { type: "inside", xAxisIndex: channels.map((_, i) => i), filterMode: "none" },
+        { type: "inside", xAxisIndex: channels.map((_, i) => i), filterMode: "filter", ...initialWindow(initial) },
         {
           type: "slider",
+          filterMode: "filter",
+          ...initialWindow(initial),
           xAxisIndex: channels.map((_, i) => i),
           height: 20,
           bottom: 6,
@@ -234,12 +247,19 @@ export default function EegStripChart({
     };
   };
 
+  // Percent rather than startValue/endValue: emitRange reads the zoom back as percentages.
+  const initialWindow = (initial) => {
+    if (!initial || samples.length < 2) return {};
+    const span = samples[samples.length - 1].t_seconds - samples[0].t_seconds;
+    return { start: 0, end: span > INITIAL_WINDOW_S ? (INITIAL_WINDOW_S / span) * 100 : 100 };
+  };
+
   // Init once; rebuild option when data/channels change.
   useEffect(() => {
     if (!elRef.current) return;
     const chart = echarts.init(elRef.current, null, { renderer: "canvas" });
     chartRef.current = chart;
-    chart.setOption(buildOption());
+    chart.setOption(buildOption(true));
 
     const emitRange = () => {
       if (!samples.length) return;
@@ -253,7 +273,7 @@ export default function EegStripChart({
       rangeCbRef.current?.(startSec, endSec);
     };
     chart.on("datazoom", emitRange);
-    emitRange(); // initial full-range stats
+    emitRange(); // stats for the opening window
 
     // Event-band clicks bubble the band's index back to the page, which shows
     // the stimulus that was on screen during that window.
@@ -284,6 +304,13 @@ export default function EegStripChart({
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [samples, channels, events]);
+
+  // A scale change updates the axes in place, keeping the user's zoom. replaceMerge so switching
+  // back to auto drops the pinned min/max instead of merging over them.
+  useEffect(() => {
+    chartRef.current?.setOption(buildOption(), { replaceMerge: ["yAxis"] });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [halfRangeUv]);
 
   const height = Math.max(280, channels.length * 96 + 48);
   return <div ref={elRef} className="w-full" style={{ height: `${height}px` }} />;
