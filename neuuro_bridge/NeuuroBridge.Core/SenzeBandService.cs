@@ -402,9 +402,12 @@ namespace NeuuroBridge
             sbci.assignABDTDelegate(v => { var c = (float[,])v?.Clone(); PostData(() => OnAbdt?.Invoke(c)); });
             sbci.assignAccDelegate(_ => { });
             sbci.assignMCUDelegate(OnMcu);   // MCU ID is needed to authenticate the device
-            sbci.assignFirmwareVerDelegate(_ => { });
+            // Logged rather than dropped: device replies are evidence for the vendor when a link
+            // misbehaves. The SDK routes every packet containing "41434BF7" here as chars 10-13 of the
+            // whole packet (firmware 1.0.3.0 answers F7 with "1030"); command ACKs come as names.
+            sbci.assignFirmwareVerDelegate(v => Log("Device F7 reply: " + v));
             sbci.assignConnectionCheckDelegate(_ => { });
-            sbci.assignCommandACKDelegate(_ => { });
+            sbci.assignCommandACKDelegate(v => Log("Device command ACK: " + v));
             sbci.assignSenzebandVersionDelegate(_ => { });
             sbci.assignEvokeDelegate(_ => { });
             sbci.assignDirectionDelegate(_ => { });
