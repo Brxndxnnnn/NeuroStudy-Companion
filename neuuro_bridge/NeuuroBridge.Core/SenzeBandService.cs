@@ -114,6 +114,17 @@ namespace NeuuroBridge
         private int _authFailures;
         private Timer _authRetryTimer;
 
+        // ── Auto-sleep ──────────────────────────────────────────────────────
+        // The SenzeBand powers itself down ~10 min after connecting ("Automatic shut off when not in
+        // use after 10 minutes", product catalogue) — no session in the DB has more than 9:46 of EEG,
+        // and every longer one lost its tail. The SDK defines a disable-sleep command
+        // (BLEDeviceServices.disableSleepCommand, internal to the SDK — value copied here) but never
+        // sends it, so we do, after every start. Delayed so it does not overlap the start command's
+        // GATT write; held in a field so the timer is not garbage-collected before it fires.
+        private const string DisableSleepCommand = "434D44F701FF7B8C";
+        private const int DisableSleepDelayMs = 1000;
+        private Timer _disableSleepTimer;
+
         public bool IsConnected => !string.IsNullOrEmpty(_connectedAddress);
         public bool IsInitialized => _initialized;
         public bool IsAuthenticated => _isAuthenticated;
@@ -354,6 +365,28 @@ namespace NeuuroBridge
             SenzeBandConnectInterface.getSBCIHandler().setEEG_Analyzing(true);
             SenzeBandWindowsInterface.getSBWIHandler().sendStartCommand(_connectedAddress);
             Log("Stream started.");
+            ScheduleDisableSleep();
+        }
+
+        private void ScheduleDisableSleep()
+        {
+            var t = new Timer(_ => Post(DisableAutoSleep), null, DisableSleepDelayMs, Timeout.Infinite);
+            var old = _disableSleepTimer; _disableSleepTimer = t;
+            try { old?.Dispose(); } catch { }
+        }
+
+        private void DisableAutoSleep()
+        {
+            if (!IsConnected) return;
+            try
+            {
+                SenzeBandWindowsInterface.getSBWIHandler().sendCommand(_connectedAddress, DisableSleepCommand);
+                Log("Sent disable-auto-sleep command (expect an F7 reply with FF).");
+            }
+            catch (Exception ex)
+            {
+                Log("Disable-auto-sleep error: " + ex.Message);
+            }
         }
 
         /// <summary>
@@ -402,9 +435,11 @@ namespace NeuuroBridge
             sbci.assignABDTDelegate(v => { var c = (float[,])v?.Clone(); PostData(() => OnAbdt?.Invoke(c)); });
             sbci.assignAccDelegate(_ => { });
             sbci.assignMCUDelegate(OnMcu);   // MCU ID is needed to authenticate the device
-            sbci.assignFirmwareVerDelegate(_ => { });
+            // The SDK routes every F7 reply here, including the disable-sleep ACK (41434BF701FF...),
+            // which arrives as "FF..". Logged so a bench run can confirm the band accepted it.
+            sbci.assignFirmwareVerDelegate(v => Log("Device F7 reply: " + v));
             sbci.assignConnectionCheckDelegate(_ => { });
-            sbci.assignCommandACKDelegate(_ => { });
+            sbci.assignCommandACKDelegate(v => Log("Device command ACK: " + v));
             sbci.assignSenzebandVersionDelegate(_ => { });
             sbci.assignEvokeDelegate(_ => { });
             sbci.assignDirectionDelegate(_ => { });
