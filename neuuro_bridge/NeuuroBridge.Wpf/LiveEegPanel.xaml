@@ -113,16 +113,20 @@
             <TabItem Header="EEG Waves" Style="{StaticResource ChartTabItem}">
                 <Grid Margin="0,8,0,0">
                     <Grid.RowDefinitions>
+                        <RowDefinition Height="Auto"/>
                         <RowDefinition Height="*"/>
                         <RowDefinition Height="Auto"/>
                     </Grid.RowDefinitions>
+                    <!-- Lane scale: Auto or a fixed ±µV (buttons added in code). Traces are shown
+                         with a 0.5 Hz display high-pass — see LiveEegPanel.xaml.cs. -->
+                    <StackPanel x:Name="EegScaleBar" Grid.Row="0" Orientation="Horizontal" Margin="0,0,0,6"/>
                     <!-- One bordered mini-plot per channel, added in code (LiveEegPanel.xaml.cs) so
                          each channel is fully isolated in its own pixel region — a line can never
                          visually cross into a neighbouring channel's section. -->
-                    <Grid x:Name="EegPlotHost" Grid.Row="0"/>
-                    <ScrollBar x:Name="EegScrollBar" Grid.Row="1" Style="{StaticResource DarkScrollBar}" Margin="0,6,0,0"
+                    <Grid x:Name="EegPlotHost" Grid.Row="1"/>
+                    <ScrollBar x:Name="EegScrollBar" Grid.Row="2" Style="{StaticResource DarkScrollBar}" Margin="0,6,0,0"
                                ValueChanged="EegScrollBar_ValueChanged"/>
-                    <Button x:Name="BtnEegLive" Grid.Row="0" Style="{StaticResource JumpToLive}"/>
+                    <Button x:Name="BtnEegLive" Grid.Row="1" Style="{StaticResource JumpToLive}"/>
                 </Grid>
             </TabItem>
             <TabItem Header="Frequency Bands" Style="{StaticResource ChartTabItem}">
