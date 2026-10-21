@@ -182,6 +182,20 @@ namespace NeuuroBridge.Wpf
         private double _eegFeedRemainder;   // fractional samples owed, carried across ticks to avoid drift
         private const double EegSampleIntervalMs = 1000.0 / 250.0;
 
+        // Display-only 0.5 Hz high-pass per channel (see HighPassFilter): the raw stream carries the
+        // electrode's DC offset and drift, which otherwise set the auto-gain and flatten the EEG.
+        // Applied as samples enter _rawFull, so live, scrubbed history and the scale bar all show the
+        // same signal. Reset after a gap so the offset jump across it does not ring. Nothing that is
+        // stored or uploaded passes through here.
+        private const double DisplayHighPassHz = 0.5;
+        private readonly HighPassFilter[] _displayHighPass = new HighPassFilter[Channels];
+
+        // EEG lane scale: 0 = auto-gain to the visible window; otherwise each lane is pinned to
+        // ±that many µV (same choices as the web chart), so channels can be compared by eye.
+        private static readonly double[] EegScalesUv = { 0, 5, 10, 25, 50, 100 };
+        private double _eegFixedHalfUv;
+        private Button[] _eegScaleButtons;
+
         // Caps how often the 4 EEG plots actually repaint, independent of how often real data is fed
         // into them (still every frame, at the true 250 Hz pace) — see RefreshVisibleTab.
         private int _eegLastRefreshTicks;
@@ -263,6 +277,7 @@ namespace NeuuroBridge.Wpf
             InitializeComponent();
 
             for (int ch = 0; ch < Channels; ch++) { _rawFull[ch] = new double[RawFullCapacity]; _eegPending[ch] = new Queue<double>(); _eegHistSegments[ch] = new List<IPlottable>(); }
+            for (int ch = 0; ch < Channels; ch++) _displayHighPass[ch] = new HighPassFilter(DisplayHighPassHz, 1000.0 / EegSampleIntervalMs);
             for (int s = 0; s < BandSources; s++)
             {
                 _bandFull[s] = new double[Bands][];
@@ -273,6 +288,7 @@ namespace NeuuroBridge.Wpf
 
             SetupPlots();
             BuildChannelSelector();
+            BuildEegScaleSelector();
 
             HookScrub(_eegPlots, _eegTrack, RawWindow, RebuildEegWindow);
             HookScrub(_bandPlots, _bandTrack, Hist, RebuildBandWindow);
@@ -677,6 +693,43 @@ namespace NeuuroBridge.Wpf
             UpdateSelectorVisuals();
         }
 
+        // ── Scale selector (Auto · ±5 … ±100 µV) for the EEG tab ──
+        private void BuildEegScaleSelector()
+        {
+            _eegScaleButtons = new Button[EegScalesUv.Length];
+            for (int i = 0; i < EegScalesUv.Length; i++)
+            {
+                double halfUv = EegScalesUv[i];
+                var btn = new Button
+                {
+                    Content = halfUv > 0 ? $"±{halfUv:0} µV" : "Auto",
+                    FontSize = 11,
+                    Padding = new Thickness(10, 3, 10, 3),
+                    Margin = new Thickness(0, 0, 6, 0)
+                };
+                btn.Click += (_, __) =>
+                {
+                    _eegFixedHalfUv = halfUv;
+                    UpdateEegScaleVisuals();
+                    RebuildEegWindow();
+                };
+                _eegScaleButtons[i] = btn;
+                EegScaleBar.Children.Add(btn);
+            }
+            UpdateEegScaleVisuals();
+        }
+
+        private void UpdateEegScaleVisuals()
+        {
+            for (int i = 0; i < _eegScaleButtons.Length; i++)
+            {
+                bool sel = EegScalesUv[i] == _eegFixedHalfUv;
+                _eegScaleButtons[i].Background = sel ? AccentBrush : ChipBrush;
+                _eegScaleButtons[i].Foreground = sel ? Brushes.White : LabelBrush;
+                _eegScaleButtons[i].FontWeight = sel ? FontWeights.SemiBold : FontWeights.Normal;
+            }
+        }
+
         private void UpdateSelectorVisuals()
         {
             for (int i = 0; i < BandSources; i++)
@@ -721,6 +774,7 @@ namespace NeuuroBridge.Wpf
                 gapSamples = Math.Max(0, Math.Min(expected - spc, RawWindow));
             }
             _rawLastUtc = nowUtc;
+            if (gapSamples > 0) foreach (var hp in _displayHighPass) hp.Reset();
 
             lock (_lock)
             {
@@ -733,7 +787,7 @@ namespace NeuuroBridge.Wpf
                 for (int i = 0; i < spc; i++)
                 {
                     for (int ch = 0; ch < Channels; ch++)
-                        _rawFull[ch][_rawFullHead] = frame[ch * spc + i];
+                        _rawFull[ch][_rawFullHead] = _displayHighPass[ch].Process(frame[ch * spc + i]);
                     _rawFullHead = (_rawFullHead + 1) % RawFullCapacity;
                     if (_rawFullCount < RawFullCapacity) _rawFullCount++;
                 }
@@ -750,8 +804,11 @@ namespace NeuuroBridge.Wpf
                 double mean = _eegBaseMean[ch], range = _eegBaseRange[ch];
                 var q = _eegPending[ch];
                 for (int g = 0; g < gapSamples; g++) q.Enqueue(double.NaN);
-                for (int i = 0; i < spc; i++)
-                    q.Enqueue(Normalize(frame[ch * spc + i], mean, range));
+                // The high-passed values were just written to the ring — read them back from there.
+                double[] fresh;
+                lock (_lock) fresh = SliceFromRing(_rawFull[ch], _rawFullHead, _rawFullCount, spc, 0);
+                foreach (var v in fresh)
+                    q.Enqueue(Normalize(v, mean, range));
                 // CompositionTarget.Rendering (and so FeedEegPending) pauses while the window is
                 // minimised, but PushRaw keeps arriving — bound growth instead of buffering an
                 // unminimise-and-dump backlog. Dropping the OLDEST queued samples is fine: they were
@@ -951,6 +1008,13 @@ namespace NeuuroBridge.Wpf
         /// longer), so calibrating off it routinely undershot the true range.</summary>
         private void RecalibrateEegGain(int ch)
         {
+            if (_eegFixedHalfUv > 0)
+            {
+                // Pinned scale: ±_eegFixedHalfUv µV fills ±NormAmp of the lane.
+                _eegBaseMean[ch] = 0;
+                _eegBaseRange[ch] = _eegFixedHalfUv / MicrovoltsPerCount;
+                return;
+            }
             // Scans the ring buffer directly (same window SliceFromRing would extract, backOffset=0)
             // instead of allocating a fresh double[RawWindow] copy every call. This runs 4x per
             // PushRaw burst (~20x/s), so the old version churned ~400KB/s of short-lived garbage —
@@ -1218,6 +1282,7 @@ namespace NeuuroBridge.Wpf
                 for (int b = 0; b < Bands; b++) { _bandLatest[s][b] = 0; _bandBaseMean[s, b] = 0; _bandBaseRange[s, b] = 1; }
             for (int c = 0; c < Cogs; c++) _cogLatest[c] = double.NaN;
             for (int ch = 0; ch < Channels; ch++) { _eegBaseMean[ch] = 0; _eegBaseRange[ch] = 1; }
+            foreach (var hp in _displayHighPass) hp.Reset();
             foreach (var q in _eegPending) q.Clear();
             _eegHasData = false;
             _rawLastUtc = null;
@@ -1462,7 +1527,8 @@ namespace NeuuroBridge.Wpf
                 {
                     double[] slice;
                     lock (_lock) slice = SliceFromRing(_rawFull[ch], _rawFullHead, _rawFullCount, RawWindow, _eegTrack.ScrubOffset);
-                    SeedHistLane(slice, _eegHistBuf[ch], RawWindow, ref _eegBaseMean[ch], ref _eegBaseRange[ch]);
+                    SeedHistLane(slice, _eegHistBuf[ch], RawWindow, ref _eegBaseMean[ch], ref _eegBaseRange[ch],
+                        _eegFixedHalfUv > 0 ? _eegFixedHalfUv / MicrovoltsPerCount : 0);
                     RebuildEegHistSegments(ch);
                 }
                 SetEegHistVisible(live: false);
@@ -1589,7 +1655,10 @@ namespace NeuuroBridge.Wpf
         /// gap placeholder in the slice (see PushRaw) passes through untouched into <paramref
         /// name="dst"/> rather than being normalised into a fabricated value — see
         /// RebuildEegHistSegments for how those NaN runs become real breaks on screen.</summary>
-        private static void SeedHistLane(double[] slice, double[] dst, int capacity, ref double baseMean, ref double baseRange)
+        /// <param name="fixedRange">When &gt; 0, use this range around zero instead of auto-gaining
+        /// to the slice (the EEG lanes' pinned µV scale).</param>
+        private static void SeedHistLane(double[] slice, double[] dst, int capacity, ref double baseMean, ref double baseRange,
+            double fixedRange = 0)
         {
             int n = slice.Length, pad = Math.Max(0, capacity - n);
             double mean = 0, min = double.MaxValue, max = double.MinValue;
@@ -1603,6 +1672,7 @@ namespace NeuuroBridge.Wpf
             }
             if (valid > 0) mean /= valid;
             double range = valid > 0 ? Math.Max(1e-9, max - min) : 1;
+            if (fixedRange > 0) { mean = 0; range = fixedRange; }
             baseMean = mean; baseRange = range;
 
             for (int j = 0; j < pad; j++) dst[j] = 0;
