@@ -1,6 +1,6 @@
 # Frontend Dockerfile
 # --- Stage 1: Install Dependencies ---
-FROM node:20-alpine AS deps
+FROM node:24.22.1-alpine AS deps
 WORKDIR /app
 # Copy package manifests
 COPY package.json package-lock.json ./
@@ -8,7 +8,7 @@ COPY package.json package-lock.json ./
 RUN npm config set fetch-retries 5 && npm ci
 
 # --- Stage 2: Build the App ---
-FROM node:20-alpine AS builder
+FROM node:24.22.1-alpine AS builder
 WORKDIR /app
 COPY --from=deps /app/node_modules ./node_modules
 # Copy all project files
@@ -17,7 +17,7 @@ COPY . .
 RUN npm run build
 
 # --- Stage 3: Production Runner ---
-FROM node:20-alpine AS runner
+FROM node:24.22.1-alpine AS runner
 WORKDIR /app
 
 # Using the modern ENV syntax to clear Docker warnings
