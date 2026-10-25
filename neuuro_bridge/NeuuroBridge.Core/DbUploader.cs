@@ -47,6 +47,9 @@ namespace NeuuroBridge
     {
         public DateTime FrameEnd;
         public int[] Samples;
+        /// <summary>The frame's packages with their times on the DB clock, or null (see
+        /// <see cref="EegPackageMark"/>). Lets PlanTimeline put a gap exactly where the SDK lost data.</summary>
+        public EegPackageMark[] Packages;
     }
 
     /// <summary>
@@ -60,6 +63,8 @@ namespace NeuuroBridge
     {
         public DateTime FrameEnd;
         public float[] Samples;
+        /// <summary>As <see cref="RawEegFrameRecord.Packages"/>.</summary>
+        public EegPackageMark[] Packages;
     }
 
     /// <summary>
@@ -277,6 +282,9 @@ namespace NeuuroBridge
         private long _filtBaseTicks;
         private long _filtSampleIndex;
         private long _filtResyncs;
+        // Of the resyncs above, the gaps placed from the SDK's own loss marks (see PlaceSdkGaps).
+        private long _rawPlacedGaps;
+        private long _filtPlacedGaps;
         // Samples skipped at filtered resyncs. The raw stream has always counted these
         // (_rawGapSamples); the filtered stream did not, so the dropout in the stream ML
         // actually trains on was the one figure nobody could measure.
@@ -340,6 +348,15 @@ namespace NeuuroBridge
         /// <summary>Maps a UTC instant captured on the bridge clock (e.g. a frame's arrival time)
         /// onto the DB timeline, applying the same anchor offset as <see cref="DbNow"/>.</summary>
         public DateTime ToDbTime(DateTime utc) => utc + _clockOffset;
+
+        private EegPackageMark[] ToDbTime(EegPackageMark[] packagesUtc)
+        {
+            if (packagesUtc == null) return null;
+            var db = new EegPackageMark[packagesUtc.Length];
+            for (int p = 0; p < db.Length; p++)
+                db[p] = new EegPackageMark { LossBefore = packagesUtc[p].LossBefore, Utc = ToDbTime(packagesUtc[p].Utc) };
+            return db;
+        }
 
         /// <summary>
         /// Opens the connection and anchors the bridge clock to DB time once
@@ -837,10 +854,12 @@ namespace NeuuroBridge
         /// must be a private copy — the SDK reuses its buffer. Cheap: just enqueue; the per-sample
         /// expansion + COPY happens on the flush thread.
         /// </summary>
-        public void EnqueueRaw(DateTime frameEnd, int[] samples)
+        /// <param name="packagesUtc">The frame's package marks as the SDK service produced them (UTC),
+        /// or null; converted to the DB clock here.</param>
+        public void EnqueueRaw(DateTime frameEnd, int[] samples, EegPackageMark[] packagesUtc = null)
         {
             if (_disposed || !Streaming || samples == null) return;
-            _rawQ.Enqueue(new RawEegFrameRecord { FrameEnd = frameEnd, Samples = samples });
+            _rawQ.Enqueue(new RawEegFrameRecord { FrameEnd = frameEnd, Samples = samples, Packages = ToDbTime(packagesUtc) });
             Interlocked.Increment(ref _rawFramesIn);
             while (_rawQ.Count > MaxRawFramesQueued && _rawQ.TryDequeue(out _))
                 Interlocked.Increment(ref _rawDropped);
@@ -852,10 +871,10 @@ namespace NeuuroBridge
         /// must be a private copy (the OnFiltered callback already clones per frame). Cheap: just enqueue;
         /// the per-sample expansion + COPY happens on the flush thread (see CopyFiltered).
         /// </summary>
-        public void EnqueueFiltered(DateTime frameEnd, float[] samples)
+        public void EnqueueFiltered(DateTime frameEnd, float[] samples, EegPackageMark[] packagesUtc = null)
         {
             if (_disposed || !Streaming || samples == null) return;
-            _filtQ.Enqueue(new FilteredEegFrameRecord { FrameEnd = frameEnd, Samples = samples });
+            _filtQ.Enqueue(new FilteredEegFrameRecord { FrameEnd = frameEnd, Samples = samples, Packages = ToDbTime(packagesUtc) });
             Interlocked.Increment(ref _filtFramesIn);
             while (_filtQ.Count > MaxFiltFramesQueued && _filtQ.TryDequeue(out _))
                 Interlocked.Increment(ref _filtDropped);
@@ -964,9 +983,21 @@ namespace NeuuroBridge
         private struct TimelinePlan
         {
             public bool Anchored;
-            public long BaseTicks, EndIndex, GapSamples, Resyncs;
+            public long BaseTicks, EndIndex, GapSamples, Resyncs, PlacedGaps;
             public long[] StartIndex;   // per frame; unused for frames with no samples
+            // Per frame, null unless a gap was placed inside it: samples inserted before each
+            // package, cumulative (see PlaceSdkGaps).
+            public long[][] PackageShift;
             public int Rows;
+
+            /// <summary>Counter index of sample <paramref name="i"/> of frame <paramref name="k"/>.</summary>
+            public long SampleIndex(int k, int i, int spc)
+            {
+                long index = StartIndex[k] + i;
+                var shift = PackageShift[k];
+                if (shift != null) index += shift[i / (spc / shift.Length)];
+                return index;
+            }
         }
 
         /// <summary>
@@ -979,9 +1010,10 @@ namespace NeuuroBridge
         /// lost, inserting a real gap rather than silently compressing everything after it.
         /// </summary>
         private static TimelinePlan PlanTimeline(IList<DateTime> frameEnds, IList<int> spcs,
+            IList<EegPackageMark[]> packages,
             bool anchored, long baseTicks, long index, long periodTicks, long maxDriftTicks)
         {
-            var plan = new TimelinePlan { StartIndex = new long[spcs.Count] };
+            var plan = new TimelinePlan { StartIndex = new long[spcs.Count], PackageShift = new long[spcs.Count][] };
             for (int k = 0; k < spcs.Count; k++)
             {
                 int spc = spcs[k];
@@ -997,14 +1029,21 @@ namespace NeuuroBridge
                     index = 0;
                     anchored = true;
                 }
+                else
+                {
+                    plan.PackageShift[k] = PlaceSdkGaps(packages?[k], spc, baseTicks, index, periodTicks, ref plan);
+                }
+                var shift = plan.PackageShift[k];
+                long added = shift == null ? 0 : shift[shift.Length - 1];
 
                 // If arrival time has run far ahead of where the counter says this frame's last
                 // sample should sit, frames were genuinely dropped upstream — jump the counter
                 // forward (insert a real gap) so we don't compress the rest of the timeline.
-                long counterLastTicks = baseTicks + (index + spc - 1) * periodTicks;
+                // With the SDK's loss marks this is the backstop for losses they under-count.
+                long counterLastTicks = baseTicks + (index + added + spc - 1) * periodTicks;
                 if (endTicks - counterLastTicks > maxDriftTicks)
                 {
-                    long resyncIndex = (long)Math.Round((double)(endTicks - baseTicks) / periodTicks) - (spc - 1);
+                    long resyncIndex = (long)Math.Round((double)(endTicks - baseTicks) / periodTicks) - (spc - 1) - added;
                     if (resyncIndex > index)
                     {
                         plan.GapSamples += resyncIndex - index;
@@ -1014,13 +1053,51 @@ namespace NeuuroBridge
                 }
 
                 plan.StartIndex[k] = index;
-                index += spc;
+                index += spc + added;
                 plan.Rows += spc;
             }
             plan.Anchored = anchored;
             plan.BaseTicks = baseTicks;
             plan.EndIndex = index;
             return plan;
+        }
+
+        /// <summary>
+        /// Puts a gap before each package the SDK marked as following lost data (see
+        /// <see cref="EegPackageMark"/>), sized from how late that package arrived against the sample
+        /// counter, in whole packages and never less than one. Returns the samples inserted before
+        /// each package (cumulative), or null when there is nothing to place.
+        ///
+        /// Before this, a loss stayed invisible until arrival time had drifted past the tolerance
+        /// (1.5 s raw), so the EEG either side of it sat up to that far out of line with the events.
+        /// The size is rounded DOWN with a quarter-package allowance: a package that arrives late
+        /// because the band flushed a backlog would otherwise count as extra loss, and a gap that is
+        /// too large can never be taken back, while one that is too small is still caught by the
+        /// drift guard.
+        /// </summary>
+        private static long[] PlaceSdkGaps(EegPackageMark[] marks, int spc, long baseTicks, long index,
+            long periodTicks, ref TimelinePlan plan)
+        {
+            if (marks == null || marks.Length == 0 || spc % marks.Length != 0) return null;
+            int per = spc / marks.Length;
+            long[] shift = null;
+            long added = 0;
+            for (int p = 0; p < marks.Length; p++)
+            {
+                if (marks[p].LossBefore)
+                {
+                    long counterLastTicks = baseTicks + (index + added + (long)p * per + per - 1) * periodTicks;
+                    double lagPackages = (double)(marks[p].Utc.Ticks - counterLastTicks) / (per * periodTicks);
+                    long lost = Math.Max(1, (long)Math.Floor(lagPackages + 0.25));
+                    added += lost * per;
+                    plan.GapSamples += lost * per;
+                    plan.Resyncs++;
+                    plan.PlacedGaps++;
+                    if (shift == null) shift = new long[marks.Length];
+                }
+                if (shift != null) shift[p] = added;
+            }
+            return shift;
         }
 
         private static int Spc(Array samples) =>
@@ -1039,6 +1116,7 @@ namespace NeuuroBridge
             long periodTicks = TimeSpan.TicksPerSecond / _sampleRate;   // 40000 ticks = 4 ms @ 250 Hz (µs-aligned)
             var plan = PlanTimeline(
                 _rawPending.Select(f => f.FrameEnd).ToList(), _rawPending.Select(f => Spc(f.Samples)).ToList(),
+                _rawPending.Select(f => f.Packages).ToList(),
                 _rawAnchored, _rawBaseTicks, _rawSampleIndex, periodTicks, RawDriftTicks);
 
             int n = plan.Rows;
@@ -1053,7 +1131,7 @@ namespace NeuuroBridge
                         int spc = Spc(samples);
                         for (int i = 0; i < spc; i++)
                         {
-                            long t = plan.BaseTicks + (plan.StartIndex[k] + i) * periodTicks;   // exact, uniform, µs-aligned
+                            long t = plan.BaseTicks + plan.SampleIndex(k, i, spc) * periodTicks;   // exact, uniform, µs-aligned
                             w.StartRow();
                             w.Write(_sessionId, NpgsqlDbType.Uuid);
                             w.Write(new DateTime(t, DateTimeKind.Utc), NpgsqlDbType.TimestampTz);
@@ -1084,6 +1162,7 @@ namespace NeuuroBridge
             _rawSampleIndex = plan.EndIndex;
             if (plan.GapSamples > 0) Interlocked.Add(ref _rawGapSamples, plan.GapSamples);
             if (plan.Resyncs > 0) Interlocked.Add(ref _rawResyncs, plan.Resyncs);
+            if (plan.PlacedGaps > 0) Interlocked.Add(ref _rawPlacedGaps, plan.PlacedGaps);
             _rawPending.Clear();
             return n;
         }
@@ -1101,6 +1180,7 @@ namespace NeuuroBridge
             long periodTicks = TimeSpan.TicksPerSecond / _sampleRate;
             var plan = PlanTimeline(
                 _filtPending.Select(f => f.FrameEnd).ToList(), _filtPending.Select(f => Spc(f.Samples)).ToList(),
+                _filtPending.Select(f => f.Packages).ToList(),
                 _filtAnchored, _filtBaseTicks, _filtSampleIndex, periodTicks, FiltDriftTicks);
 
             int n = plan.Rows;
@@ -1115,7 +1195,7 @@ namespace NeuuroBridge
                         int spc = Spc(samples);
                         for (int i = 0; i < spc; i++)
                         {
-                            long t = plan.BaseTicks + (plan.StartIndex[k] + i) * periodTicks;
+                            long t = plan.BaseTicks + plan.SampleIndex(k, i, spc) * periodTicks;
                             w.StartRow();
                             w.Write(_sessionId, NpgsqlDbType.Uuid);
                             w.Write(new DateTime(t, DateTimeKind.Utc), NpgsqlDbType.TimestampTz);
@@ -1144,6 +1224,7 @@ namespace NeuuroBridge
             _filtSampleIndex = plan.EndIndex;
             if (plan.GapSamples > 0) Interlocked.Add(ref _filtGapSamples, plan.GapSamples);
             if (plan.Resyncs > 0) Interlocked.Add(ref _filtResyncs, plan.Resyncs);
+            if (plan.PlacedGaps > 0) Interlocked.Add(ref _filtPlacedGaps, plan.PlacedGaps);
             _filtPending.Clear();
             return n;
         }
@@ -1541,7 +1622,8 @@ namespace NeuuroBridge
                      : ".") +
                  $"  Frames accepted: {RawFramesIn} raw / {FiltFramesIn} filt" +
                  (RawResyncs > 0 || FiltResyncs > 0
-                     ? $"; {RawResyncs} raw / {FiltResyncs} filt timeline resync(s) (upstream frame loss)."
+                     ? $"; {RawResyncs} raw / {FiltResyncs} filt timeline resync(s) (upstream frame loss), " +
+                       $"{Interlocked.Read(ref _rawPlacedGaps)} raw / {Interlocked.Read(ref _filtPlacedGaps)} filt placed at the SDK's loss marks."
                      : "."));
         }
     }
