@@ -323,7 +323,7 @@ namespace NeuuroBridge
         // tuner needs to forward its messages to the Log event.
         public BridgeController()
         {
-            _bleTuner = new BleConnectionTuner(m => Log?.Invoke(m));
+            _bleTuner = new BleConnectionTuner(m => Log?.Invoke(m), () => _svc.GetSdkPackageStats());
         }
 
         // ── Lifecycle ────────────────────────────────────────────────────────
@@ -968,7 +968,7 @@ namespace NeuuroBridge
                 // Capture a local ref: StopSession may dispose _db on another thread mid-frame.
                 var db = _db;
                 if ((SessionActive || _draining) && db != null && db.Streaming)
-                    db.EnqueueRaw(db.ToDbTime(frame.ArrivalUtc), frame.IntSamples);
+                    db.EnqueueRaw(db.ToDbTime(frame.ArrivalUtc), frame.IntSamples, frame.Packages);
                 else if (IsWithinTailTrackWindow())
                     Interlocked.Add(ref _tailLostSamples, frame.IntSamples.Length / ChannelCount);
 
@@ -979,13 +979,13 @@ namespace NeuuroBridge
                 float[] filtered = ApplyLowPass(frame.IntSamples);
                 lock (_stateLock) _lastFiltered = filtered;
                 _processor.AddFilteredFrame(filtered);
-                UploadFilteredFrame(filtered, frame.ArrivalUtc);
+                UploadFilteredFrame(filtered, frame.ArrivalUtc, frame.Packages);
                 if (_capturing) lock (_captureLock) _capFilt.Add((DateTime.UtcNow, filtered));
                 DetectBlink(filtered);
             }
 
             // Combined CSV capture: record raw ADC + raw µV for this frame, tagged with the
-            // last-known vitals/cognitive. ArrivalUtc is the SDK-synchronous delivery instant.
+            // last-known vitals/cognitive. ArrivalUtc is the frame's end (see RawEegFrame.ArrivalUtc).
             if (_capturing) CaptureRawFrame(frame);
 
             RawFrame?.Invoke(frame);
@@ -1121,13 +1121,13 @@ namespace NeuuroBridge
         // (the UI thread in the WPF app), so any UI stall longer than the filtered drift tolerance
         // (700 ms) made this stream record a gap that never happened and shifted everything after it
         // later than the image/question events — on the very stream ml_service trains on.
-        private void UploadFilteredFrame(float[] frame, DateTime arrivalUtc)
+        private void UploadFilteredFrame(float[] frame, DateTime arrivalUtc, EegPackageMark[] packages)
         {
             if (frame == null) return;
             // Local ref: StopSession may dispose _db on another thread mid-frame.
             var db = _db;
             if ((SessionActive || _draining) && db != null && db.Streaming)
-                db.EnqueueFiltered(db.ToDbTime(arrivalUtc), frame);
+                db.EnqueueFiltered(db.ToDbTime(arrivalUtc), frame, packages);
         }
 
         private void UploadBandPowers(BandPowers[] powers)

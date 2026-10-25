@@ -48,14 +48,41 @@ namespace NeuuroBridge
     public sealed class BleConnectionTuner : IDisposable
     {
         private readonly Action<string> _log;
+        private readonly Func<SdkPackageStats> _sdkStats;
         private readonly object _gate = new object();
         private BluetoothLEDevice _device;
         private BluetoothLEPreferredConnectionParametersRequest _request;
         private GattSession _session;
+        private BleNotificationTrace _trace;
 
-        public BleConnectionTuner(Action<string> log)
+        /// <param name="sdkStats">The SDK's package counts, for the opt-in Bluetooth trace.</param>
+        public BleConnectionTuner(Action<string> log, Func<SdkPackageStats> sdkStats = null)
         {
             _log = log ?? (_ => { });
+            _sdkStats = sdkStats;
+        }
+
+        // Which connection parameters to ask Windows for (env key BLE_CONNECTION_PARAMS):
+        // "throughput" (default), "balanced", "power", or "none" to leave whatever the band and
+        // Windows negotiate on their own. An experiment switch: on 21 Oct the band connected at
+        // 7.5 ms and the ThroughputOptimized request moved it to 15 ms, which halves its send slots.
+        private static BluetoothLEPreferredConnectionParameters ConnectionParametersFromEnv(out string name)
+        {
+            name = (EnvConfig.FindDotEnvValue("BLE_CONNECTION_PARAMS") ?? "throughput").Trim().ToLowerInvariant();
+            switch (name)
+            {
+                case "none":
+                case "off":
+                    name = "none";
+                    return null;
+                case "balanced":
+                    return BluetoothLEPreferredConnectionParameters.Balanced;
+                case "power":
+                    return BluetoothLEPreferredConnectionParameters.PowerOptimized;
+                default:
+                    name = "throughput";
+                    return BluetoothLEPreferredConnectionParameters.ThroughputOptimized;
+            }
         }
 
         /// <summary>True once Windows has accepted a throughput request that is still held open.</summary>
@@ -105,8 +132,8 @@ namespace NeuuroBridge
                 // The peripheral is free to refuse, in which case this silently changes nothing.
                 LogLinkParameters(device, "before tuning");
 
-                var request = device.RequestPreferredConnectionParameters(
-                    BluetoothLEPreferredConnectionParameters.ThroughputOptimized);
+                var parameters = ConnectionParametersFromEnv(out string parametersName);
+                var request = parameters == null ? null : device.RequestPreferredConnectionParameters(parameters);
                 device.ConnectionStatusChanged += OnConnectionStatusChanged;
                 if (HasConnectionParameterApi)
                     device.ConnectionParametersChanged += OnConnectionParametersChanged;
@@ -116,10 +143,23 @@ namespace NeuuroBridge
                     _device = device;
                     _request = request;
                 }
-                _log("[ble] requested ThroughputOptimized connection parameters — " +
-                     "held for the lifetime of this connection.");
+                _log(request != null
+                    ? $"[ble] requested {parametersName} connection parameters — held for the lifetime of this connection."
+                    : "[ble] BLE_CONNECTION_PARAMS=none — leaving the connection parameters to the band and Windows.");
 
                 await OpenGattSession(device);
+
+                if (BleNotificationTrace.Enabled)
+                {
+                    var trace = new BleNotificationTrace(_log, _sdkStats);
+                    bool current;
+                    lock (_gate)
+                    {
+                        current = ReferenceEquals(_device, device);
+                        if (current) _trace = trace;
+                    }
+                    if (current) _ = trace.StartAsync(device);
+                }
 
                 // The peripheral answers the request asynchronously; ConnectionParametersChanged logs
                 // the outcome when it does, and this catches the case where nothing ever changes.
@@ -141,11 +181,13 @@ namespace NeuuroBridge
             BluetoothLEPreferredConnectionParametersRequest request;
             BluetoothLEDevice device;
             GattSession session;
+            BleNotificationTrace trace;
             lock (_gate)
             {
-                request = _request; device = _device; session = _session;
-                _request = null; _device = null; _session = null;
+                request = _request; device = _device; session = _session; trace = _trace;
+                _request = null; _device = null; _session = null; _trace = null;
             }
+            if (trace != null) { try { trace.Dispose(); } catch { /* ignore */ } }
             if (request != null) { try { request.Dispose(); } catch { /* ignore */ } }
             if (session != null)
             {
