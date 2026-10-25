@@ -230,3 +230,97 @@ def evaluate_all(
         cross_validate(X, y, groups, sessions, m, name, n_splits=n_splits, grouped=True)
         for name, m in make_models().items()
     ]
+
+
+# ── Group models: leave one PERSON out ─────────────────────────────────────────
+
+@dataclass
+class GroupResult:
+    """Cross-validated score of a group model, with and without the BFI inputs."""
+    n_people: int
+    n_epochs: int
+    n_images: int
+    n_folds: int
+    r2: dict                    # with BFI
+    mae: dict
+    r2_no_bfi: dict             # same splits, BFI columns left out
+    mae_no_bfi: dict
+    null_r2: dict               # predict-the-training-mean on the same splits
+    null_mae: dict
+
+
+def cross_validate_people(
+    Xn: np.ndarray,
+    bfi: np.ndarray,
+    y: np.ndarray,
+    images: np.ndarray,
+    people: np.ndarray,
+    model,
+    n_image_splits: int = 5,
+) -> GroupResult:
+    """
+    The honest score for a model meant to serve people it was not trained on.
+
+    Every test fold is ONE person's epochs for a block of images, and the model is
+    trained on the OTHER people's epochs for the OTHER images. Holding the person out
+    is what a group model has to survive (EEG differs a lot between people). Holding
+    their test images out of training as well matters here because every member saw the
+    same OASIS set: without it, the model could score by recognising an image it had
+    already seen in someone else's EEG, which says nothing about a new image.
+
+    Xn is the EEG features already z-scored per session (label-free, the same transform
+    inference applies), and bfi the matching per-row BFI-2 domain means. Both variants
+    use identical splits so their difference is the effect of BFI alone.
+    """
+    person_ids = np.unique(people)
+    n_images = len(np.unique(images))
+    if len(person_ids) < 2:
+        raise ValueError("Need at least 2 people to hold one out.")
+    n_splits = min(n_image_splits, n_images)
+    if n_splits < 2:
+        raise ValueError(f"Need at least 2 distinct images; got {n_images}.")
+
+    X_bfi = np.hstack([Xn, bfi])
+    oof = np.full_like(y, np.nan, dtype=np.float64)
+    oof_no = np.full_like(y, np.nan, dtype=np.float64)
+    null = np.full_like(y, np.nan, dtype=np.float64)
+
+    image_folds = list(GroupKFold(n_splits=n_splits).split(Xn, y, images))
+    n_folds = 0
+    for person in person_ids:
+        is_person = people == person
+        for _, fold_idx in image_folds:
+            fold_images = np.unique(images[fold_idx])
+            in_fold = np.isin(images, fold_images)
+            test = is_person & in_fold
+            train = ~is_person & ~in_fold
+            if not test.any() or train.sum() < 2:
+                continue
+            n_folds += 1
+            m = clone(model)
+            m.fit(X_bfi[train], y[train])
+            oof[test] = m.predict(X_bfi[test])
+            m_no = clone(model)
+            m_no.fit(Xn[train], y[train])
+            oof_no[test] = m_no.predict(Xn[test])
+            null[test] = y[train].mean(axis=0)
+
+    scored = ~np.isnan(oof[:, 0])
+    if scored.sum() < 2:
+        raise ValueError("No fold had both training and test data.")
+
+    def metrics(pred):
+        r2, mae = {}, {}
+        for i, t in enumerate(TARGETS):
+            r2[t] = float(r2_score(y[scored, i], pred[scored, i]))
+            mae[t] = float(mean_absolute_error(y[scored, i], pred[scored, i]))
+        return r2, mae
+
+    r2, mae = metrics(oof)
+    r2_no, mae_no = metrics(oof_no)
+    null_r2, null_mae = metrics(null)
+    return GroupResult(
+        n_people=len(person_ids), n_epochs=int(scored.sum()), n_images=n_images,
+        n_folds=n_folds, r2=r2, mae=mae, r2_no_bfi=r2_no, mae_no_bfi=mae_no,
+        null_r2=null_r2, null_mae=null_mae,
+    )

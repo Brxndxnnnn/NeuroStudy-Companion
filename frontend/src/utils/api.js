@@ -356,26 +356,55 @@ export async function getPhase1Sessions() {
   return res;
 }
 // One session's predicted valence/arousal trajectory.
-// A session can hold predictions from more than one version of its client's
-// personal model; the response carries ONE version's rows (the newest by default)
-// plus `available_models` for the switch. Pass modelVersion to pick another.
+// A session can hold predictions from several group models (every group its client
+// is in, and earlier versions of each); the response carries ONE model's rows (the
+// newest by default) plus `available_models` for the switch. Pass modelVersion to
+// pick another.
 export async function getPhase1Predictions(sessionId, modelVersion) {
   const q = modelVersion != null ? `?model_version=${modelVersion}` : "";
   const res = await fetchWithAuth(`${BASE_URL}/ml/phase1/predictions/${sessionId}${q}`);
   return res;
 }
-// One client's completed sessions + their personal model, for the training picker.
-export async function getPhase1ClientSessions(clientId) {
-  const res = await fetchWithAuth(`${BASE_URL}/ml/phase1/clients/${clientId}/sessions`);
+// Per client: the latest session a group model would train on, and whether a
+// complete BFI-2 exists (for the group editor).
+export async function getPhase1Eligibility() {
+  const res = await fetchWithAuth(`${BASE_URL}/ml/phase1/eligibility`);
   return res;
 }
-// Train one client's personal model (clientId is required). Like every ML call it
-// goes through the authenticated backend (/api/ml/train), which is the only path
-// exposed to ml_service.
-export async function trainPhase1Model({ clientId, sessionIds }) {
-  const res = await fetchWithAuth(`${BASE_URL}/ml/train`, {
+
+// ML GROUPS — a named set of clients trained into one model (migration 025).
+// Groups, members and current model scores.
+export async function getMlGroups() {
+  const res = await fetchWithAuth(`${BASE_URL}/ml/groups`);
+  return res;
+}
+export async function createMlGroup({ name, clientIds }) {
+  const res = await fetchWithAuth(`${BASE_URL}/ml/groups`, {
     method: "POST",
-    body: JSON.stringify({ client_id: clientId, session_ids: sessionIds }),
+    body: JSON.stringify({ name, client_ids: clientIds }),
+  });
+  return res;
+}
+// Rename and/or replace the member list (send either or both).
+export async function updateMlGroup(groupId, { name, clientIds }) {
+  const res = await fetchWithAuth(`${BASE_URL}/ml/groups/${groupId}`, {
+    method: "PUT",
+    body: JSON.stringify({ name, client_ids: clientIds }),
+  });
+  return res;
+}
+// Deletes the group with its models and their predictions.
+export async function deleteMlGroup(groupId) {
+  const res = await fetchWithAuth(`${BASE_URL}/ml/groups/${groupId}`, { method: "DELETE" });
+  return res;
+}
+// Trains the group's model on each member's latest labelled session and then
+// predicts every member's sessions. The body says whether it trained, who was left
+// out and why, and the scores with and without BFI.
+export async function trainMlGroup(groupId) {
+  const res = await fetchWithAuth(`${BASE_URL}/ml/groups/${groupId}/train`, {
+    method: "POST",
+    body: JSON.stringify({ predict: true }),
   });
   return res;
 }

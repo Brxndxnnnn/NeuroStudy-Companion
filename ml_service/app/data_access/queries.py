@@ -223,23 +223,147 @@ def fetch_completed_session_ids(conn) -> list[str]:
     return [str(r["session_id"]) for r in rows]
 
 
-def fetch_client_session_ids(conn, client_id: str) -> list[str]:
-    """
-    One client's completed sessions — the candidate training set for their personal
-    model, and the list the technician picks from.
+# ── Group models (migration 025) ──────────────────────────────────────────────
 
-    Same 'completed' gate and the same reasoning as fetch_completed_session_ids:
-    anything earlier risks training on a session the bridge is still flushing.
+# BFI-2 domains in the order a model's extra input columns use them.
+BFI_DOMAINS = ("E", "A", "C", "N", "O")
+
+
+def fetch_group_members(conn, group_id: str) -> list[dict]:
+    """A group's members: [{client_id, client_name}], oldest member first."""
+    rows = conn.execute(text("""
+        SELECT m.client_id, c.name AS client_name
+        FROM   ml_group_members m
+        JOIN   clients c ON c.client_id = m.client_id
+        WHERE  m.group_id = :gid
+        ORDER  BY m.added_at ASC, c.name ASC
+    """), {"gid": group_id}).mappings().all()
+    return [{"client_id": str(r["client_id"]), "client_name": r["client_name"]} for r in rows]
+
+
+def fetch_group(conn, group_id: str) -> dict | None:
+    row = conn.execute(text("""
+        SELECT group_id, clinic_id, name FROM ml_groups WHERE group_id = :gid
+    """), {"gid": group_id}).mappings().first()
+    return dict(row) if row else None
+
+
+# A member's "latest session" must show at least this many distinct labelled images.
+# Without a floor, a short or aborted recording (one image, say) would replace a full
+# 24-image session as that person's contribution to every group they are in.
+MIN_SESSION_LABELLED_IMAGES = int(os.getenv("PHASE1_MIN_SESSION_LABELLED_IMAGES", "10"))
+
+
+def fetch_latest_training_sessions(conn, client_ids: list[str]) -> dict[str, dict]:
+    """
+    Each client's latest session a group model can learn from: completed (the bridge has
+    flushed everything), EEG stored, and at least MIN_SESSION_LABELLED_IMAGES distinct
+    OASIS-labelled images shown.
+
+    Returns {client_id: {session_id, start_time, n_labelled_images}}; a client with no
+    such session is absent. Same completed/timeline gate as fetch_completed_session_ids.
+    """
+    if not client_ids:
+        return {}
+    rows = conn.execute(text("""
+        SELECT DISTINCT ON (s.client_id)
+               s.client_id, s.session_id, s.start_time, lab.n_labelled_images
+        FROM   sessions s
+        CROSS  JOIN LATERAL (
+            SELECT count(DISTINCT e.image_id) AS n_labelled_images
+            FROM   events e JOIN images i ON i.image_id = e.image_id
+            WHERE  e.session_id = s.session_id AND e.hidden_at IS NOT NULL
+              AND  i.valence_mean IS NOT NULL AND i.arousal_mean IS NOT NULL
+        ) lab
+        WHERE  s.client_id = ANY(CAST(:ids AS uuid[]))
+          AND  s.sync_status = 'completed'
+          AND  COALESCE(s.timeline_version, 1) >= :minver
+          AND  lab.n_labelled_images >= :min_images
+          AND  EXISTS (SELECT 1 FROM eeg_filtered_samples f WHERE f.session_id = s.session_id)
+        ORDER  BY s.client_id, s.start_time DESC
+    """), {"ids": list(client_ids), "minver": MIN_TIMELINE_VERSION,
+           "min_images": MIN_SESSION_LABELLED_IMAGES}).mappings().all()
+    return {
+        str(r["client_id"]): {
+            "session_id": str(r["session_id"]),
+            "start_time": r["start_time"],
+            "n_labelled_images": int(r["n_labelled_images"]),
+        }
+        for r in rows
+    }
+
+
+def fetch_client_bfi(conn, client_id: str, prefer_session_id: str | None = None) -> dict | None:
+    """
+    A client's BFI-2 domain means (1-5) as {E, A, C, N, O, session_id}, or None.
+
+    Taken from prefer_session_id's own BFI-2 when it is complete; otherwise from the
+    client's most recent complete BFI-2. Personality is treated as stable, so a session
+    with no questionnaire of its own borrows the client's latest one. Only complete
+    questionnaires count: a half-answered one would average a different item set per
+    domain.
     """
     rows = conn.execute(text("""
-        SELECT session_id
-        FROM   sessions
-        WHERE  sync_status = 'completed' AND client_id = :cid
-          AND  COALESCE(timeline_version, 1) >= :minver
-        ORDER  BY start_time ASC
-    """), {"cid": client_id, "minver": MIN_TIMELINE_VERSION}).mappings().all()
+        SELECT sc.session_id, sc.domain, sc.mean_score
+        FROM   session_questionnaire_scores sc
+        JOIN   sessions s ON s.session_id = sc.session_id
+        WHERE  s.client_id = :cid
+          AND  sc.questionnaire_code = 'bfi2'
+          AND  sc.score_level = 'domain'
+          AND  EXISTS (SELECT 1 FROM session_questionnaire_scores t
+                       WHERE t.session_id = sc.session_id AND t.questionnaire_code = 'bfi2'
+                         AND t.score_level = 'total' AND t.is_complete)
+        ORDER  BY (sc.session_id = CAST(:prefer AS uuid)) DESC NULLS LAST, s.start_time DESC
+    """), {"cid": client_id, "prefer": prefer_session_id}).mappings().all()
+    if not rows:
+        return None
+    chosen = rows[0]["session_id"]
+    scores = {r["domain"]: float(r["mean_score"]) for r in rows if r["session_id"] == chosen}
+    if any(d not in scores for d in BFI_DOMAINS):
+        return None
+    return {**{d: scores[d] for d in BFI_DOMAINS}, "session_id": str(chosen)}
 
-    return [str(r["session_id"]) for r in rows]
+
+def fetch_session_client(conn, session_id: str) -> str | None:
+    row = conn.execute(text("SELECT client_id FROM sessions WHERE session_id = :sid"),
+                       {"sid": session_id}).first()
+    return str(row[0]) if row and row[0] else None
+
+
+def fetch_client_eligibility(conn) -> list[dict]:
+    """
+    Every client with what a group model would use from them: their latest trainable
+    session (if any) and whether a complete BFI-2 exists. For the group editor, which
+    shows up front who can contribute. Cross-clinic: the backend trims it to the
+    caller's clinic.
+    """
+    clients = conn.execute(text("""
+        SELECT c.client_id, c.name AS client_name FROM clients c ORDER BY c.name
+    """)).mappings().all()
+    ids = [str(c["client_id"]) for c in clients]
+    latest = fetch_latest_training_sessions(conn, ids)
+    with_bfi = {
+        str(r[0]) for r in conn.execute(text("""
+            SELECT DISTINCT s.client_id
+            FROM   session_questionnaire_scores t
+            JOIN   sessions s ON s.session_id = t.session_id
+            WHERE  t.questionnaire_code = 'bfi2' AND t.score_level = 'total' AND t.is_complete
+        """))
+    }
+    out = []
+    for c in clients:
+        cid = str(c["client_id"])
+        sess = latest.get(cid)
+        out.append({
+            "client_id": cid,
+            "client_name": c["client_name"],
+            "latest_session_id": sess["session_id"] if sess else None,
+            "latest_session_at": sess["start_time"] if sess else None,
+            "n_labelled_images": sess["n_labelled_images"] if sess else 0,
+            "has_bfi": cid in with_bfi,
+            "eligible": bool(sess) and cid in with_bfi,
+        })
+    return out
 
 
 def fetch_timeline_version_mix(conn, session_ids: list[str]) -> dict:
