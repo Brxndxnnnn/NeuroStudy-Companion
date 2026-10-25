@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Concurrent;
+using System.Collections.Generic;
 using System.Diagnostics;
 using System.Threading;
 using NeeuroOSWindows;
@@ -17,6 +18,29 @@ namespace NeuuroBridge
         public bool IsEnabled { get; set; }
     }
 
+    /// <summary>
+    /// One 0.2 s package (50 samples per channel) inside a raw EEG frame, as the SDK accepted it.
+    /// </summary>
+    public struct EegPackageMark
+    {
+        /// <summary>The SDK threw bytes away (a broken or unreadable package) just before this one,
+        /// so at least one package is missing between it and the previous one.</summary>
+        public bool LossBefore;
+        /// <summary>UTC instant the SDK accepted this package (its last sample's arrival).</summary>
+        public DateTime Utc;
+    }
+
+    /// <summary>Running totals of the SDK's package assembly (see SenzeBandService.SdkLog).</summary>
+    public struct SdkPackageStats
+    {
+        /// <summary>Packages the SDK accepted and turned into EEG.</summary>
+        public long Accepted;
+        /// <summary>Times it threw bytes away (several can belong to one loss).</summary>
+        public long DiscardEvents;
+        /// <summary>Accepted packages that followed a discard, i.e. loss events.</summary>
+        public long AcceptedAfterLoss;
+    }
+
     /// <summary>One frame of raw EEG. The SDK delivers four channels (Fp1, Fp2, T4, T3).</summary>
     public class RawEegFrame
     {
@@ -25,12 +49,18 @@ namespace NeuuroBridge
         /// <summary>Raw float samples in microvolts (assignRawDataFloatDelegate).</summary>
         public float[] FloatSamples { get; set; }
         /// <summary>
-        /// UTC instant the SDK delivered this frame, captured SYNCHRONOUSLY on the SDK
+        /// UTC instant this frame's last sample arrived, captured SYNCHRONOUSLY on the SDK
         /// callback thread — not when a thread-pool handler later runs it. The per-sample
         /// timeline is anchored to this so it reflects true delivery timing rather than
         /// dispatch jitter (which previously stretched a 38 s stream across 53 s).
+        ///
+        /// The SDK hands over each raw frame one callback LATE (see OnRawInt), so this is the
+        /// time of the previous callback, not of the one that delivered the frame.
         /// </summary>
         public DateTime ArrivalUtc { get; set; }
+        /// <summary>The frame's packages in order (normally 5 x 50 samples), or null when the
+        /// bridge could not follow the SDK's package bookkeeping for this frame.</summary>
+        public EegPackageMark[] Packages { get; set; }
     }
 
     /// <summary>
@@ -536,11 +566,48 @@ namespace NeuuroBridge
         // LATER on the EEG data thread — so the buffer MUST be cloned and the arrival time
         // captured here, synchronously, before we hand off. Cloning in the handler (as it once
         // did) raced the SDK overwriting the buffer.
+        //
+        // ONE FRAME LATE: when the SDK completes a 1 s frame (5 packages) it fires the raw
+        // callbacks BEFORE copying the new samples into the buffer it passes
+        // (SenzeBandClass.analyzeEEGDataThread calls EEG_GetData, then fills EEGbuffer). So each
+        // raw callback carries the frame completed at the PREVIOUS callback, and the first one after
+        // the SDK starts carries an all-zero buffer. Measured on stored sessions that kept both
+        // streams: raw trails the SDK's own filtered output by ~228 samples, i.e. one 250-sample
+        // frame less the SDK filter's delay. Stamping at this callback put every stored sample ~1 s
+        // after the moment it was recorded. The frame is therefore stamped with the previous
+        // callback's time and given the previous frame's package marks; an all-zero buffer is
+        // dropped (real ADC counts carry a large DC offset and are never all zero).
+        private DateTime _prevRawCallbackUtc;
+        private EegPackageMark[] _prevFramePackages;
+        private DateTime _deliveredFrameEndUtc;      // reused by the float twin below
+        private EegPackageMark[] _deliveredPackages;
+        private bool _deliveredFrameValid;
+
         private void OnRawInt(int[] data)
         {
-            var frame = new RawEegFrame { IntSamples = (int[])data.Clone(), ArrivalUtc = DateTime.UtcNow };
-            Interlocked.Exchange(ref _lastRawArrivalTicks, frame.ArrivalUtc.Ticks);
+            DateTime now = DateTime.UtcNow;
+            Interlocked.Exchange(ref _lastRawArrivalTicks, now.Ticks);
+
+            EegPackageMark[] completedPackages = TakeFramePackages();
+            DateTime frameEndUtc = _prevRawCallbackUtc;
+            EegPackageMark[] packages = _prevFramePackages;
+            _prevRawCallbackUtc = now;
+            _prevFramePackages = completedPackages;
+
+            _deliveredFrameValid = frameEndUtc != default(DateTime) && !IsAllZero(data);
+            _deliveredFrameEndUtc = frameEndUtc;
+            _deliveredPackages = packages;
+            if (!_deliveredFrameValid) return;
+
+            var frame = new RawEegFrame { IntSamples = (int[])data.Clone(), ArrivalUtc = frameEndUtc, Packages = packages };
             PostData(() => OnRawEeg?.Invoke(frame));
+        }
+
+        private static bool IsAllZero(int[] data)
+        {
+            if (data == null) return true;
+            foreach (var v in data) if (v != 0) return false;
+            return true;
         }
 
         // Stamped on the SDK's own callback thread, so the stall watchdog sees the band stop sending
@@ -557,9 +624,11 @@ namespace NeuuroBridge
             }
         }
 
+        // Fired by the SDK straight after OnRawInt, for the same (one-late) frame.
         private void OnRawFloat(float[] data)
         {
-            var frame = new RawEegFrame { FloatSamples = (float[])data.Clone(), ArrivalUtc = DateTime.UtcNow };
+            if (!_deliveredFrameValid) return;
+            var frame = new RawEegFrame { FloatSamples = (float[])data.Clone(), ArrivalUtc = _deliveredFrameEndUtc, Packages = _deliveredPackages };
             PostData(() => OnRawEeg?.Invoke(frame));
         }
 
@@ -724,7 +793,82 @@ namespace NeuuroBridge
         // The SDK's internal errorLog fires per BLE packet (header parsing, buffer
         // counts, accelerometer, etc.). Route it to the debugger only so it never
         // floods the interactive console.
-        private void SdkLog(string message) => Debug.WriteLine("[sdk] " + message);
+        //
+        // It is also the only view of how the SDK assembles 645-byte packages from BLE
+        // notifications, so a few of its messages are counted (see the package bookkeeping
+        // below). It runs synchronously on the thread that then fires the raw callbacks.
+        private void SdkLog(string message)
+        {
+            Debug.WriteLine("[sdk] " + message);
+            if (message == null) return;
+            if (message.StartsWith("Correct header in do_analyze", StringComparison.Ordinal))
+                OnSdkPackageAccepted();
+            else if (message.StartsWith("intBufferCount exceeded", StringComparison.Ordinal)
+                  || message.StartsWith("Cannot find Header!", StringComparison.Ordinal)
+                  || message.StartsWith("doAnalyze sbInstance.correctHeader: False", StringComparison.Ordinal))
+                OnSdkBytesDiscarded();
+        }
+
+        // ── SDK package bookkeeping ─────────────────────────────────────────
+        // The SDK only accepts a package when exactly 645 bytes, starting with a valid header,
+        // arrive in order. If a BLE notification is missing, the partial package is thrown away
+        // ("intBufferCount exceeded"), and so is everything until a notification happens to start
+        // on the next header ("Cannot find Header!"). Each such message therefore means at least
+        // one package is gone. Recording it against the next accepted package lets the uploader put
+        // the gap exactly there, instead of finding it later from drifting arrival times.
+        private readonly object _pkgLock = new object();
+        private readonly List<EegPackageMark> _framePackages = new List<EegPackageMark>(PackagesPerFrame);
+        private bool _discardSincePackage;
+        private long _sdkPackagesAccepted;
+        private long _sdkDiscardEvents;
+        private long _sdkPackagesAfterLoss;
+
+        private const int PackagesPerFrame = 5;
+
+        private void OnSdkPackageAccepted()
+        {
+            lock (_pkgLock)
+            {
+                _framePackages.Add(new EegPackageMark { LossBefore = _discardSincePackage, Utc = DateTime.UtcNow });
+                if (_discardSincePackage) _sdkPackagesAfterLoss++;
+                _discardSincePackage = false;
+                _sdkPackagesAccepted++;
+            }
+        }
+
+        private void OnSdkBytesDiscarded()
+        {
+            lock (_pkgLock)
+            {
+                _discardSincePackage = true;
+                _sdkDiscardEvents++;
+            }
+        }
+
+        // The packages accepted since the last raw callback: the frame the SDK just completed. A
+        // frame is 5 packages; any other count means the bookkeeping is out of step (e.g. the
+        // stream restarted mid-frame), and the marks are withheld rather than misplaced.
+        private EegPackageMark[] TakeFramePackages()
+        {
+            lock (_pkgLock)
+            {
+                var marks = _framePackages.Count == PackagesPerFrame ? _framePackages.ToArray() : null;
+                _framePackages.Clear();
+                return marks;
+            }
+        }
+
+        /// <summary>Running totals from the SDK's package assembly, for diagnostics.</summary>
+        public SdkPackageStats GetSdkPackageStats()
+        {
+            lock (_pkgLock)
+                return new SdkPackageStats
+                {
+                    Accepted = _sdkPackagesAccepted,
+                    DiscardEvents = _sdkDiscardEvents,
+                    AcceptedAfterLoss = _sdkPackagesAfterLoss,
+                };
+        }
 
         public void Shutdown()
         {
