@@ -85,6 +85,7 @@ const listWithItemCounts = async (client = pool) => {
             q.name,
             q.scale_min,
             q.scale_max,
+            q.options,
             q.display_order,
             (SELECT COUNT(*)::integer FROM questionnaire_questions qq
              WHERE qq.questionnaire_id = q.questionnaire_id) AS expected_items

@@ -224,6 +224,15 @@ export async function getSessionQuestionnaires(sessionId) {
   return res;
 }
 
+// The same answers and scores as a PDF. Like getSessionReportPdf: check res.ok, then
+// read res.blob(). 409 means no questionnaire has been answered for the session yet.
+export async function getSessionQuestionnairesPdf(sessionId) {
+  const res = await fetchWithAuth(
+    `${BASE_URL}/sessions/${encodeURIComponent(sessionId)}/questionnaires.pdf`
+  );
+  return res;
+}
+
 export async function pairSession(pairingCode, clientId) {
   const res = await fetchWithAuth(`${BASE_URL}/sessions/pair`, {
     method: "PATCH",

@@ -543,4 +543,37 @@ router.get(
     questionnaireController.getSessionQuestionnaires
 )
 
+/**
+ * @openapi
+ * /api/sessions/{session_id}/questionnaires.pdf:
+ *   get:
+ *     summary: Download a session's questionnaire responses as a PDF (BFI-2, WHO-5)
+ *     description: |
+ *       The same content as `GET /api/sessions/{session_id}/questionnaires`, as a PDF: patient
+ *       header, then per questionnaire its scores (WHO-5 total and percentage; BFI-2 domain and
+ *       facet means) and every question with the answer given and the score it contributes
+ *       (reverse-keyed items marked). Questionnaires not answered yet are listed as such.
+ *     tags: [Sessions]
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - { in: path, name: session_id, required: true, schema: { type: string, format: uuid } }
+ *     responses:
+ *       200:
+ *         description: The PDF
+ *         content:
+ *           application/pdf: {}
+ *       404:
+ *         description: Session not found
+ *       409:
+ *         description: No questionnaire has been answered for this session yet
+ */
+router.get(
+    '/:session_id/questionnaires.pdf',
+    requirePermission(PERMS.SESSIONS_READ_OWN_CLINIC),
+    sessionIdValidation,
+    validateRequest,
+    questionnaireController.getSessionQuestionnairesPdf
+)
+
 export default router
