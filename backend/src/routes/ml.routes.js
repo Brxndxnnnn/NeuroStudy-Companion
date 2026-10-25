@@ -265,7 +265,7 @@ router.delete('/groups/:groupId', dbContext, requirePermission(PERMS.INSIGHTS_WR
  *             properties:
  *               predict: { type: boolean, default: true }
  *     responses:
- *       200: { description: Finished — see `trained`, `message`, `skipped`, scores }
+ *       200: { description: "Finished. See trained, message, skipped and the scores." }
  *       404: { description: Group not found in the caller's clinic }
  *       502: { description: ML service unreachable }
  */
