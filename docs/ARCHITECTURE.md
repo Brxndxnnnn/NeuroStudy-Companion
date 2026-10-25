@@ -178,8 +178,10 @@ actually used.
 `fft_band_powers` (Welch PSD over the recorded signal — distinct from the bridge's live
 ~1 Hz FFT above; both are ours, neither is the SDK's), `ml_insights`.
 
-**ML:** `ml_models` (registry; one personal model per client, `client_id` NOT NULL),
-`ml_model_sessions` (which sessions trained which model), `session_predictions`.
+**ML:** `ml_groups` + `ml_group_members` (named sets of clients, clinic-scoped under RLS),
+`ml_models` (registry; one current model per group, `group_id` NOT NULL),
+`ml_model_sessions` (which client contributed which session to a model),
+`session_predictions`.
 
 **Auth / tenancy:** `roles`, `permissions`, `role_permissions`, `revoked_tokens`,
 `clinic_database_roles`, `clinic_activation_codes`.
@@ -267,28 +269,37 @@ extraction by hand.
 
 ### Training (`ml_service/app/phase1/train.py`)
 
-- Default algorithm `ridge` (`PHASE1_MODEL`); alternatives in `evaluate.make_models()`.
-- **Sample size is the number of distinct images, not epochs or sessions.** Repeat
-  sessions over the same set add repeated measurements of the same labels.
-- Cross-validation is **grouped by image** so the same image cannot appear in both
-  train and test folds — this is what stops fake accuracy
-  (`test_leakage_guard_actually_guards`).
-- Features are z-scored **within each session**, fitted on the training fold only.
-  Without it a model scores well by learning "which session is this?".
-- Scored against a predict-the-mean null baseline.
+Models belong to **groups** of clients (migration 025, 21 Oct 2026 decision). A technician
+creates a named group on the Insights tab, adds clients (any clinic member; a client can be
+in several groups) and presses Train. `train_group_and_save(conn, group_id)`:
 
-**Scope:** every model is personal. `train_and_save(conn, client_id)` fits one client's
-model over their completed sessions, or an explicit hand-picked list recorded in
-`ml_model_sessions` for auditability. There is no model shared across clients, and no
-scheduled retrain — training starts from the Insights tab (or `scripts/phase1_cli.py
---train --client <id>`).
+- takes each member's **latest** completed session with EEG and at least
+  `PHASE1_MIN_SESSION_LABELLED_IMAGES` (10) distinct OASIS-labelled images;
+- adds the member's **BFI-2 domain means** (E, A, C, N, O) to every epoch — that session's
+  own complete BFI-2, else the client's latest complete one. BFI is appended **after** the
+  per-session z-scoring: it is constant within a session, so z-scoring it would zero it;
+- leaves out, with a stated reason, members with no such session, no complete BFI-2, or
+  fewer than `PHASE1_MIN_MEMBER_EPOCHS` (10) usable epochs; needs at least 2 people;
+- fits a **random forest** (the only algorithm).
 
-**Promotion:** a newly trained model **always** becomes its client's current one — a
-technician asked for that specific model, and the honest score is displayed beside it.
+**Scoring** (`evaluate.cross_validate_people`): every test fold is one person's epochs for a
+block of images, trained on the other people's epochs for the other images. Holding the
+person out is what a group model must survive; holding their test images out matters
+because every member saw the same OASIS set, so a model could otherwise score by
+recognising an image from someone else's EEG. The same splits score a no-BFI variant and
+the predict-the-mean null, so the model card shows whether BFI helped
+(`ml_models.cv_r2_*_no_bfi`). Sample size is still the number of **distinct images**.
 
-**Serving** (`phase1_store.current_model`): a session is predicted with its own client's
-current model. A client with no model yet has no predictions; their sessions stay
-pending and are picked up automatically once a model is trained for them.
+**Audit:** `ml_model_sessions` records which client contributed which session, so a model's
+evidence survives later edits to the group.
+
+**Promotion:** a newly trained model always becomes its group's current one.
+
+**Serving:** after training, the model predicts every completed session of every member.
+The prediction worker gives each new session predictions from the current model of every
+group its client is in; the tab shows one model's rows at a time (group/version switch).
+Groups and members are clinic data behind RLS, managed by the backend
+(`/api/ml/groups`); ml_service only reads them.
 
 ### Why image duration matters
 
@@ -394,10 +405,10 @@ quality. Replaced by "Balanced ML set", chosen by farthest-point sampling over a
 images to roughly double valence variance and triple arousal variance. **Any future set
 should be selected for spread, not convenience.**
 
-### Structural cap on personal models
+### Structural cap on group models
 
-Without stimulus-set rotation, every personal model is capped at the number of distinct
-images in one set — 24 — forever. Repeat sessions add recordings, not labels. The
+Without stimulus-set rotation, every group model is capped at the number of distinct
+images in one set — 24 — however many people it pools. Repeat sessions add recordings, not labels. The
 one-active-set-per-clinic index makes rotation a clinic-wide manual swap today.
 
 ---

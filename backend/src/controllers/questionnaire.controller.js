@@ -3,6 +3,7 @@ import sessionModel from '../models/session.model.js'
 import catchAsync from '../utils/catchAsync.js'
 import { ConflictError, NotFoundError } from '../utils/AppError.js'
 import { BFI2_DOMAIN_NAMES, parseLanguages, validateAnswers } from '../validators/questionnaire.validators.js'
+import { buildQuestionnaireReportPdf } from '../pdf/questionnaireReport.pdf.js'
 
 const DOMAIN_ORDER = Object.keys(BFI2_DOMAIN_NAMES)
 
@@ -93,20 +94,17 @@ const answerQuestionnaire = catchAsync(async (req, res) => {
     })
 })
 
-// ── GET /api/sessions/:session_id/questionnaires ──────────────────────────────────
-// Every questionnaire (answered or not) with the session's answers and scores, for the
-// results page and later the PDF report.
-const getSessionQuestionnaires = catchAsync(async (req, res) => {
-    const { session_id } = req.validated
-
-    const sessions = await sessionModel.findById(session_id, req.dbClient)
+// Every questionnaire (answered or not) with one session's answers and scores. Shared by the
+// results page (JSON) and the survey PDF so both always show the same thing.
+const assembleSessionQuestionnaires = async (session_id, dbClient) => {
+    const sessions = await sessionModel.findById(session_id, dbClient)
     if (!sessions || sessions.length === 0)
         throw new NotFoundError('Session not found')
 
     const [questionnaires, answers, scores] = await Promise.all([
-        questionnaireModel.listWithItemCounts(req.dbClient),
-        questionnaireModel.findSessionAnswers(session_id, req.dbClient),
-        questionnaireModel.findSessionScores(session_id, null, req.dbClient)
+        questionnaireModel.listWithItemCounts(dbClient),
+        questionnaireModel.findSessionAnswers(session_id, dbClient),
+        questionnaireModel.findSessionScores(session_id, null, dbClient)
     ])
 
     const result = questionnaires.map(q => {
@@ -119,6 +117,7 @@ const getSessionQuestionnaires = catchAsync(async (req, res) => {
             name: q.name,
             scale_min: q.scale_min,
             scale_max: q.scale_max,
+            options: q.options ?? null,
             expected_items: q.expected_items,
             answered_items: qAnswers.length,
             is_complete: qAnswers.length > 0 && qAnswers.length === q.expected_items,
@@ -137,7 +136,36 @@ const getSessionQuestionnaires = catchAsync(async (req, res) => {
         }
     })
 
-    return res.json(result)
+    return { session: sessions[0], questionnaires: result }
+}
+
+// ── GET /api/sessions/:session_id/questionnaires ──────────────────────────────────
+// Every questionnaire (answered or not) with the session's answers and scores, for the
+// results page.
+const getSessionQuestionnaires = catchAsync(async (req, res) => {
+    const { session_id } = req.validated
+    const { questionnaires } = await assembleSessionQuestionnaires(session_id, req.dbClient)
+    return res.json(questionnaires)
+})
+
+// ── GET /api/sessions/:session_id/questionnaires.pdf ──────────────────────────────
+// The same answers and scores as a downloadable PDF (pdf/questionnaireReport.pdf.js).
+const getSessionQuestionnairesPdf = catchAsync(async (req, res) => {
+    const { session_id } = req.validated
+    const { session, questionnaires } = await assembleSessionQuestionnaires(session_id, req.dbClient)
+    if (!questionnaires.some(q => q.answered_items > 0))
+        throw new ConflictError('No questionnaire has been answered for this session yet')
+
+    const doc = buildQuestionnaireReportPdf({
+        patient: { name: session.client_name, dob: session.client_dob, gender: session.client_gender },
+        session: { sessionId: session_id, startTime: session.start_time, technicianName: session.technician_name },
+        questionnaires
+    })
+
+    res.setHeader('Content-Type', 'application/pdf')
+    res.setHeader('Content-Disposition', `attachment; filename="questionnaire-responses-${session_id}.pdf"`)
+    doc.pipe(res)
+    doc.end()
 })
 
 export default {
@@ -145,5 +173,6 @@ export default {
     getQuestionnaireById,
     getQuestionsByQuestionnaireId,
     answerQuestionnaire,
-    getSessionQuestionnaires
+    getSessionQuestionnaires,
+    getSessionQuestionnairesPdf
 }

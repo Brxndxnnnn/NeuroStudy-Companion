@@ -44,6 +44,9 @@ const handlePostgresErrors = (err) => {
             return new ConflictError(safeMessage);
         case 'P2203': // history incomplete, or not created as a draft
             return new BadRequestError(safeMessage);
+        // ML groups (db/migrations/025_ml_group_models.sql)
+        case 'P2501': // member is not a client of the group's clinic
+            return new BadRequestError(safeMessage);
         case '22P02': // invalid input syntax for type uuid
             return new BadRequestError('Invalid ID format provided.');
         

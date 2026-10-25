@@ -7,9 +7,11 @@ import PERMS from '../constants/permissions.js'
 import {
     isUuid,
     sessionInClinic,
-    clientInClinic,
     visibleSessionIds,
+    visibleClientIds,
 } from '../utils/mlTenant.js'
+import { mlFetch, send } from '../utils/mlClient.js'
+import mlGroupController from '../controllers/mlGroup.controller.js'
 
 /**
  * Authenticated front door to the ML service.
@@ -27,12 +29,16 @@ import {
  *   - /phase1/status                        → readiness metadata, no tenant data →
  *                                              any authenticated user.
  *   - /phase1/sessions, /predictions/:id,
- *     /clients/:id/sessions, POST /train     → touch a clinic's sessions/clients →
+ *     /phase1/eligibility                  → touch a clinic's sessions/clients →
  *                                              insights:read + an ownership check on
  *                                              req.dbClient (RLS-scoped) before the
  *                                              proxy. This is what stops one clinic
  *                                              reading another's insights by guessing
  *                                              a session/client UUID.
+ *   - /groups (CRUD), /groups/:id/train     → ML groups (migration 025): clinic data
+ *                                              read/written under RLS here, then
+ *                                              training proxied. Writes need
+ *                                              insights:write.
  *
  * Verifying the JWT inside ml_service instead was rejected deliberately:
  * authenticate.js also checks token revocation by jti, which is stateful, and
@@ -40,59 +46,6 @@ import {
  */
 
 const router = Router()
-
-// Internal service address on the compose network. ml only `expose`s 8000, so this
-// is not reachable from outside the stack.
-const ML_BASE = process.env.ML_SERVICE_URL || 'http://ml:8000'
-
-// Reads are quick; training can take longer. Both are bounded so a pathological
-// request cannot hold a connection open indefinitely.
-const READ_TIMEOUT_MS = Number(process.env.ML_READ_TIMEOUT_MS || 30000)
-const TRAIN_TIMEOUT_MS = Number(process.env.ML_TRAIN_TIMEOUT_MS || 120000)
-
-/**
- * Forward a request to ml_service and return { status, payload }. Never throws on a
- * network/parse failure — it maps that to a 502 the UI can render, because this API
- * is fine and the service behind it is not.
- */
-async function mlFetch(path, { method = 'GET', body, timeoutMs = READ_TIMEOUT_MS } = {}) {
-    const controller = new AbortController()
-    const timer = setTimeout(() => controller.abort(), timeoutMs)
-
-    let upstream
-    try {
-        upstream = await fetch(`${ML_BASE}${path}`, {
-            method,
-            headers: body ? { 'Content-Type': 'application/json' } : undefined,
-            body: body ? JSON.stringify(body) : undefined,
-            signal: controller.signal,
-        })
-    } catch (err) {
-        return {
-            status: 502,
-            payload: {
-                status: 'error',
-                message:
-                    err.name === 'AbortError'
-                        ? 'The ML service timed out. It may still be working — check back shortly.'
-                        : 'The ML service is unreachable. It may still be starting up.',
-            },
-        }
-    } finally {
-        clearTimeout(timer)
-    }
-
-    try {
-        return { status: upstream.status, payload: await upstream.json() }
-    } catch {
-        return {
-            status: 502,
-            payload: { status: 'error', message: 'The ML service returned an unreadable response.' },
-        }
-    }
-}
-
-const send = (res, result) => res.status(result.status).json(result.payload)
 
 // ── Readiness metadata — any authenticated user, no tenant data ──────────────────
 
@@ -183,45 +136,56 @@ router.get(
 
 /**
  * @openapi
- * /api/ml/phase1/clients/{clientId}/sessions:
+ * /api/ml/phase1/eligibility:
  *   get:
- *     summary: A client's completed sessions + personal model (training picker)
+ *     summary: Per client, what a group model would train on
+ *     description: >
+ *       Each client's latest trainable session (completed, EEG stored, enough labelled
+ *       images) and whether a complete BFI-2 exists. Shown in the group editor. Trimmed
+ *       to clients visible to the caller's clinic.
  *     tags: [ML]
  *     security: [{ bearerAuth: [] }]
- *     parameters:
- *       - in: path
- *         name: clientId
- *         required: true
- *         schema: { type: string, format: uuid }
  *     responses:
- *       200: { description: The client's sessions }
+ *       200: { description: Eligibility per client }
  *       401: { description: Missing or invalid token }
  *       403: { description: Insufficient permissions }
- *       404: { description: Client not found in the caller's clinic }
  */
 router.get(
-    '/phase1/clients/:clientId/sessions',
+    '/phase1/eligibility',
     dbContext,
     requirePermission(PERMS.INSIGHTS_READ_OWN_CLINIC),
     catchAsync(async (req, res) => {
-        const { clientId } = req.params
-        if (!isUuid(clientId)) throw new BadRequestError('clientId must be a UUID.')
-        if (!(await clientInClinic(req.dbClient, clientId)))
-            throw new NotFoundError('Client not found.')
-        return send(res, await mlFetch(`/phase1/clients/${clientId}/sessions`))
+        const result = await mlFetch('/phase1/eligibility')
+        if (result.status === 200 && Array.isArray(result.payload?.clients)) {
+            const ids = result.payload.clients.map((c) => c.client_id).filter(isUuid)
+            const allowed = await visibleClientIds(req.dbClient, ids)
+            result.payload = {
+                ...result.payload,
+                clients: result.payload.clients.filter((c) => allowed.has(c.client_id)),
+            }
+        }
+        return send(res, result)
     })
 )
 
+// ── ML groups ────────────────────────────────────────────────────────────────────
+
 /**
  * @openapi
- * /api/ml/train:
+ * /api/ml/groups:
+ *   get:
+ *     summary: The caller's ML groups, members and current models
+ *     tags: [ML]
+ *     security: [{ bearerAuth: [] }]
+ *     responses:
+ *       200: { description: Groups with members and current_model (null until trained) }
+ *       401: { description: Missing or invalid token }
+ *       403: { description: Insufficient permissions }
  *   post:
- *     summary: Train a client's Phase 1 valence/arousal model
+ *     summary: Create an ML group
  *     description: >
- *       Fits and registers the personal model for one client, optionally
- *       restricted to chosen sessions. A client_id / session_ids that do not
- *       belong to the caller's clinic are rejected (404) before anything is
- *       forwarded.
+ *       A named set of clients whose latest labelled sessions train one model. Members
+ *       must belong to the caller's clinic (an admin's group takes its members' clinic).
  *     tags: [ML]
  *     security: [{ bearerAuth: [] }]
  *     requestBody:
@@ -230,51 +194,81 @@ router.get(
  *         application/json:
  *           schema:
  *             type: object
- *             required: [client_id]
+ *             required: [name, client_ids]
  *             properties:
- *               client_id: { type: string, format: uuid }
- *               session_ids:
- *                 type: array
- *                 items: { type: string, format: uuid }
+ *               name: { type: string, maxLength: 80 }
+ *               client_ids: { type: array, items: { type: string, format: uuid } }
+ *     responses:
+ *       201: { description: Created; returns group_id }
+ *       400: { description: Invalid name/members, or a member from another clinic }
+ *       409: { description: The clinic already has a group with that name }
+ */
+router.get('/groups', dbContext, requirePermission(PERMS.INSIGHTS_READ_OWN_CLINIC), mlGroupController.listGroups)
+router.post('/groups', dbContext, requirePermission(PERMS.INSIGHTS_WRITE_OWN_CLINIC), mlGroupController.createGroup)
+
+/**
+ * @openapi
+ * /api/ml/groups/{groupId}:
+ *   put:
+ *     summary: Rename an ML group and/or replace its members
+ *     description: >
+ *       A trained model keeps the members and sessions it was trained on; the change
+ *       applies from the next train.
+ *     tags: [ML]
+ *     security: [{ bearerAuth: [] }]
+ *     parameters:
+ *       - { in: path, name: groupId, required: true, schema: { type: string, format: uuid } }
+ *     requestBody:
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             properties:
+ *               name: { type: string, maxLength: 80 }
+ *               client_ids: { type: array, items: { type: string, format: uuid } }
+ *     responses:
+ *       200: { description: Updated }
+ *       404: { description: Group not found in the caller's clinic }
+ *   delete:
+ *     summary: Delete an ML group with its models and their predictions
+ *     tags: [ML]
+ *     security: [{ bearerAuth: [] }]
+ *     parameters:
+ *       - { in: path, name: groupId, required: true, schema: { type: string, format: uuid } }
+ *     responses:
+ *       204: { description: Deleted }
+ *       404: { description: Group not found in the caller's clinic }
+ */
+router.put('/groups/:groupId', dbContext, requirePermission(PERMS.INSIGHTS_WRITE_OWN_CLINIC), mlGroupController.updateGroup)
+router.delete('/groups/:groupId', dbContext, requirePermission(PERMS.INSIGHTS_WRITE_OWN_CLINIC), mlGroupController.deleteGroup)
+
+/**
+ * @openapi
+ * /api/ml/groups/{groupId}/train:
+ *   post:
+ *     summary: Train an ML group's model
+ *     description: >
+ *       Random forest on each member's latest labelled session, with their BFI-2 domain
+ *       scores as extra inputs. Scored by holding one person and their test images out,
+ *       with and without BFI, against predicting the average. Members without a
+ *       trainable session or a complete BFI-2 are left out and listed in `skipped`.
+ *       Unless predict is false, the new model then predicts every member's sessions.
+ *     tags: [ML]
+ *     security: [{ bearerAuth: [] }]
+ *     parameters:
+ *       - { in: path, name: groupId, required: true, schema: { type: string, format: uuid } }
+ *     requestBody:
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             properties:
  *               predict: { type: boolean, default: true }
  *     responses:
- *       200: { description: Training finished (see `trained`) }
- *       400: { description: client_id missing or malformed }
- *       401: { description: Missing or invalid token }
- *       404: { description: A referenced client/session is not in the caller's clinic }
+ *       200: { description: Finished — see `trained`, `message`, `skipped`, scores }
+ *       404: { description: Group not found in the caller's clinic }
  *       502: { description: ML service unreachable }
  */
-router.post(
-    '/train',
-    dbContext,
-    catchAsync(async (req, res) => {
-        const { client_id, session_ids, predict } = req.body ?? {}
-
-        // Every model belongs to one client, so there is nothing to train without one.
-        if (!isUuid(client_id)) throw new BadRequestError('client_id must be a UUID.')
-        if (session_ids !== undefined && !Array.isArray(session_ids))
-            throw new BadRequestError('session_ids must be an array of session UUIDs.')
-
-        // Tenant ownership: a caller may only train on their own clinic's data.
-        if (!(await clientInClinic(req.dbClient, client_id)))
-            throw new NotFoundError('Client not found.')
-        if (session_ids && session_ids.length) {
-            if (!session_ids.every(isUuid))
-                throw new BadRequestError('session_ids must all be UUIDs.')
-            const allowed = await visibleSessionIds(req.dbClient, session_ids)
-            if (allowed.size !== session_ids.length)
-                throw new NotFoundError('One or more sessions were not found.')
-        }
-
-        return send(
-            res,
-            await mlFetch('/phase1/train', {
-                method: 'POST',
-                body: { client_id, session_ids, predict },
-                timeoutMs: TRAIN_TIMEOUT_MS,
-            })
-        )
-    })
-)
+router.post('/groups/:groupId/train', dbContext, requirePermission(PERMS.INSIGHTS_WRITE_OWN_CLINIC), mlGroupController.trainGroup)
 
 export default router

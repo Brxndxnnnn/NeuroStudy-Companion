@@ -2,11 +2,16 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import { getSessionQuestionnaires } from "@/utils/api";
+import { toast } from "react-hot-toast";
+import {
+  getSessionQuestionnaires,
+  getSessionQuestionnairesPdf,
+} from "@/utils/api";
 import {
   Card,
   CardHeader,
   Alert,
+  Button,
   Spinner,
 } from "@/components/ui";
 
@@ -106,11 +111,85 @@ function getScoreFields(row) {
   return [];
 }
 
+// Statements and option labels are stored per language ({ en, ms, zh }).
+function english(value) {
+  if (value === null || value === undefined) return "—";
+  if (typeof value === "object") {
+    return value.en ?? Object.values(value)[0] ?? "—";
+  }
+  return String(value);
+}
+
+function answerLabel(row, value) {
+  const option = (row.options ?? []).find((o) => o.value === value);
+  return option ? `${value} — ${english(option.label)}` : String(value ?? "—");
+}
+
+// Every question with the answer given and the score it contributes. BFI-2 items
+// also show their domain and facet; reverse-keyed items are marked (R).
+function ResponsesTable({ row }) {
+  const answers = row.answers ?? [];
+  const hasDomains = answers.some((a) => a.domain);
+
+  return (
+    <div className="overflow-x-auto rounded-lg border border-border bg-surface">
+      <table className="w-full text-sm">
+        <thead className="bg-inset text-left text-xs text-muted">
+          <tr>
+            <th className="px-3 py-2 text-right font-semibold">#</th>
+            <th className="px-3 py-2 font-semibold">Statement</th>
+            {hasDomains && (
+              <th className="px-3 py-2 font-semibold">Domain · Facet</th>
+            )}
+            <th className="px-3 py-2 font-semibold">Answer</th>
+            <th className="px-3 py-2 text-right font-semibold">Score</th>
+          </tr>
+        </thead>
+        <tbody>
+          {answers.map((a) => (
+            <tr
+              key={a.question_id ?? a.question_no}
+              className="border-t border-border"
+            >
+              <td className="px-3 py-2 text-right font-mono text-muted">
+                {a.question_no}
+              </td>
+              <td className="px-3 py-2 text-ink">{english(a.statement)}</td>
+              {hasDomains && (
+                <td className="px-3 py-2 text-muted">
+                  {[DOMAIN_NAMES[a.domain] ?? a.domain, a.facet]
+                    .filter(Boolean)
+                    .join(" · ")}
+                </td>
+              )}
+              <td className="px-3 py-2 text-ink">
+                {answerLabel(row, a.answer_value)}
+              </td>
+              <td className="px-3 py-2 text-right font-mono text-ink">
+                {a.item_score}
+                {a.is_reverse_scored && (
+                  <span
+                    className="ml-1 text-xs text-muted"
+                    title="Reverse-keyed: scored as (scale minimum + scale maximum - answer)"
+                  >
+                    (R)
+                  </span>
+                )}
+              </td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </div>
+  );
+}
 
 export default function QuestionnaireResults({ sessionId }) {
   const [data, setData] = useState(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
+  const [expanded, setExpanded] = useState({});
+  const [exporting, setExporting] = useState(false);
 
   useEffect(() => {
     if (!sessionId) return;
@@ -169,12 +248,55 @@ export default function QuestionnaireResults({ sessionId }) {
   }, [sessionId]);
 
   const questionnaires = getQuestionnaireRows(data);
+  const anyAnswered = questionnaires.some(
+    (q) => (q.answers?.length ?? 0) > 0
+  );
+
+  const handleExportPdf = async () => {
+    setExporting(true);
+    const toastId = toast.loading("Generating questionnaire PDF…");
+    try {
+      const res = await getSessionQuestionnairesPdf(sessionId);
+      if (res.status === 409) {
+        toast.error("No questionnaire has been answered for this session yet.", { id: toastId });
+        return;
+      }
+      if (!res.ok) throw new Error(`PDF export failed (${res.status})`);
+      const blob = await res.blob();
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = `questionnaire-responses-${sessionId}.pdf`;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      URL.revokeObjectURL(url);
+      toast.success("Questionnaire PDF downloaded.", { id: toastId });
+    } catch (err) {
+      console.error("Failed to export questionnaire PDF:", err);
+      toast.error("Failed to export the questionnaire PDF.", { id: toastId });
+    } finally {
+      setExporting(false);
+    }
+  };
 
   return (
     <Card className="overflow-hidden">
       <CardHeader
         title="Questionnaire results"
-        subtitle="BFI-2 personality and WHO-5 well-being scores"
+        subtitle="BFI-2 personality and WHO-5 well-being scores and responses"
+        actions={
+          anyAnswered && (
+            <Button
+              variant="ghost"
+              size="sm"
+              loading={exporting}
+              onClick={handleExportPdf}
+            >
+              Export as PDF
+            </Button>
+          )
+        }
       />
 
       <div className="p-5 space-y-4">
@@ -206,10 +328,13 @@ export default function QuestionnaireResults({ sessionId }) {
                   : `Questionnaire ${index + 1}`);
 
             const scores = getScoreFields(q);
+            const key = q.questionnaire_id || code || index;
+            const answerCount = q.answers?.length ?? 0;
+            const isOpen = !!expanded[key];
 
             return (
               <section
-                key={q.questionnaire_id || code || index}
+                key={key}
                 className="rounded-xl border border-border bg-inset/40 p-4"
               >
                 <h3 className="font-semibold text-ink mb-3">
@@ -246,6 +371,24 @@ export default function QuestionnaireResults({ sessionId }) {
                     Scores are not yet available,
                     or the response requires field mapping.
                   </p>
+                )}
+
+                {answerCount > 0 && (
+                  <div className="mt-4 space-y-3">
+                    <Button
+                      variant="subtle"
+                      size="sm"
+                      aria-expanded={isOpen}
+                      onClick={() =>
+                        setExpanded((prev) => ({ ...prev, [key]: !prev[key] }))
+                      }
+                    >
+                      {isOpen
+                        ? "Hide responses"
+                        : `Show responses (${answerCount})`}
+                    </Button>
+                    {isOpen && <ResponsesTable row={q} />}
+                  </div>
                 )}
               </section>
             );

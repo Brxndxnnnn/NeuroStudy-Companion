@@ -6,8 +6,6 @@ import {
   getPhase1Status,
   getPhase1Sessions,
   getPhase1Predictions,
-  getPhase1ClientSessions,
-  trainPhase1Model,
   getSessionResultEvents,
 } from "@/utils/api";
 import { buildEventWindows } from "@/utils/events";
@@ -15,6 +13,7 @@ import TopNav from "@/components/TopNav";
 import TimeSeriesChart from "@/components/TimeSeriesChart";
 import AffectQuadrantChart from "@/components/AffectQuadrantChart";
 import StimulusModal from "@/components/StimulusModal";
+import MlGroupsPanel from "@/components/MlGroupsPanel";
 import {
   MID,
   WEAK_CONFIDENCE,
@@ -28,7 +27,6 @@ import {
   Card,
   CardHeader,
   Field,
-  Pill,
   Alert,
   Spinner,
   Button,
@@ -50,7 +48,6 @@ function PipelineStep({ done, children }) {
   );
 }
 
-const fmt = (n, d = 2) => (n == null || Number.isNaN(n) ? "—" : Number(n).toFixed(d));
 const shortId = (id) => (id ? id.slice(0, 8) : "");
 
 /* Collapsible explanation. Kept closed by default so the page stays scannable
@@ -115,9 +112,9 @@ function QuadrantSummary({ breakdown, weak }) {
   );
 }
 
-/* Which version of the client's model produced the trajectory on screen. Only
-   rendered when a session genuinely has more than one — with a single version
-   there is no choice to make and the control would be decoration. */
+/* Which group model produced the trajectory on screen: a session gets predictions
+   from every group its client is in (and keeps earlier versions). Only rendered
+   when there is more than one to choose from. */
 function ModelSwitch({ models, value, onChange }) {
   if (!models || models.length < 2) return null;
   return (
@@ -132,9 +129,9 @@ function ModelSwitch({ models, value, onChange }) {
             className={`rounded px-2.5 py-1 text-[12px] font-medium transition-colors ${
               active ? "bg-accent text-on-accent" : "text-ink-2 hover:text-ink"
             }`}
-            title={`${m.n_predictions} windows`}
+            title={`${m.n_predictions} windows · ${m.n_clients ?? "?"} people`}
           >
-            Personal model (v{m.model_version})
+            {m.group_name ?? "Group"} (v{m.model_version})
           </button>
         );
       })}
@@ -171,98 +168,6 @@ function ScaleRow({ label, low, high, color }) {
         </span>
       </div>
     </div>
-  );
-}
-
-/* Plain-English verdict on whether the model is actually doing anything useful,
-   derived from the same comparison the promotion gate uses (CV R² vs the
-   predict-the-mean baseline on both targets). */
-function modelVerdict(m) {
-  if (!m) return null;
-  const pairs = [
-    [m.cv_r2_valence, m.null_r2_valence],
-    [m.cv_r2_arousal, m.null_r2_arousal],
-  ];
-  if (pairs.some(([cv]) => cv == null)) return { tone: "neutral", text: "Not enough data to score this model yet — it is serving predictions, but its accuracy is unmeasured." };
-  const beaten = pairs.filter(([cv, nul]) => cv > (nul ?? -Infinity)).length;
-  if (beaten === 2) return { tone: "good", text: "This model predicts better than simply guessing the average rating, on both valence and arousal." };
-  if (beaten === 1) return { tone: "warn", text: "This model beats guess-the-average on one of the two measures only." };
-  return { tone: "warn", text: "This model does not yet predict better than simply guessing the average rating." };
-}
-
-/* The trained-model metric grid + accuracy panel + verdict. */
-function ModelMetrics({ model }) {
-  const verdict = modelVerdict(model);
-  return (
-    <>
-      <div className="grid grid-cols-2 gap-x-6 gap-y-4 sm:grid-cols-3">
-        <Metric
-          label="Algorithm"
-          value={model.algo === "ridge" ? "Ridge regression" : model.algo === "random_forest" ? "Random forest" : model.algo}
-          hint="Chosen for small datasets"
-        />
-        {/* The regression's SAMPLE SIZE — not a count of what survived from any one
-            session. It is cumulative across every session the model trained on, which
-            is why it matches no single session's image count. */}
-        <Metric
-          label="Evidence base"
-          value={`${model.n_distinct_images ?? "—"} distinct ratings`}
-          hint={`Sample size behind the accuracy below · ${model.n_epochs ?? "—"} windows across ${model.n_sessions ?? "—"} session${model.n_sessions === 1 ? "" : "s"}`}
-        />
-        <Metric
-          label="Trained"
-          value={model.trained_at ? new Date(model.trained_at).toLocaleDateString() : "—"}
-          hint={`Model version ${model.model_version}`}
-        />
-      </div>
-
-      <div className="mt-6 border-t border-border pt-5">
-        <div className="flex items-baseline justify-between gap-3">
-          <h3 className="text-[13px] font-semibold text-ink">How accurate is it?</h3>
-          <span className="text-[12px] text-muted">
-            Measured by hiding whole images from the model, then testing on them
-          </span>
-        </div>
-        <div className="mt-4 grid grid-cols-2 gap-x-6 gap-y-4 sm:grid-cols-4">
-          <Metric
-            label="Valence accuracy"
-            value={fmt(model.cv_r2_valence)}
-            dir="higher"
-            hint={`vs ${fmt(model.null_r2_valence)} for guessing the average`}
-          />
-          <Metric
-            label="Arousal accuracy"
-            value={fmt(model.cv_r2_arousal)}
-            dir="higher"
-            hint={`vs ${fmt(model.null_r2_arousal)} for guessing the average`}
-          />
-          <Metric
-            label="Valence typical error"
-            value={fmt(model.cv_mae_valence)}
-            dir="lower"
-            hint="Points off, on the 1–7 scale"
-          />
-          <Metric
-            label="Arousal typical error"
-            value={fmt(model.cv_mae_arousal)}
-            dir="lower"
-            hint="Points off, on the 1–7 scale"
-          />
-        </div>
-        {verdict && (
-          <Alert tone={verdict.tone === "good" ? "good" : verdict.tone === "warn" ? "warn" : "accent"} className="mt-5">
-            <span className="block">{verdict.text}</span>
-            {verdict.tone !== "good" && (
-              <span className="mt-1 block font-normal">
-                This is expected at the current data volume and does not mean anything
-                is broken — the pipeline runs end to end, and accuracy improves as more
-                sessions are recorded over OASIS images.
-              </span>
-            )}
-          </Alert>
-        )}
-      </div>
-    </>
   );
 }
 
@@ -349,15 +254,18 @@ function HowItWorksModal({ onClose, trained, readinessReady, dataOasisLabelled, 
                   brain pattern.
                 </li>
                 <li>
-                  A regression model (ridge regression or a random forest — deliberately simple,
-                  because the dataset is small) learns the mapping from those numbers to the
+                  You put clients into a named <strong className="font-semibold text-ink">group</strong>.
+                  Training takes each member&apos;s latest session with rated images and adds their
+                  five BFI-2 personality scores to every window, then a random forest (a
+                  deliberately simple model, because the dataset is small) learns the mapping to the
                   image&apos;s known valence and arousal.
                 </li>
                 <li>
-                  Once a client has a personal model, their sessions are run through it to
-                  produce the predicted trajectory shown on the page. Training happens only when
-                  you start it — new recordings do not change existing predictions until the
-                  model is retrained.
+                  Every session of every member is then run through the group&apos;s model to produce
+                  the predicted trajectory shown on the page. A client can be in several groups; pick
+                  which group&apos;s model to view. Training happens only when you start it — new
+                  recordings get predictions from existing group models automatically, but a model
+                  only learns from them when it is retrained.
                 </li>
               </ol>
             </Explainer>
@@ -415,9 +323,10 @@ function HowItWorksModal({ onClose, trained, readinessReady, dataOasisLabelled, 
                   just teach the model nothing.
                 </PipelineStep>
                 <PipelineStep done={trained}>
-                  <strong className="font-semibold text-ink">Train a personal model.</strong> Pick
-                  a client on this page and choose which of their sessions to train on. A
-                  retrained model replaces the one in use for that client.
+                  <strong className="font-semibold text-ink">Train a group model.</strong> Create a
+                  group, add clients who each have a session over rated images and a completed
+                  BFI-2, and train it. Accuracy is tested on one person at a time, on images the
+                  model never saw. A retrained model replaces the one in use for that group.
                 </PipelineStep>
                 <PipelineStep done={readinessReady}>
                   <strong className="font-semibold text-ink">Reach enough different images.</strong>{" "}
@@ -449,12 +358,6 @@ export default function InsightsPage() {
   const [sessionEvents, setSessionEvents] = useState([]);
   const [selectedEvent, setSelectedEvent] = useState(null);
   const [howItWorksOpen, setHowItWorksOpen] = useState(false);
-  const [trainPanelOpen, setTrainPanelOpen] = useState(false);
-  const [clientSessions, setClientSessions] = useState(null);
-  const [personalModel, setPersonalModel] = useState(null);
-  const [chosenSessions, setChosenSessions] = useState(new Set());
-  const [training, setTraining] = useState(false);
-  const [trainResult, setTrainResult] = useState(null);
 
   const load = async () => {
     setLoading(true);
@@ -506,25 +409,6 @@ export default function InsightsPage() {
     }
   };
 
-  /* This client's completed sessions + personal-model status, in one call —
-     fetched as soon as a client is picked so the personal-model card can render
-     immediately. */
-  const loadClientSessions = async (clientId) => {
-    setClientSessions(null);
-    setPersonalModel(null);
-    try {
-      const res = await getPhase1ClientSessions(clientId);
-      if (res.ok) {
-        const data = await res.json();
-        setClientSessions(data.session_ids || []);
-        setChosenSessions(new Set(data.session_ids || []));
-        setPersonalModel(data.personal_model || null);
-      }
-    } catch {
-      setClientSessions([]);
-    }
-  };
-
   /* Client picked from the dropdown. Resets everything downstream of it. */
   const selectClient = (clientId) => {
     setSelectedClientId(clientId);
@@ -532,50 +416,13 @@ export default function InsightsPage() {
     setPredictions(null);
     setSessionEvents([]);
     setSelectedEvent(null);
-    setTrainPanelOpen(false);
-    setTrainResult(null);
-    setClientSessions(null);
-    setPersonalModel(null);
-    if (clientId) loadClientSessions(clientId);
   };
 
-  /* Open the training panel for the selected client, pre-selecting every one of
-     their sessions. */
-  const openTrainPanel = () => {
-    if (!selectedClientId) return;
-    setTrainPanelOpen(true);
-    setTrainResult(null);
-    if (clientSessions) setChosenSessions(new Set(clientSessions));
-  };
-
-  const generateModel = async () => {
-    if (!selectedClientId || chosenSessions.size === 0) return;
-    setTraining(true);
-    setTrainResult(null);
-    try {
-      const res = await trainPhase1Model({
-        clientId: selectedClientId,
-        sessionIds: [...chosenSessions],
-      });
-      const data = await res.json().catch(() => ({}));
-      if (!res.ok) {
-        setTrainResult({ ok: false, message: data.message || "Training failed." });
-      } else {
-        setTrainResult({ ok: data.trained, message: data.message, model: data.model });
-        if (data.trained) {
-          // Refresh the session list (has_personal_model per session), this
-          // client's own model card, and re-read this session so the tab shows
-          // the model that was just generated rather than the one it replaced.
-          await load();
-          await loadClientSessions(selectedClientId);
-          await loadPredictions(selectedSession);
-        }
-      }
-    } catch {
-      setTrainResult({ ok: false, message: "Could not reach the server." });
-    } finally {
-      setTraining(false);
-    }
+  /* A group model was trained or deleted: refresh which clients are covered and the
+     trajectory on screen, which may now come from a different model. */
+  const onGroupsChanged = async () => {
+    await load();
+    if (selectedSession) await loadPredictions(selectedSession);
   };
 
   useEffect(() => {
@@ -590,7 +437,6 @@ export default function InsightsPage() {
 
   const data = status?.data || {};
   const readiness = status?.readiness || {};
-  const hasPersonalModel = !!personalModel;
 
   const predRows = predictions?.predictions || [];
   const availableModels = predictions?.available_models || [];
@@ -608,7 +454,7 @@ export default function InsightsPage() {
         byId.set(s.client_id, {
           client_id: s.client_id,
           client_name: s.client_name,
-          has_personal_model: s.has_personal_model,
+          n_group_models: s.n_group_models || 0,
           last_session_at: s.start_time,
         });
       }
@@ -696,7 +542,7 @@ export default function InsightsPage() {
           {howItWorksOpen && (
             <HowItWorksModal
               onClose={() => setHowItWorksOpen(false)}
-              trained={sessions.some((s) => s.has_personal_model)}
+              trained={sessions.some((s) => s.n_group_models > 0)}
               readinessReady={readiness.ready_to_train}
               dataOasisLabelled={data.oasis_images_labelled}
               dataSessionsWithOasis={data.sessions_with_oasis_eeg}
@@ -712,10 +558,10 @@ export default function InsightsPage() {
             <Alert tone="crit" className="mt-6">{error}</Alert>
           ) : (
             <div className="mt-6 space-y-6">
-              {/* Session predictions — client, their personal model, and the session
-                  picker all live in one box, in the order a technician actually uses
-                  them: pick a client, see what model they've got, then pick a session
-                  to view. */}
+              <MlGroupsPanel onTrained={onGroupsChanged} />
+
+              {/* Session predictions: pick a client, then one of their sessions, then
+                  (if they are in several trained groups) which group's model to view. */}
               <Card>
                 <CardHeader
                   title="Session predictions"
@@ -728,141 +574,13 @@ export default function InsightsPage() {
                       {clients.map((c) => (
                         <option key={c.client_id} value={c.client_id}>
                           {c.client_name || "Unnamed client"}
-                          {c.has_personal_model ? " · has own model" : ""}
+                          {c.n_group_models
+                            ? ` · in ${c.n_group_models} trained group${c.n_group_models === 1 ? "" : "s"}`
+                            : ""}
                         </option>
                       ))}
                     </Select>
                   </Field>
-
-                  {selectedClient && (
-                    <div className="mt-4 rounded-lg border border-border bg-inset/30 p-4">
-                      <div className="flex flex-wrap items-center justify-between gap-3">
-                        <h3 className="text-[13px] font-semibold text-ink">
-                          Personal model — {selectedClient.client_name || "this client"}
-                        </h3>
-                        {clientSessions === null ? (
-                          <Pill tone="neutral" dot>Checking…</Pill>
-                        ) : personalModel ? (
-                          <Pill tone="good" dot>Trained · v{personalModel.model_version}</Pill>
-                        ) : (
-                          <Pill tone="warn" dot>Not trained yet</Pill>
-                        )}
-                      </div>
-
-                      {clientSessions === null ? (
-                        <div className="mt-3 flex items-center gap-2 text-muted">
-                          <Spinner size={14} />
-                          <span className="text-[13px]">Loading this client&apos;s model…</span>
-                        </div>
-                      ) : (
-                        <>
-                          <div className="mt-3">
-                            {personalModel ? (
-                              <ModelMetrics model={personalModel} />
-                            ) : (
-                              <p className="text-sm text-ink-2 leading-relaxed">
-                                This client has no model yet. Train one below to see predicted
-                                valence and arousal for their sessions. Brain activity differs
-                                enough between people that a model fitted to one person usually
-                                reads them better than a shared one.
-                              </p>
-                            )}
-                          </div>
-
-                          <div className={personalModel ? "mt-5 border-t border-border pt-4" : "mt-3"}>
-                            {!trainPanelOpen && (
-                              <Button variant="ghost" onClick={openTrainPanel}>
-                                {personalModel ? "Retrain…" : "Train one…"}
-                              </Button>
-                            )}
-
-                            {trainPanelOpen && (
-                              <div className="mt-4 rounded-md border border-border bg-surface p-4">
-                                {clientSessions.length === 0 ? (
-                                  <p className="text-[13px] text-muted">
-                                    This client has no completed sessions to train from yet.
-                                  </p>
-                                ) : (
-                                  <>
-                                    <p className="text-[13px] font-semibold text-ink">
-                                      Train on which sessions?
-                                    </p>
-                                    <p className="mt-1 text-[12.5px] leading-relaxed text-muted">
-                                      All are included by default. Leave a recording out only if
-                                      you know it was bad — a dead electrode, say. Which sessions
-                                      you chose is recorded alongside the model.
-                                    </p>
-                                    <div className="mt-3 max-h-44 space-y-1.5 overflow-y-auto">
-                                      {clientSessions.map((sid) => {
-                                        const meta = sessions.find((s) => s.session_id === sid);
-                                        return (
-                                          <label
-                                            key={sid}
-                                            className="flex cursor-pointer items-center gap-2.5 text-[13px] text-ink-2"
-                                          >
-                                            <input
-                                              type="checkbox"
-                                              className="accent-[var(--accent)]"
-                                              checked={chosenSessions.has(sid)}
-                                              onChange={(e) => {
-                                                const next = new Set(chosenSessions);
-                                                if (e.target.checked) next.add(sid);
-                                                else next.delete(sid);
-                                                setChosenSessions(next);
-                                              }}
-                                            />
-                                            <span className="font-mono text-[12px]">{shortId(sid)}</span>
-                                            {meta && (
-                                              <span className="text-muted">
-                                                {new Date(meta.start_time).toLocaleDateString()}
-                                              </span>
-                                            )}
-                                          </label>
-                                        );
-                                      })}
-                                    </div>
-                                    <div className="mt-4 flex flex-wrap items-center gap-2">
-                                      <Button
-                                        onClick={generateModel}
-                                        disabled={training || chosenSessions.size === 0}
-                                      >
-                                        {training
-                                          ? "Training…"
-                                          : `Train on ${chosenSessions.size} session${chosenSessions.size === 1 ? "" : "s"}`}
-                                      </Button>
-                                      <Button
-                                        variant="ghost"
-                                        onClick={() => setTrainPanelOpen(false)}
-                                        disabled={training}
-                                      >
-                                        Cancel
-                                      </Button>
-                                    </div>
-                                  </>
-                                )}
-
-                                {trainResult && (
-                                  <Alert tone={trainResult.ok ? "good" : "warn"} className="mt-4">
-                                    <span className="block">{trainResult.message}</span>
-                                    {trainResult.model && (
-                                      <span className="mt-1 block font-normal">
-                                        Evidence base:{" "}
-                                        <strong className="font-semibold">
-                                          {trainResult.model.n_distinct_images} distinct ratings
-                                        </strong>{" "}
-                                        across {trainResult.model.n_sessions} session
-                                        {trainResult.model.n_sessions === 1 ? "" : "s"}.
-                                      </span>
-                                    )}
-                                  </Alert>
-                                )}
-                              </div>
-                            )}
-                          </div>
-                        </>
-                      )}
-                    </div>
-                  )}
 
                   {selectedClientId && (
                     <div className="mt-6 border-t border-border pt-5">
@@ -898,9 +616,10 @@ export default function InsightsPage() {
                       </div>
 
                       <div className="mt-5">
-                        {!hasPersonalModel ? (
+                        {!selectedClient?.n_group_models ? (
                           <p className="text-sm text-muted">
-                            Train a personal model for this client to generate predictions.
+                            This client is not in a trained group yet. Add them to a group above and
+                            train it to generate predictions.
                           </p>
                         ) : !selectedSession ? (
                           <p className="text-sm text-muted">Pick a session to see its predicted valence & arousal over time.</p>
@@ -911,8 +630,9 @@ export default function InsightsPage() {
                         ) : predSamples.length === 0 ? (
                           <p className="text-sm text-muted">
                             No predictions for this session. Its recording produced no usable 2-second
-                            windows — usually a dead or poorly seated electrode, or no image having been
-                            shown long enough to measure.
+                            windows over rated images — usually a dead or poorly seated electrode, no
+                            rated image shown long enough to measure, or no completed BFI-2 for this
+                            client.
                           </p>
                         ) : (
                           <>
@@ -927,9 +647,10 @@ export default function InsightsPage() {
                               <p className="mb-4 text-[12.5px] leading-relaxed text-muted">
                                 Showing predictions from the{" "}
                                 <strong className="font-semibold text-ink-2">
-                                  personal model
+                                  {shownModel.group_name ?? "group"} model
                                 </strong>{" "}
-                                (v{shownModel.model_version}), built on an evidence base of{" "}
+                                (v{shownModel.model_version}, {shownModel.n_clients ?? "?"} people), built
+                                on an evidence base of{" "}
                                 <strong className="font-semibold text-ink-2">
                                   {shownModel.n_distinct_images ?? "—"} distinct ratings
                                 </strong>
@@ -1015,22 +736,5 @@ export default function InsightsPage() {
         <StimulusModal event={sessionEvents[selectedEvent]} onClose={() => setSelectedEvent(null)} />
       )}
     </>
-  );
-}
-
-function Metric({ label, value, hint, dir }) {
-  return (
-    <div>
-      <div className="font-mono text-[10px] font-semibold tracking-[0.12em] uppercase text-muted">{label}</div>
-      <div className="mt-1 flex items-baseline gap-1.5">
-        <span className="text-[19px] font-bold tracking-tight text-ink tnum">{value}</span>
-        {dir && (
-          <span className="text-[11px] font-medium text-muted whitespace-nowrap">
-            {dir === "higher" ? "↑ better" : "↓ better"}
-          </span>
-        )}
-      </div>
-      {hint && <div className="mt-0.5 text-[12px] text-muted">{hint}</div>}
-    </div>
   );
 }

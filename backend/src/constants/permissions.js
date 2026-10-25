@@ -31,6 +31,8 @@ const PERMS = Object.freeze({
   // Insights
   INSIGHTS_READ_OWN_CLINIC: 'insights:read:own_clinic',
   INSIGHTS_READ_ALL:        'insights:read:all',
+  INSIGHTS_WRITE_OWN_CLINIC: 'insights:write:own_clinic',
+  INSIGHTS_WRITE_ALL:        'insights:write:all',
 
   // Clinics
   CLINICS_READ_OWN:  'clinics:read:own',

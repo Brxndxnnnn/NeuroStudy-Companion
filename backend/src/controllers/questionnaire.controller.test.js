@@ -146,3 +146,64 @@ describe('GET /sessions/:session_id/questionnaires', () => {
         assert.equal(domains[0].domain_name, 'Extraversion')
     })
 })
+
+describe('GET /sessions/:session_id/questionnaires.pdf', () => {
+    const mockSession = (answers) => {
+        mock.method(sessionModel, 'findById', async () => [{ session_id: SESSION_ID, client_name: 'Test Client', start_time: '2026-10-15T08:00:00Z' }])
+        mock.method(questionnaireModel, 'listWithItemCounts', async () => [
+            { questionnaire_id: WHO5_ID, code: 'who5', name: 'WHO-5', scale_min: 0, scale_max: 5, expected_items: 5,
+              options: [{ value: 3, label: { en: 'More than half of the time' } }] }
+        ])
+        mock.method(questionnaireModel, 'findSessionAnswers', async () => answers)
+        mock.method(questionnaireModel, 'findSessionScores', async () => answers.length ? [
+            { questionnaire_id: WHO5_ID, score_level: 'total', domain: null, facet: null, raw_score: 15, mean_score: 3, percentage_score: 60, answered_items: 5, expected_items: 5, is_complete: true }
+        ] : [])
+    }
+
+    // A response stand-in pdfkit can pipe into: collects the bytes and the headers set.
+    const pdfResponse = () => {
+        const chunks = []
+        let resolveEnd
+        const ended = new Promise(resolve => { resolveEnd = resolve })
+        return {
+            headers: {},
+            setHeader(k, v) { this.headers[k] = v },
+            write(c) { chunks.push(Buffer.from(c)); return true },
+            end(c) { if (c) chunks.push(Buffer.from(c)); resolveEnd(Buffer.concat(chunks)) },
+            on() { return this }, once() { return this }, emit() { return true }, removeListener() { return this },
+            ended,
+        }
+    }
+
+    test('streams a PDF of the answers', async () => {
+        mockSession(QUESTION_IDS.map((question_id, i) => ({
+            questionnaire_id: WHO5_ID, question_id, question_no: i + 1, statement: { en: `Statement ${i + 1}` },
+            answer_value: 3, item_score: 3, is_reverse_scored: false, created_at: new Date('2026-10-15T08:05:00Z')
+        })))
+        const res = pdfResponse()
+        const next = mock.fn()
+        questionnaireController.getSessionQuestionnairesPdf({ validated: { session_id: SESSION_ID }, dbClient: {} }, res, next)
+        const pdf = await res.ended
+
+        assert.equal(next.mock.callCount(), 0)
+        assert.equal(res.headers['Content-Type'], 'application/pdf')
+        assert.match(res.headers['Content-Disposition'], /questionnaire-responses-/)
+        assert.equal(pdf.subarray(0, 5).toString(), '%PDF-')
+    })
+
+    test('409 when nothing has been answered', async () => {
+        mockSession([])
+        const { next } = await invoke(questionnaireController.getSessionQuestionnairesPdf, {
+            validated: { session_id: SESSION_ID }, dbClient: {}
+        })
+        assert.ok(next.mock.calls[0].arguments[0] instanceof ConflictError)
+    })
+
+    test('404 for an unknown session', async () => {
+        mock.method(sessionModel, 'findById', async () => [])
+        const { next } = await invoke(questionnaireController.getSessionQuestionnairesPdf, {
+            validated: { session_id: SESSION_ID }, dbClient: {}
+        })
+        assert.ok(next.mock.calls[0].arguments[0] instanceof NotFoundError)
+    })
+})

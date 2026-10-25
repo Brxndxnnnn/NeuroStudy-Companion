@@ -1,13 +1,13 @@
 """
 phase1/train.py
 
-Fit one client's Phase 1 valence/arousal model on that client's labelled data,
-persist it as a joblib artifact, and register it in ml_models. This is the step that
-turns the evaluation harness (which only cross-validates and throws its models away)
-into something inference can serve.
+Fit one GROUP's Phase 1 valence/arousal model, persist it as a joblib artifact, and
+register it in ml_models (migration 025). A technician puts clients into a named
+group; the model pools each member's latest labelled session and adds the member's
+BFI-2 domain scores as extra inputs. The algorithm is a random forest.
 
 Training is OFFLINE and OCCASIONAL — started by a technician (or the operator CLI)
-for one client at a time — never per-session. See docs/ARCHITECTURE.md §6.
+for one group at a time — never per-session. See docs/ARCHITECTURE.md §6.
 """
 
 from __future__ import annotations
@@ -25,18 +25,26 @@ from app.phase1.config import DEFAULT, Phase1Config
 from app.phase1.dataset import build_dataset
 from app.phase1.features import feature_names
 from app.data_access import phase1_store, queries
+from app.data_access.queries import BFI_DOMAINS
 
 log = logging.getLogger(__name__)
 
-# Which model to serve. Ridge is the sane default at this data scale; override with
-# PHASE1_MODEL=random_forest if wanted.
-DEFAULT_ALGO = os.getenv("PHASE1_MODEL", "ridge")
+# Group models are random forests (21 Oct 2026 decision: RF won the production
+# benchmark, and ridge/mlp blew up on small clients).
+ALGO = "random_forest"
 
-# Minimum distinct images before a retrain is worth doing at all. Below 2 there is
-# no cross-validation to run and, honestly, nothing to learn — but note the
-# "accuracy doesn't matter" stance: we still FIT and SERVE a model on whatever
-# exists, we just can't report an honest generalisation number for it.
+# Minimum distinct images before a model is worth fitting at all. Below 2 there is
+# nothing to hold out and nothing to learn.
 MIN_IMAGES_TO_FIT = int(os.getenv("PHASE1_MIN_IMAGES", "2"))
+
+# A group model is scored by holding one person out, so it needs at least two people
+# who can actually contribute (a trainable session and a complete BFI-2).
+MIN_PEOPLE = 2
+
+# A member whose latest session yields fewer usable 2 s epochs than this is left out:
+# a handful of windows cannot represent a person, and per-session z-scoring is noise
+# on so few rows (one real member's session once yielded 2).
+MIN_MEMBER_EPOCHS = int(os.getenv("PHASE1_MIN_MEMBER_EPOCHS", "10"))
 
 # Keep this many recent artifact files on disk (plus always the current one). Every
 # train writes a new .joblib; without pruning the model volume grows forever. The
@@ -104,24 +112,19 @@ def _log_extraction(conn, reports, session_ids: list[str] | None) -> None:
         log.debug("Could not read timeline version mix.", exc_info=True)
 
 
-def _empty_metrics() -> tuple[dict, dict]:
-    nan = {"valence": None, "arousal": None}
-    return {"r2": dict(nan), "mae": dict(nan)}, {"r2": dict(nan)}
-
-
-def _prune_artifacts(conn, client_id: str, keep: int = KEEP_ARTIFACTS) -> int:
+def _prune_artifacts(conn, group_id: str, keep: int = KEEP_ARTIFACTS) -> int:
     """
     Delete old artifact files, keeping the newest `keep` versions plus whichever is
     current. ml_models rows are left intact (they carry the metric history); only the
     files are removed. File deletes are not transactional, but they only ever touch
     non-current, superseded artifacts, so a rollback after this is harmless.
 
-    ⚠ Pruning is SCOPED to the model's owner. An unscoped "keep the newest 5" would,
-    the moment a few clients had trained models, delete other clients' artifacts
-    while their ml_models rows still pointed at them — inference would then fail to
-    load a model the registry insists is current.
+    ⚠ Pruning is SCOPED to the model's group. An unscoped "keep the newest 5" would,
+    the moment a few groups had trained models, delete other groups' artifacts while
+    their ml_models rows still pointed at them — inference would then fail to load a
+    model the registry insists is current.
     """
-    rows = phase1_store.model_artifacts(conn, client_id)
+    rows = phase1_store.model_artifacts(conn, group_id)
     protected = {
         r["artifact_path"]
         for i, r in enumerate(rows)
@@ -143,123 +146,161 @@ def _prune_artifacts(conn, client_id: str, keep: int = KEEP_ARTIFACTS) -> int:
     return removed
 
 
-def train_and_save(
-    conn,
-    client_id: str,
-    cfg: Phase1Config = DEFAULT,
-    algo: str = DEFAULT_ALGO,
-    session_ids: list[str] | None = None,
-) -> dict | None:
+def bfi_vector(bfi: dict) -> np.ndarray:
+    """A BFI dict from queries.fetch_client_bfi as the model's extra input columns."""
+    return np.array([bfi[d] for d in BFI_DOMAINS], dtype=np.float64)
+
+
+def bfi_feature_names() -> list[str]:
+    return [f"bfi_{d}" for d in BFI_DOMAINS]
+
+
+def resolve_members(conn, group_id: str) -> tuple[list[dict], list[dict]]:
     """
-    Train, persist, and register one client's model, and make it the one inference
-    serves for them. Returns a summary dict, or None if the run was skipped (not
-    enough data).
+    Split a group's members into those who can contribute and those who cannot.
 
-    Every model is fitted to ONE client's own recordings. EEG is individualistic
-    enough that a model fitted to one person does not have to survive
-    between-subject variation at all, so there is no model shared across clients.
+    A member contributes their latest trainable session (queries.
+    fetch_latest_training_sessions) and their BFI-2 domain scores (that session's own
+    BFI-2 when complete, else their latest complete one). Returns (usable, skipped):
+    usable rows carry client_id, client_name, session_id, start_time, bfi; skipped
+    rows carry client_id, client_name and a plain-language reason.
+    """
+    members = queries.fetch_group_members(conn, group_id)
+    latest = queries.fetch_latest_training_sessions(conn, [m["client_id"] for m in members])
+    usable, skipped = [], []
+    for m in members:
+        sess = latest.get(m["client_id"])
+        if not sess:
+            skipped.append({**m, "reason": (
+                f"no completed session with EEG and at least "
+                f"{queries.MIN_SESSION_LABELLED_IMAGES} labelled images")})
+            continue
+        bfi = queries.fetch_client_bfi(conn, m["client_id"], sess["session_id"])
+        if not bfi:
+            skipped.append({**m, "reason": "no complete BFI-2 questionnaire"})
+            continue
+        usable.append({**m, "session_id": sess["session_id"],
+                       "start_time": sess["start_time"], "bfi": bfi})
+    return usable, skipped
 
-      session_ids restricts the fit to an explicit list — the technician's chosen
-      sessions. Omitted, the train uses all of that client's completed sessions.
-      The chosen list is recorded against the model (migration 012) so a
-      hand-picked training set stays auditable.
 
-    ⚠ The honest sample size is the number of DISTINCT IMAGES, not sessions or
-    epochs. Repeat sessions over the same stimulus set add repeated measurements of
-    the same labels, not new ones, so a model is capped by how many different
-    images that client has ever been shown.
+def train_group_and_save(
+    conn,
+    group_id: str,
+    cfg: Phase1Config = DEFAULT,
+) -> dict:
+    """
+    Train, persist, and register one group's model, and make it the group's current one.
 
-    The new model always becomes the client's current one. Someone asked for this
-    specific model over these specific sessions; quietly declining to serve it
-    would look broken, and the honest score is shown next to it either way.
+    Always returns a summary dict. {"trained": False, "message", "skipped"} when there is
+    not enough to fit (fewer than MIN_PEOPLE usable members, or too few images); else
+    {"trained": True, ...} with the model version, who contributed which session, who
+    was left out and why, and the cross-validated scores with and without BFI.
+
+    Inputs per epoch: the EEG features z-scored within their own session (exactly what
+    inference does to a new session), then the member's five BFI-2 domain means. BFI is
+    appended AFTER the per-session z-scoring: it is constant within a session, so
+    z-scoring it there would turn every BFI column into zeros.
+
+    ⚠ The honest sample size is the number of DISTINCT IMAGES, and today every member
+    saw the same OASIS set, so pooling people adds repetitions of the same labels, not
+    new ones. The score therefore holds out both the person and their test images (see
+    evaluate.cross_validate_people).
 
     Does not commit — the caller owns the transaction (so a failed file write or DB
     insert rolls back cleanly). The artifact file is written before the DB row; a
     rolled-back transaction can leave an unreferenced .joblib on disk, which is
     harmless and gets swept by the next successful train's pruning.
     """
-    if session_ids is None:
-        session_ids = queries.fetch_client_session_ids(conn, client_id)
-        if not session_ids:
-            log.info("No completed sessions for client %s — nothing to train.", client_id)
-            return None
+    usable, skipped = resolve_members(conn, group_id)
+    if len(usable) < MIN_PEOPLE:
+        return {"trained": False, "skipped": skipped, "message": (
+            f"Not enough members can contribute yet: {len(usable)} of the "
+            f"{len(usable) + len(skipped)} member(s) have a trainable session and a "
+            f"complete BFI-2, and a group model needs at least {MIN_PEOPLE}.")}
 
-    X, y, groups, sessions, reports = build_dataset(conn, session_ids, cfg, verbose=False)
+    session_ids = [m["session_id"] for m in usable]
+    X, y, images, sessions, reports = build_dataset(conn, session_ids, cfg, verbose=False)
     _log_extraction(conn, reports, session_ids)
+
+    by_session = {m["session_id"]: m for m in usable}
+    session_str = np.array([str(sid) for sid in sessions], dtype=object)
+    for m in list(usable):
+        n = int((session_str == m["session_id"]).sum())
+        if n < MIN_MEMBER_EPOCHS:
+            usable.remove(m)
+            skipped.append({"client_id": m["client_id"], "client_name": m["client_name"],
+                            "reason": f"their latest session produced only {n} usable EEG "
+                                      f"epoch(s), fewer than {MIN_MEMBER_EPOCHS} (e.g. a dead "
+                                      f"electrode or dropped connection)"})
+    keep = np.isin(session_str, [m["session_id"] for m in usable])
+    X, y, images, sessions = X[keep], y[keep], images[keep], sessions[keep]
+
     n_epochs = int(X.shape[0])
-    n_images = int(len(np.unique(groups))) if n_epochs else 0
-    n_sessions = int(len(np.unique(sessions))) if n_epochs else 0
+    n_images = int(len(np.unique(images))) if n_epochs else 0
+    if len(usable) < MIN_PEOPLE or n_images < MIN_IMAGES_TO_FIT:
+        return {"trained": False, "skipped": skipped, "message": (
+            f"Not enough usable EEG: {len(usable)} member(s) and {n_images} distinct "
+            f"labelled image(s) remain after quality checks (need {MIN_PEOPLE} and "
+            f"{MIN_IMAGES_TO_FIT}).")}
 
-    if n_epochs == 0 or n_images < MIN_IMAGES_TO_FIT:
-        log.info(
-            "Phase 1 training skipped for client %s: %d epochs from %d distinct "
-            "images (need >= %d images).",
-            client_id, n_epochs, n_images, MIN_IMAGES_TO_FIT,
-        )
-        return None
-
-    if algo not in evaluate.make_models():
-        raise ValueError(f"Unknown model '{algo}'. Choices: "
-                         f"{list(evaluate.make_models())}")
-
-    # Honest generalisation score, when there are enough images to hold some out.
-    # GroupKFold needs n_splits <= n_distinct_images, so clamp it — otherwise a
-    # tiny dataset raises instead of training.
-    if n_images >= 2:
-        n_splits = min(5, n_images)
-        res = evaluate.cross_validate(
-            X, y, groups, sessions,
-            evaluate.make_models()[algo], algo,
-            n_splits=n_splits, grouped=True,
-        )
-        cv = {"r2": res.r2, "mae": res.mae}
-        null = {"r2": res.null_r2}
-    else:
-        cv, null = _empty_metrics()
-
-    # Final model: fit on everything, using the same per-session normalisation the
-    # CV used (and that inference will apply to a new session against itself).
+    people = np.array([by_session[str(sid)]["client_id"] for sid in sessions], dtype=object)
+    bfi = np.vstack([bfi_vector(by_session[str(sid)]["bfi"]) for sid in sessions])
     Xn = evaluate.per_session_zscore(X, sessions)
-    model = evaluate.make_models()[algo]
-    model.fit(Xn, y)
+
+    model = evaluate.make_models()[ALGO]
+    res = evaluate.cross_validate_people(Xn, bfi, y, images, people, model)
+    cv = {"r2": res.r2, "mae": res.mae}
+    cv_no_bfi = {"r2": res.r2_no_bfi, "mae": res.mae_no_bfi}
+    null = {"r2": res.null_r2, "mae": res.null_mae}
+
+    final = evaluate.make_models()[ALGO]
+    final.fit(np.hstack([Xn, bfi]), y)
 
     bundle = {
-        "model": model,
-        "algo": algo,
-        "feature_names": feature_names(),
+        "model": final,
+        "algo": ALGO,
+        "uses_bfi": True,
+        "bfi_domains": list(BFI_DOMAINS),
+        "feature_names": feature_names() + bfi_feature_names(),
         "targets": list(evaluate.TARGETS),
         "epoch_s": cfg.epoch_s,
         "step_s": cfg.step_s,
     }
 
     os.makedirs(settings.MODEL_DIR, exist_ok=True)
-    fname = f"phase1_{datetime.now(timezone.utc):%Y%m%d_%H%M%S}_{algo}.joblib"
+    fname = f"phase1_group_{datetime.now(timezone.utc):%Y%m%d_%H%M%S}_{ALGO}.joblib"
     path = os.path.join(settings.MODEL_DIR, fname)
     joblib.dump(bundle, path)
 
     version = phase1_store.insert_model(
-        conn, client_id=client_id, algo=algo, artifact_path=path,
-        n_epochs=n_epochs, n_distinct_images=n_images, n_sessions=n_sessions,
-        cv=cv, null=null,
-        session_ids=[str(s) for s in np.unique(sessions)] if n_epochs else session_ids,
+        conn, group_id=group_id, algo=ALGO, artifact_path=path,
+        n_epochs=n_epochs, n_distinct_images=n_images, n_sessions=len(usable),
+        n_clients=len(usable), cv=cv, cv_no_bfi=cv_no_bfi, null=null,
+        members=[{"client_id": m["client_id"], "session_id": m["session_id"]} for m in usable],
     )
 
-    # Housekeeping: drop this client's superseded artifact files.
-    _prune_artifacts(conn, client_id)
+    _prune_artifacts(conn, group_id)
 
     log.info(
-        "Trained Phase 1 model v%d (%s) for client %s on %d epochs / %d images / "
-        "%d sessions — now their current model.",
-        version, algo, client_id, n_epochs, n_images, n_sessions,
+        "Trained group model v%d for group %s on %d people / %d epochs / %d images.",
+        version, group_id, len(usable), n_epochs, n_images,
     )
     return {
+        "trained": True,
+        "message": f"Trained on {len(usable)} member(s)' latest sessions.",
         "model_version": version,
-        "algo": algo,
-        "client_id": client_id,
+        "algo": ALGO,
+        "group_id": group_id,
+        "n_clients": len(usable),
         "n_epochs": n_epochs,
         "n_distinct_images": n_images,
-        "n_sessions": n_sessions,
+        "n_folds": res.n_folds,
+        "members": [{"client_id": m["client_id"], "client_name": m["client_name"],
+                     "session_id": m["session_id"]} for m in usable],
+        "skipped": skipped,
         "cv": cv,
+        "cv_no_bfi": cv_no_bfi,
         "null": null,
         "artifact_path": path,
     }

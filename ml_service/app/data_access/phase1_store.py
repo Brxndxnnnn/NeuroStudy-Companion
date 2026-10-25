@@ -16,95 +16,129 @@ from sqlalchemy import text
 
 # ── Model registry ────────────────────────────────────────────────────────────
 
-def insert_model(conn, *, client_id: str, algo, artifact_path, n_epochs,
-                 n_distinct_images, n_sessions, cv, null,
-                 session_ids: list[str] | None = None) -> int:
+def insert_model(conn, *, group_id: str, algo, artifact_path, n_epochs,
+                 n_distinct_images, n_sessions, n_clients, cv, cv_no_bfi, null,
+                 members: list[dict]) -> int:
     """
-    Record a freshly trained model for one client, make it that client's current
-    model, and return its model_version.
+    Record a freshly trained group model, make it the group's current model, and
+    return its model_version.
 
-    `cv` and `null` are dicts keyed 'valence'/'arousal'; cv also carries 'mae'.
+    `cv`, `cv_no_bfi` carry 'r2' and 'mae' dicts keyed 'valence'/'arousal'; `null`
+    carries 'r2'. `members` is [{client_id, session_id}] — who contributed which
+    session, kept in ml_model_sessions so the model's evidence survives later edits to
+    the group.
 
-    Every model belongs to exactly one client. The demotion below is scoped to that
-    client, so a retrain never disturbs any other client's model, and it happens in
-    the same statement pair as the insert so there is never a window with zero or
-    two current models for a client.
-
-    session_ids records which sessions the fit actually used. Always pass it for a
-    technician-triggered train: it is the audit trail that makes a hand-picked
-    training set defensible rather than merely convenient.
+    The demotion is scoped to the group and happens in the same transaction as the
+    insert, so there is never a window with zero or two current models for a group
+    (the partial unique index enforces it too).
     """
     conn.execute(text("""
         UPDATE ml_models SET is_current = false
-        WHERE is_current AND client_id = :cid
-    """), {"cid": client_id})
+        WHERE is_current AND group_id = :gid
+    """), {"gid": group_id})
 
     row = conn.execute(text("""
         INSERT INTO ml_models (
-            algo, artifact_path, n_epochs, n_distinct_images, n_sessions,
+            algo, artifact_path, n_epochs, n_distinct_images, n_sessions, n_clients,
+            uses_bfi,
             cv_r2_valence, cv_r2_arousal, cv_mae_valence, cv_mae_arousal,
-            null_r2_valence, null_r2_arousal, is_current, client_id
+            cv_r2_valence_no_bfi, cv_r2_arousal_no_bfi,
+            cv_mae_valence_no_bfi, cv_mae_arousal_no_bfi,
+            null_r2_valence, null_r2_arousal, is_current, group_id
         ) VALUES (
-            :algo, :path, :n_epochs, :n_images, :n_sessions,
+            :algo, :path, :n_epochs, :n_images, :n_sessions, :n_clients,
+            true,
             :cv_r2_v, :cv_r2_a, :cv_mae_v, :cv_mae_a,
-            :null_r2_v, :null_r2_a, true, :client_id
+            :nb_r2_v, :nb_r2_a, :nb_mae_v, :nb_mae_a,
+            :null_r2_v, :null_r2_a, true, :gid
         )
         RETURNING model_version
     """), {
         "algo": algo, "path": artifact_path,
-        "n_epochs": n_epochs, "n_images": n_distinct_images, "n_sessions": n_sessions,
+        "n_epochs": n_epochs, "n_images": n_distinct_images,
+        "n_sessions": n_sessions, "n_clients": n_clients,
         "cv_r2_v": cv["r2"]["valence"], "cv_r2_a": cv["r2"]["arousal"],
         "cv_mae_v": cv["mae"]["valence"], "cv_mae_a": cv["mae"]["arousal"],
+        "nb_r2_v": cv_no_bfi["r2"]["valence"], "nb_r2_a": cv_no_bfi["r2"]["arousal"],
+        "nb_mae_v": cv_no_bfi["mae"]["valence"], "nb_mae_a": cv_no_bfi["mae"]["arousal"],
         "null_r2_v": null["r2"]["valence"], "null_r2_a": null["r2"]["arousal"],
-        "client_id": client_id,
+        "gid": group_id,
     }).first()
     version = int(row[0])
 
-    if session_ids:
+    if members:
         conn.execute(text("""
-            INSERT INTO ml_model_sessions (model_version, session_id)
-            VALUES (:ver, :sid)
+            INSERT INTO ml_model_sessions (model_version, session_id, client_id)
+            VALUES (:ver, :sid, :cid)
             ON CONFLICT DO NOTHING
-        """), [{"ver": version, "sid": s} for s in session_ids])
+        """), [{"ver": version, "sid": m["session_id"], "cid": m["client_id"]}
+               for m in members])
 
     return version
 
 
-def current_model(conn, client_id: str) -> dict | None:
-    """
-    The model serving one client, or None if they have not had one trained yet.
-
-    There is no shared fallback: a client with no model of their own has no
-    predictions until a technician trains one.
-    """
+def current_model(conn, group_id: str) -> dict | None:
+    """The model serving a group, or None if it has not been trained yet."""
     row = conn.execute(text("""
-        SELECT * FROM ml_models WHERE is_current AND client_id = :cid LIMIT 1
-    """), {"cid": client_id}).mappings().first()
+        SELECT * FROM ml_models WHERE is_current AND group_id = :gid LIMIT 1
+    """), {"gid": group_id}).mappings().first()
     return dict(row) if row else None
 
 
-def model_sessions(conn, model_version: int) -> list[str]:
-    """Which sessions trained a given model — the audit trail from migration 012."""
+def current_models_for_client(conn, client_id: str) -> list[dict]:
+    """
+    The current model of every group the client belongs to, newest first. These are
+    the models that predict that client's sessions.
+    """
     rows = conn.execute(text("""
-        SELECT session_id FROM ml_model_sessions WHERE model_version = :ver
+        SELECT m.model_version, m.artifact_path, m.group_id
+        FROM   ml_group_members gm
+        JOIN   ml_models m ON m.group_id = gm.group_id AND m.is_current
+        WHERE  gm.client_id = :cid
+        ORDER  BY m.model_version DESC
+    """), {"cid": client_id}).mappings().all()
+    return [dict(r) for r in rows]
+
+
+def model_members(conn, model_version: int) -> list[dict]:
+    """Who trained a model and with which session — the audit trail."""
+    rows = conn.execute(text("""
+        SELECT ms.client_id, c.name AS client_name, ms.session_id, s.start_time
+        FROM   ml_model_sessions ms
+        LEFT   JOIN clients c ON c.client_id = ms.client_id
+        LEFT   JOIN sessions s ON s.session_id = ms.session_id
+        WHERE  ms.model_version = :ver
+        ORDER  BY c.name
     """), {"ver": model_version}).mappings().all()
+    return [dict(r) for r in rows]
+
+
+def group_session_ids(conn, group_id: str) -> list[str]:
+    """Every completed session of every current member — what a new model predicts."""
+    rows = conn.execute(text("""
+        SELECT s.session_id
+        FROM   ml_group_members gm
+        JOIN   sessions s ON s.client_id = gm.client_id
+        WHERE  gm.group_id = :gid AND s.sync_status = 'completed'
+        ORDER  BY s.start_time
+    """), {"gid": group_id}).mappings().all()
     return [str(r["session_id"]) for r in rows]
 
 
-def model_artifacts(conn, client_id: str) -> list[dict]:
+def model_artifacts(conn, group_id: str) -> list[dict]:
     """
-    One client's model versions, artifact paths, and current flags, newest first —
+    One group's model versions, artifact paths, and current flags, newest first —
     for the trainer's artifact-pruning housekeeping (see phase1/train.py).
 
-    Always scoped to a client: a "keep the newest 5" across everyone would delete
-    other clients' artifacts as soon as a handful of them had been trained, leaving
+    Always scoped to a group: a "keep the newest 5" across everyone would delete
+    other groups' artifacts as soon as a handful of them had been trained, leaving
     live ml_models rows pointing at missing files.
     """
     rows = conn.execute(text("""
-        SELECT model_version, artifact_path, is_current, client_id
-        FROM   ml_models WHERE client_id = :cid
+        SELECT model_version, artifact_path, is_current, group_id
+        FROM   ml_models WHERE group_id = :gid
         ORDER  BY model_version DESC
-    """), {"cid": client_id}).mappings().all()
+    """), {"gid": group_id}).mappings().all()
     return [dict(r) for r in rows]
 
 
@@ -189,14 +223,16 @@ def session_prediction_models(conn, session_id: str) -> list[dict]:
     rows = conn.execute(text("""
         SELECT m.model_version,
                count(*) AS n_predictions,
-               m.algo, m.client_id, m.trained_at, m.is_current,
-               m.n_distinct_images,
+               m.algo, m.group_id, g.name AS group_name, m.trained_at, m.is_current,
+               m.n_distinct_images, m.n_clients, m.uses_bfi,
                m.cv_r2_valence, m.cv_r2_arousal,
+               m.cv_r2_valence_no_bfi, m.cv_r2_arousal_no_bfi,
                m.null_r2_valence, m.null_r2_arousal
         FROM   session_predictions p
         JOIN   ml_models m ON m.model_version = p.model_version
+        JOIN   ml_groups g ON g.group_id = m.group_id
         WHERE  p.session_id = :sid
-        GROUP  BY m.model_version
+        GROUP  BY m.model_version, g.name
         ORDER  BY m.model_version DESC
     """), {"sid": session_id}).mappings().all()
     return [dict(r) for r in rows]
@@ -206,9 +242,9 @@ def sessions_with_predictions(conn) -> list[dict]:
     """
     Completed sessions and their prediction status, for the tab's session picker.
 
-    Carries client_id and client_name so the tab can say whose recording it is and
-    offer to train that person's model without a second round trip. has_personal_model
-    lets it show, per session, whether a personal model already exists to serve it.
+    Carries client_id and client_name so the tab can say whose recording it is.
+    n_group_models counts the current models of the groups the client belongs to —
+    the models that predict this session.
     """
     rows = conn.execute(text("""
         SELECT s.session_id, s.start_time, s.predictions_status,
@@ -216,12 +252,35 @@ def sessions_with_predictions(conn) -> list[dict]:
                s.client_id, c.name AS client_name,
                (SELECT count(*) FROM session_predictions p
                 WHERE p.session_id = s.session_id) AS n_predictions,
-               EXISTS (SELECT 1 FROM ml_models m
-                       WHERE m.client_id = s.client_id AND m.is_current)
-                   AS has_personal_model
+               (SELECT count(*) FROM ml_group_members gm
+                JOIN   ml_models m ON m.group_id = gm.group_id AND m.is_current
+                WHERE  gm.client_id = s.client_id) AS n_group_models
         FROM   sessions s
         LEFT   JOIN clients c ON c.client_id = s.client_id
         WHERE  s.sync_status = 'completed'
         ORDER  BY s.start_time DESC
     """)).mappings().all()
     return [dict(r) for r in rows]
+
+
+def group_models_summary(conn) -> list[dict]:
+    """
+    Every group's current model with its scores, for the group list (cross-clinic: the
+    backend trims it to the caller's clinic). Groups with no model are absent.
+    """
+    rows = conn.execute(text("""
+        SELECT m.group_id, m.model_version, m.algo, m.trained_at,
+               m.n_clients, m.n_epochs, m.n_distinct_images, m.uses_bfi,
+               m.cv_r2_valence, m.cv_r2_arousal, m.cv_mae_valence, m.cv_mae_arousal,
+               m.cv_r2_valence_no_bfi, m.cv_r2_arousal_no_bfi,
+               m.cv_mae_valence_no_bfi, m.cv_mae_arousal_no_bfi,
+               m.null_r2_valence, m.null_r2_arousal
+        FROM   ml_models m
+        WHERE  m.is_current
+    """)).mappings().all()
+    out = []
+    for r in rows:
+        d = dict(r)
+        d["members"] = model_members(conn, int(r["model_version"]))
+        out.append(d)
+    return out

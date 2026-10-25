@@ -11,10 +11,10 @@
 
 import PDFDocument from 'pdfkit'
 
-const MARGIN = 40
+export const MARGIN = 40
 const CHANNEL_COLORS = { Fp1: '#3B82F6', Fp2: '#22C55E', T3: '#E67E22', T4: '#A78BFA' }
-const TEXT_COLOR = '#111827'
-const MUTED_COLOR = '#6B7280'
+export const TEXT_COLOR = '#111827'
+export const MUTED_COLOR = '#6B7280'
 const HEADER_BG = '#1E2A3C'
 const ROW_BG = '#F4F6F8'
 const BORDER_COLOR = '#D9DEE4'
@@ -24,7 +24,7 @@ function fmt(v, decimals = 2) {
     return v === null || v === undefined || Number.isNaN(v) ? '—' : v.toFixed(decimals)
 }
 
-function ensureSpace(doc, cursorY, needed) {
+export function ensureSpace(doc, cursorY, needed) {
     const bottom = doc.page.height - MARGIN
     if (cursorY + needed > bottom) {
         doc.addPage()
@@ -33,7 +33,7 @@ function ensureSpace(doc, cursorY, needed) {
     return cursorY
 }
 
-function sectionHeading(doc, cursorY, text) {
+export function sectionHeading(doc, cursorY, text) {
     cursorY = ensureSpace(doc, cursorY, 24)
     doc.fontSize(12).fillColor(TEXT_COLOR).font('Helvetica-Bold')
         .text(text, MARGIN, cursorY, { width: doc.page.width - MARGIN * 2 })
@@ -41,7 +41,7 @@ function sectionHeading(doc, cursorY, text) {
     return cursorY + 20
 }
 
-function subHeading(doc, cursorY, text) {
+export function subHeading(doc, cursorY, text) {
     doc.fontSize(9).fillColor(MUTED_COLOR).font('Helvetica-Bold')
         .text(text, MARGIN, cursorY)
     doc.font('Helvetica').fillColor(TEXT_COLOR)
@@ -274,7 +274,7 @@ function labelledText(doc, cursorY, label, text) {
     return paragraph(doc, doc.y + 2, text)
 }
 
-function formatDate(value) {
+export function formatDate(value) {
     if (!value) return '—'
     // intake_date arrives as 'YYYY-MM-DD' text; a client's dob as a Date.
     if (typeof value === 'string') {
@@ -287,7 +287,8 @@ function formatDate(value) {
 }
 
 // Like drawTable, but each row is as tall as its wrapped text needs (comments/notes are free text).
-function drawWrappedTable(doc, cursorY, { colWidths, header, rows, align = [] }) {
+// Also used by the questionnaire PDF (questionnaireReport.pdf.js).
+export function drawWrappedTable(doc, cursorY, { colWidths, header, rows, align = [] }) {
     const pad = 4
     const heightOf = (cells) => Math.max(
         ...cells.map((c, i) => doc.fontSize(8).heightOfString(String(c), { width: colWidths[i] - pad * 2 }))

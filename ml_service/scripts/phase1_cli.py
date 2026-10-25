@@ -3,11 +3,11 @@ scripts/phase1_cli.py
 
 Operator CLI for ML Phase 1 — the manual counterpart to the background workers.
 
-    python -m scripts.phase1_cli --train --client <client_id>   # fit one client's model now
+    python -m scripts.phase1_cli --train --group <group_id>   # fit one group's model now
     python -m scripts.phase1_cli --predict-once       # run one inference tick now
     python -m scripts.phase1_cli --predict-backfill   # requeue ALL sessions, then tick
 
-Training is otherwise started per client from the Insights tab; inference otherwise
+Training is otherwise started per group from the Insights tab; inference otherwise
 polls automatically. This is here for bring-up and for forcing a retrain /
 recompute on demand.
 """
@@ -30,10 +30,10 @@ from app.workers import prediction_jobs
 def main() -> int:
     ap = argparse.ArgumentParser(description="ML Phase 1 operator CLI.")
     ap.add_argument("--train", action="store_true",
-                    help="Fit + register one client's model on all their completed "
-                         "sessions, make it their current one. Requires --client.")
-    ap.add_argument("--client", metavar="CLIENT_ID",
-                    help="The client whose model --train fits.")
+                    help="Fit + register one group's model on each member's latest "
+                         "labelled session, make it the group's current one. Requires --group.")
+    ap.add_argument("--group", metavar="GROUP_ID",
+                    help="The group whose model --train fits.")
     ap.add_argument("--predict-once", action="store_true",
                     help="Run one inference tick over completed sessions lacking predictions.")
     ap.add_argument("--predict-backfill", action="store_true",
@@ -44,20 +44,23 @@ def main() -> int:
         ap.print_help()
         return 0
 
-    if args.train and not args.client:
-        ap.error("--train requires --client <client_id>: every model belongs to one client.")
+    if args.train and not args.group:
+        ap.error("--train requires --group <group_id>: every model belongs to one group.")
 
     if args.train:
         with engine.begin() as conn:
-            summary = train.train_and_save(conn, args.client)
-        if summary:
-            print(f"Trained model v{summary['model_version']} ({summary['algo']}) on "
-                  f"{summary['n_epochs']} epochs / {summary['n_distinct_images']} images "
-                  f"— now this client's current model.")
-            print(f"  CV R²  valence {summary['cv']['r2']['valence']}  "
-                  f"arousal {summary['cv']['r2']['arousal']}")
+            summary = train.train_group_and_save(conn, args.group)
+        for m in summary.get("skipped", []):
+            print(f"  left out: {m['client_name']} ({m['reason']})")
+        if summary.get("trained"):
+            print(f"Trained group model v{summary['model_version']} ({summary['algo']}) on "
+                  f"{summary['n_clients']} people / {summary['n_epochs']} epochs / "
+                  f"{summary['n_distinct_images']} images — now the group's current model.")
+            for label, key in (("with BFI", "cv"), ("without BFI", "cv_no_bfi"), ("predict-the-mean", "null")):
+                r2 = summary[key]["r2"]
+                print(f"  CV R² {label:<17} valence {r2['valence']:+.3f}  arousal {r2['arousal']:+.3f}")
         else:
-            print("Training skipped — not enough data (need >= 2 distinct images).")
+            print("Training skipped — " + summary["message"])
 
     if args.predict_backfill:
         with engine.begin() as conn:

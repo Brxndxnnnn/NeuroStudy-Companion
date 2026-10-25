@@ -43,3 +43,13 @@ export const visibleSessionIds = async (client, sessionIds) => {
     )
     return new Set(rows.map((r) => r.session_id))
 }
+
+// The subset of the given client IDs visible to the caller, as a Set (see above).
+export const visibleClientIds = async (client, clientIds) => {
+    if (!clientIds.length) return new Set()
+    const { rows } = await client.query(
+        'SELECT client_id FROM clients WHERE client_id = ANY($1::uuid[])',
+        [clientIds]
+    )
+    return new Set(rows.map((r) => r.client_id))
+}

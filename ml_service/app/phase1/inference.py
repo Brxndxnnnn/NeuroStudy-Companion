@@ -20,6 +20,8 @@ import os
 import joblib
 import numpy as np
 
+from app.data_access import queries
+from app.data_access.queries import BFI_DOMAINS
 from app.phase1 import evaluate
 from app.phase1.config import DEFAULT, OASIS_SCALE_MAX, OASIS_SCALE_MIN, Phase1Config
 from app.phase1.epochs import extract_session_epochs
@@ -38,7 +40,7 @@ MIN_SESSION_EPOCHS = int(os.getenv("PHASE1_MIN_SESSION_EPOCHS", "4"))
 
 
 def load_bundle(artifact_path: str) -> dict:
-    """Load a model bundle saved by train.train_and_save."""
+    """Load a model bundle saved by train.train_group_and_save."""
     return joblib.load(artifact_path)
 
 
@@ -77,6 +79,20 @@ def predict_session(
     # One session, normalised against itself — identical to the transform each
     # session received during training.
     Xn = evaluate.per_session_zscore(X, sessions_arr)
+
+    if bundle.get("uses_bfi"):
+        # Group models take the client's BFI-2 domain means as extra inputs, appended
+        # after the z-scoring exactly as in training. Same source rule as training: this
+        # session's own BFI-2 if complete, else the client's latest complete one.
+        client_id = queries.fetch_session_client(conn, session_id)
+        bfi = queries.fetch_client_bfi(conn, client_id, session_id) if client_id else None
+        if bfi is None:
+            log.info("Session %s: client has no complete BFI-2; the group model cannot "
+                     "predict it.", session_id)
+            return []
+        domains = bundle.get("bfi_domains") or list(BFI_DOMAINS)
+        row = np.array([bfi[d] for d in domains], dtype=np.float64)
+        Xn = np.hstack([Xn, np.tile(row, (len(Xn), 1))])
 
     preds = bundle["model"].predict(Xn)
     preds = np.atleast_2d(preds)
