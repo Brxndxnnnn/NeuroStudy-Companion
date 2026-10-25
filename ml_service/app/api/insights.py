@@ -3,15 +3,18 @@ api/insights.py
 
 ML Phase 1 endpoints for the web Insights tab:
 
-  GET  /phase1/status               readiness snapshot (data coverage)
-  GET  /phase1/sessions             completed sessions + prediction status
-  GET  /phase1/predictions/{id}     one session's predicted valence/arousal
-  GET  /phase1/clients/{id}/sessions  one client's sessions + their current model
-  POST /phase1/train                fit + register one client's model
+  GET  /phase1/status                     readiness snapshot (data coverage)
+  GET  /phase1/sessions                   completed sessions + prediction status
+  GET  /phase1/predictions/{id}           one session's predicted valence/arousal
+  GET  /phase1/eligibility                per client: latest trainable session, BFI-2
+  GET  /phase1/groups/models              every group's current model + scores
+  POST /phase1/groups/{group_id}/train    fit + register one group's model
 
-Inference (per-session predictions) is produced automatically by the background
-prediction worker; these endpoints read what it wrote. Training is offline and
-occasional — it happens only when the POST here is called for a client.
+Groups themselves (names, members) are clinic data managed by the backend; this
+service only reads them. Inference (per-session predictions) is produced
+automatically by the background prediction worker; these endpoints read what it
+wrote. Training is offline and occasional — it happens only when the POST here is
+called for a group.
 
 ml_service has no auth of its own and connects to the DB as a BYPASSRLS role, so it
 is NOT exposed publicly. Every one of these endpoints is reached only through the
@@ -134,82 +137,74 @@ def predictions_endpoint(session_id: str, model_version: int | None = None):
     }
 
 
-class TrainRequest(BaseModel):
+class GroupTrainRequest(BaseModel):
     """
-    Body for POST /phase1/train.
+    Body for POST /phase1/groups/{group_id}/train.
 
-    client_id   the client whose model to fit. Required — every model belongs to
-                exactly one client.
-    session_ids restrict the fit to these sessions (the technician's selection).
-                Omitted → all of that client's completed sessions.
-    predict     run the new model over its training sessions immediately, so the
-                tab shows predictions without waiting for a background pass.
+    predict  run the new model over every member's completed sessions immediately,
+             so the tab shows predictions without waiting for a background pass.
     """
-    client_id: str
-    session_ids: list[str] | None = None
     predict: bool = True
 
 
-@router.get("/clients/{client_id}/sessions")
-def client_sessions_endpoint(client_id: str):
+@router.get("/eligibility")
+def eligibility_endpoint():
     """
-    One client's completed sessions — what the technician picks from when generating
-    that client's model — plus the model currently serving them, if any.
+    Per client: the latest session a group model would use and whether a complete
+    BFI-2 exists — shown in the group editor so the technician knows who can
+    contribute before training. Cross-clinic; the backend trims it.
     """
     try:
         with engine.connect() as conn:
-            session_ids = queries.fetch_client_session_ids(conn, client_id)
-            model = phase1_store.current_model(conn, client_id)
+            return {"clients": queries.fetch_client_eligibility(conn),
+                    "min_session_labelled_images": queries.MIN_SESSION_LABELLED_IMAGES}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
-    return {"client_id": client_id, "session_ids": session_ids,
-            "personal_model": model}
 
 
-@router.post("/train")
-def train_endpoint(req: TrainRequest):
+@router.get("/groups/models")
+def group_models_endpoint():
+    """Every group's current model, its scores, and who trained it."""
+    try:
+        with engine.connect() as conn:
+            return {"models": phase1_store.group_models_summary(conn)}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post("/groups/{group_id}/train")
+def group_train_endpoint(group_id: str, req: GroupTrainRequest):
     """
-    Fit + register one client's model — the endpoint behind the technician's
-    "generate this client's model" action. Runs synchronously; on the datasets this
-    project has, that is a few seconds.
+    Fit + register one group's model — the endpoint behind the technician's Train
+    button. Runs synchronously; on this project's data that is a few seconds per member.
 
-    The new model always becomes the one serving that client — the technician asked
-    for it explicitly, and its honest score is returned alongside.
+    The new model always becomes the group's current one, and its honest scores (with
+    and without BFI, against the predict-the-mean baseline) are returned with it.
 
-    Reached only through the backend's authenticated /api/ml/train proxy, which
-    verifies the caller and confirms the client_id / session_ids belong to their
-    clinic before forwarding here. See backend/src/routes/ml.routes.js.
+    Reached only through the backend's authenticated proxy, which confirms the group
+    belongs to the caller's clinic before forwarding here.
     """
     try:
         with engine.begin() as conn:
-            summary = train.train_and_save(
-                conn, req.client_id, session_ids=req.session_ids,
-            )
+            if queries.fetch_group(conn, group_id) is None:
+                raise HTTPException(status_code=404, detail="Group not found.")
+            summary = train.train_group_and_save(conn, group_id)
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
-    if summary is None:
-        return {"trained": False,
-                "message": ("Not enough data to fit a model yet — this client needs "
-                            "at least 2 distinct labelled images across the selected "
-                            "sessions.")}
+    if not summary.get("trained"):
+        return summary
 
     inferred = None
     if req.predict:
-        # Predict over the sessions the model was actually fitted on, so the tab has
-        # something to show immediately. Outside the training transaction: inference
-        # failing must not roll back a model that trained fine.
-        trained_on = req.session_ids
-        if trained_on is None:
-            with engine.connect() as conn:
-                trained_on = phase1_store.model_sessions(conn, summary["model_version"])
-        if trained_on:
-            inferred = prediction_jobs.predict_sessions_with_model(summary, trained_on)
+        # Every completed session of every member, not just the training ones, so the
+        # tab can show this model on any of their recordings. Outside the training
+        # transaction: inference failing must not roll back a model that trained fine.
+        with engine.connect() as conn:
+            session_ids = phase1_store.group_session_ids(conn, group_id)
+        if session_ids:
+            inferred = prediction_jobs.predict_sessions_with_model(summary, session_ids)
 
-    return {
-        "trained": True,
-        "message": ("Trained this client's personal model — it is now the one their "
-                    "Insights tab uses."),
-        "model": summary,
-        "inference": inferred,
-    }
+    return {**summary, "inference": inferred}
