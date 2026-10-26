@@ -94,9 +94,12 @@ def _log_extraction(conn, reports, session_ids: list[str] | None) -> None:
         )
 
     # Which timeline produced this data — see queries.MIN_TIMELINE_VERSION.
+    # In a savepoint: catching a failed query is not enough, because Postgres aborts the
+    # whole enclosing transaction and every later statement (the model insert) fails.
     try:
         ids = session_ids or [str(r.session_id) for r in reports]
-        mix = queries.fetch_timeline_version_mix(conn, [str(s) for s in ids])
+        with conn.begin_nested():
+            mix = queries.fetch_timeline_version_mix(conn, [str(s) for s in ids])
         if mix:
             log.info("Timeline versions in training set: %s (1 = pre-fix compressed, 2 = honest gaps).", mix)
         if len(mix) > 1:
