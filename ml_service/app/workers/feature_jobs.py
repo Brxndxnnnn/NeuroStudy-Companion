@@ -287,7 +287,7 @@ def requeue(conn, session_ids: list[str] | None = None) -> int:
     if session_ids:
         result = conn.execute(text("""
             UPDATE sessions SET features_status = NULL, features_error = NULL
-            WHERE session_id = ANY(:ids) AND sync_status = 'completed'
+            WHERE session_id = ANY(CAST(:ids AS uuid[])) AND sync_status = 'completed'
             RETURNING session_id
         """), {"ids": session_ids})
     else:

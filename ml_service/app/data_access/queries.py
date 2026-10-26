@@ -379,7 +379,7 @@ def fetch_timeline_version_mix(conn, session_ids: list[str]) -> dict:
     rows = conn.execute(text("""
         SELECT COALESCE(timeline_version, 1) AS v, count(*) AS n
         FROM   sessions
-        WHERE  session_id = ANY(:ids)
+        WHERE  session_id = ANY(CAST(:ids AS uuid[]))
         GROUP  BY 1 ORDER BY 1
     """), {"ids": session_ids}).mappings().all()
     return {int(r["v"]): int(r["n"]) for r in rows}
