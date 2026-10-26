@@ -7,7 +7,7 @@ const api = vi.hoisted(() => ({
 }))
 vi.mock("@/utils/api", () => api)
 
-import MlGroupFit, { placementText } from "./MlGroupFit"
+import MlGroupFit, { comparable, placementText } from "./MlGroupFit"
 
 const ok = (body, status = 200) => ({ ok: status < 400, status, json: async () => body })
 
@@ -57,16 +57,16 @@ describe("placementText", () => {
 describe("MlGroupFit", () => {
   test("offers only clients the model was not trained on, and shows all three results", async () => {
     api.getPhase1Eligibility.mockResolvedValue(ok({ clients: [
-      { client_id: "c1", client_name: "Rashid" },
-      { client_id: "c9", client_name: "New Hire" },
+      { client_id: "c1", client_name: "Rashid", latest_session_id: "s1", has_bfi: true },
+      { client_id: "c9", client_name: "New Hire", latest_session_id: "s9", has_bfi: true },
     ] }))
     api.getMlGroupFit.mockResolvedValue(ok(FIT))
     render(<MlGroupFit group={GROUP} />)
 
-    const select = await screen.findByLabelText("Client to compare")
-    expect(screen.queryByRole("option", { name: "Rashid" })).toBeNull()
-    fireEvent.change(select, { target: { value: "c9" } })
-    fireEvent.click(screen.getByRole("button", { name: "Compare" }))
+    await screen.findByRole("listbox", { name: "Client to compare" })
+    expect(screen.queryByRole("option", { name: /Rashid/ })).toBeNull()
+    fireEvent.click(screen.getByRole("option", { name: /New Hire/ }))
+    fireEvent.click(screen.getByRole("button", { name: "Compare New Hire" }))
 
     expect(await screen.findByText(/Within the group's range: closer to the group than 1 of 2 members/)).toBeInTheDocument()
     expect(screen.getByText("Negative emotionality")).toBeInTheDocument()
@@ -77,12 +77,43 @@ describe("MlGroupFit", () => {
   })
 
   test("shows the service's refusal", async () => {
-    api.getPhase1Eligibility.mockResolvedValue(ok({ clients: [{ client_id: "c9", client_name: "New Hire" }] }))
+    api.getPhase1Eligibility.mockResolvedValue(ok({ clients: [
+      { client_id: "c9", client_name: "New Hire", latest_session_id: "s9", has_bfi: true },
+    ] }))
     api.getMlGroupFit.mockResolvedValue(ok({ detail: "This group has no trained model yet. Train it first." }, 404))
     render(<MlGroupFit group={GROUP} />)
 
-    fireEvent.change(await screen.findByLabelText("Client to compare"), { target: { value: "c9" } })
-    fireEvent.click(screen.getByRole("button", { name: "Compare" }))
+    fireEvent.click(await screen.findByRole("option", { name: /New Hire/ }))
+    fireEvent.click(screen.getByRole("button", { name: "Compare New Hire" }))
     expect(await screen.findByText(/no trained model yet/)).toBeInTheDocument()
+  })
+
+  test("lists clients A to Z, searches them, and greys out those with nothing to compare", async () => {
+    api.getPhase1Eligibility.mockResolvedValue(ok({ clients: [
+      { client_id: "c3", client_name: "zoë", latest_session_id: "s3", has_bfi: true },
+      { client_id: "c4", client_name: "Amir", latest_session_id: null, has_bfi: false },
+      { client_id: "c5", client_name: "Bea", latest_session_id: null, has_bfi: true },
+    ] }))
+    render(<MlGroupFit group={GROUP} />)
+
+    await screen.findByRole("listbox", { name: "Client to compare" })
+    const names = screen.getAllByRole("option").map((o) => o.textContent)
+    expect(names[0]).toMatch(/^Amir/)
+    expect(names[1]).toMatch(/^Bea.*Personality only/)
+    expect(names[2]).toMatch(/^zoë/)
+    expect(screen.getByRole("option", { name: /Amir/ })).toBeDisabled()
+
+    fireEvent.change(screen.getByLabelText("Search clients to compare"), { target: { value: "ZOE" } })
+    expect(screen.getAllByRole("option")).toHaveLength(1)
+    fireEvent.change(screen.getByLabelText("Search clients to compare"), { target: { value: "qq" } })
+    expect(screen.getByText("No clients match “qq”.")).toBeInTheDocument()
+  })
+})
+
+describe("comparable", () => {
+  test("names what is missing", () => {
+    expect(comparable({ latest_session_id: "s", has_bfi: true })).toEqual({ ok: true, note: null })
+    expect(comparable({ latest_session_id: "s", has_bfi: false }).note).toMatch(/no BFI-2 yet/)
+    expect(comparable({ latest_session_id: null, has_bfi: false }).ok).toBe(false)
   })
 })
