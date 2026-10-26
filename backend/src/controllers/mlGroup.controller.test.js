@@ -101,3 +101,42 @@ describe('group edits and training', () => {
         assert.ok(next.mock.calls[0].arguments[0] instanceof BadRequestError)
     })
 })
+
+describe('GET /api/ml/groups/:groupId/fit', () => {
+    test('proxies once the group and client are visible and in the same clinic', async () => {
+        mock.method(mlGroupModel, 'findById', async () => ({ group_id: G1, clinic_id: CLINIC }))
+        mock.method(mlGroupModel, 'clinicOfClient', async () => CLINIC)
+        const fetch = fetchReturning(200, { client_id: C1, personality: { available: true } })
+        const { response, next } = await invoke(mlGroupController.compareClient, {
+            params: { groupId: G1 }, query: { client_id: C1 }
+        })
+        assert.equal(next.mock.callCount(), 0)
+        assert.ok(fetch.mock.calls[0].arguments[0].endsWith(`/phase1/groups/${G1}/fit?client_id=${C1}`))
+        assert.equal(response.json.mock.calls[0].arguments[0].client_id, C1)
+    })
+
+    test('never calls the ML service for a client from another clinic', async () => {
+        mock.method(mlGroupModel, 'findById', async () => ({ group_id: G1, clinic_id: CLINIC }))
+        mock.method(mlGroupModel, 'clinicOfClient', async () => 'e0000000-0000-0000-0000-000000000099')
+        const fetch = fetchReturning(200, {})
+        const { next } = await invoke(mlGroupController.compareClient, {
+            params: { groupId: G1 }, query: { client_id: C1 }
+        })
+        assert.ok(next.mock.calls[0].arguments[0] instanceof BadRequestError)
+        assert.equal(fetch.mock.callCount(), 0)
+    })
+
+    test('404 for a client the caller cannot see', async () => {
+        mock.method(mlGroupModel, 'findById', async () => ({ group_id: G1, clinic_id: CLINIC }))
+        mock.method(mlGroupModel, 'clinicOfClient', async () => null)
+        const { next } = await invoke(mlGroupController.compareClient, {
+            params: { groupId: G1 }, query: { client_id: C1 }
+        })
+        assert.ok(next.mock.calls[0].arguments[0] instanceof NotFoundError)
+    })
+
+    test('rejects a missing client_id', async () => {
+        const { next } = await invoke(mlGroupController.compareClient, { params: { groupId: G1 }, query: {} })
+        assert.ok(next.mock.calls[0].arguments[0] instanceof BadRequestError)
+    })
+})

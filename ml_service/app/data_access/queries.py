@@ -22,6 +22,7 @@ the transaction boundary. Returns plain list-of-dicts for easy downstream use.
 
 import os
 
+import numpy as np
 from sqlalchemy import text
 
 
@@ -246,6 +247,38 @@ def fetch_group(conn, group_id: str) -> dict | None:
         SELECT group_id, clinic_id, name FROM ml_groups WHERE group_id = :gid
     """), {"gid": group_id}).mappings().first()
     return dict(row) if row else None
+
+
+def fetch_client(conn, client_id: str) -> dict | None:
+    """{client_id, client_name, clinic_id} for one client, or None."""
+    row = conn.execute(text("""
+        SELECT client_id, name AS client_name, clinic_id
+        FROM   clients WHERE client_id = CAST(:cid AS uuid)
+    """), {"cid": client_id}).mappings().first()
+    return ({"client_id": str(row["client_id"]), "client_name": row["client_name"],
+             "clinic_id": str(row["clinic_id"])} if row else None)
+
+
+# Channels and bands of fft_band_powers (migration 009), in column order.
+FFT_CHANNELS = ("fp1", "fp2", "t3", "t4")
+FFT_BANDS = ("delta", "theta", "alpha", "beta", "gamma")
+
+
+def fetch_session_band_powers(conn, session_id: str):
+    """
+    One session's FFT band powers (our own Welch PSD, written by the feature worker) as
+    an array of shape (windows, channels, bands) in FFT_CHANNELS x FFT_BANDS order, µV².
+    Empty (0 windows) when the worker has not processed the session.
+    """
+    cols = ", ".join(f"{c}_{b}" for c in FFT_CHANNELS for b in FFT_BANDS)
+    rows = conn.execute(text(f"""
+        SELECT {cols} FROM fft_band_powers
+        WHERE  session_id = CAST(:sid AS uuid)
+        ORDER  BY time
+    """), {"sid": session_id}).all()
+    arr = np.array([[np.nan if v is None else float(v) for v in r] for r in rows],
+                   dtype=np.float64)
+    return arr.reshape(len(rows), len(FFT_CHANNELS), len(FFT_BANDS))
 
 
 # A member's "latest session" must show at least this many distinct labelled images.

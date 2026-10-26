@@ -9,6 +9,7 @@ ML Phase 1 endpoints for the web Insights tab:
   GET  /phase1/eligibility                per client: latest trainable session, BFI-2
   GET  /phase1/groups/models              every group's current model + scores
   POST /phase1/groups/{group_id}/train    fit + register one group's model
+  GET  /phase1/groups/{group_id}/fit      how a client compares with the group
 
 Groups themselves (names, members) are clinic data managed by the backend; this
 service only reads them. Inference (per-session predictions) is produced
@@ -28,7 +29,7 @@ from pydantic import BaseModel
 
 from app.data_access import phase1_status, phase1_store, queries
 from app.database import engine
-from app.phase1 import train
+from app.phase1 import group_fit, train
 from app.workers import prediction_jobs
 
 router = APIRouter(prefix="/phase1", tags=["ml-phase1"])
@@ -208,3 +209,22 @@ def group_train_endpoint(group_id: str, req: GroupTrainRequest):
             inferred = prediction_jobs.predict_sessions_with_model(summary, session_ids)
 
     return {**summary, "inference": inferred}
+
+
+@router.get("/groups/{group_id}/fit")
+def group_fit_endpoint(group_id: str, client_id: str):
+    """
+    How a client outside the group compares with it: personality (BFI-2), EEG profile
+    (frequency-band shares) and response (the group's model scored on them). Each is
+    placed in the range of the members' own scores. Read-only; nothing is saved.
+
+    Reached only through the backend's authenticated proxy, which confirms the group
+    and the client both belong to the caller's clinic before forwarding here.
+    """
+    try:
+        with engine.connect() as conn:
+            return group_fit.compare_client(conn, group_id, client_id)
+    except group_fit.FitError as e:
+        raise HTTPException(status_code=e.status, detail=e.message)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))

@@ -408,6 +408,14 @@ export async function trainMlGroup(groupId) {
   });
   return res;
 }
+// How a client outside the group compares with it: personality, EEG profile and
+// response to the group's model, each placed in the members' range. Read-only.
+export async function getMlGroupFit(groupId, clientId) {
+  const res = await fetchWithAuth(
+    `${BASE_URL}/ml/groups/${groupId}/fit?client_id=${encodeURIComponent(clientId)}`
+  );
+  return res;
+}
 
 
 // EVENTS

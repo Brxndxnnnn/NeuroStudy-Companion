@@ -19,6 +19,7 @@ import {
   Spinner,
   Button,
 } from "@/components/ui";
+import MlGroupFit from "@/components/MlGroupFit";
 
 // Group models (21 Oct 2026): the technician puts clients into a named group and trains
 // one random-forest model on each member's latest labelled session, with the members'
@@ -160,14 +161,48 @@ function GroupModelMetrics({ model }) {
             )}
           </Alert>
         )}
-        {model.members?.length > 0 && (
-          <p className="mt-3 text-[12px] text-muted">
-            Trained on:{" "}
-            {model.members
-              .map((m) => `${m.client_name ?? "Unnamed"} (${m.start_time ? new Date(m.start_time).toLocaleDateString() : "—"})`)
-              .join(", ")}
-          </p>
-        )}
+        {model.members?.length > 0 && <MemberScores members={model.members} />}
+      </div>
+    </div>
+  );
+}
+
+/* Who the model was trained on and, for models trained since 26 Oct 2026, how well it
+   served each member while they were the held-out person: the range a client compared
+   with the group is placed in. */
+function MemberScores({ members }) {
+  const date = (m) => (m.start_time ? new Date(m.start_time).toLocaleDateString() : "—");
+  if (!members.some((m) => m.cv_mae_valence != null)) {
+    return (
+      <p className="mt-3 text-[12px] text-muted">
+        Trained on: {members.map((m) => `${m.client_name ?? "Unnamed"} (${date(m)})`).join(", ")}
+      </p>
+    );
+  }
+  return (
+    <div className="mt-4">
+      <h4 className="text-[13px] font-semibold text-ink">Each member, tested as if new</h4>
+      <div className="mt-2 overflow-x-auto">
+        <table className="w-full text-[13px]">
+          <thead className="text-left text-[11px] text-muted">
+            <tr>
+              <th className="py-1.5 pr-4 font-semibold">Member</th>
+              <th className="py-1.5 pr-4 font-semibold">Session</th>
+              <th className="py-1.5 pr-4 text-right font-semibold">Valence error ↓</th>
+              <th className="py-1.5 text-right font-semibold">Arousal error ↓</th>
+            </tr>
+          </thead>
+          <tbody>
+            {members.map((m) => (
+              <tr key={m.client_id ?? m.session_id} className="border-t border-border">
+                <td className="py-1.5 pr-4 text-ink">{m.client_name ?? "Unnamed"}</td>
+                <td className="py-1.5 pr-4 text-ink-2">{date(m)}</td>
+                <td className="py-1.5 pr-4 text-right font-mono tnum">{fmt(m.cv_mae_valence)}</td>
+                <td className="py-1.5 text-right font-mono tnum">{fmt(m.cv_mae_arousal)}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
       </div>
     </div>
   );
@@ -343,6 +378,7 @@ export default function MlGroupsPanel({ onTrained }) {
   const [results, setResults] = useState({});
   const [confirmDelete, setConfirmDelete] = useState(null);
   const [expanded, setExpanded] = useState({});
+  const [comparing, setComparing] = useState({});
 
   const load = async () => {
     setError("");
@@ -447,6 +483,7 @@ export default function MlGroupsPanel({ onTrained }) {
             const model = g.current_model;
             const busy = trainingId === g.group_id;
             const open = !!expanded[g.group_id];
+            const comparingOpen = !!comparing[g.group_id];
             return (
               <section key={g.group_id} className="rounded-lg border border-border p-4">
                 <div className="flex flex-wrap items-start justify-between gap-3">
@@ -495,17 +532,32 @@ export default function MlGroupsPanel({ onTrained }) {
 
                 {model && (
                   <div className="mt-3">
-                    <Button
-                      size="sm"
-                      variant="subtle"
-                      aria-expanded={open}
-                      onClick={() => setExpanded((e) => ({ ...e, [g.group_id]: !open }))}
-                    >
-                      {open ? "Hide model details" : "Show model details"}
-                    </Button>
+                    <div className="flex flex-wrap gap-2">
+                      <Button
+                        size="sm"
+                        variant="subtle"
+                        aria-expanded={open}
+                        onClick={() => setExpanded((e) => ({ ...e, [g.group_id]: !open }))}
+                      >
+                        {open ? "Hide model details" : "Show model details"}
+                      </Button>
+                      <Button
+                        size="sm"
+                        variant="subtle"
+                        aria-expanded={comparingOpen}
+                        onClick={() => setComparing((c) => ({ ...c, [g.group_id]: !comparingOpen }))}
+                      >
+                        {comparingOpen ? "Hide comparison" : "Compare a client"}
+                      </Button>
+                    </div>
                     {open && (
                       <div className="mt-4">
                         <GroupModelMetrics model={model} />
+                      </div>
+                    )}
+                    {comparingOpen && (
+                      <div className="mt-4">
+                        <MlGroupFit key={model.model_version} group={g} />
                       </div>
                     )}
                   </div>
