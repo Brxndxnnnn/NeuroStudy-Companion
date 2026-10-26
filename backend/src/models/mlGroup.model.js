@@ -5,9 +5,17 @@ import query from '../utils/query.js'
 // connection (req.dbClient), so a clinic only ever sees and changes its own groups. The
 // member trigger rejects (P2501) a client from another clinic.
 
+// A run still 'running' after this long is treated as dead (ml_service restarted mid-run);
+// the page offers Train again. Must match ml_service's PHASE1_TRAIN_STALE_MINUTES.
+export const TRAIN_STALE_MINUTES = Number(process.env.ML_TRAIN_STALE_MINUTES || 60)
+
 const listWithMembers = async (client) => {
     const { rows } = await query(client,
         `SELECT g.group_id, g.clinic_id, g.name, g.created_by, g.created_at, g.updated_at,
+                g.train_status, g.train_started_at, g.train_finished_at,
+                g.train_result, g.train_error,
+                (g.train_status = 'running'
+                 AND g.train_started_at < now() - make_interval(mins => $1::int)) AS train_stale,
                 COALESCE(
                     json_agg(json_build_object('client_id', c.client_id, 'client_name', c.name)
                              ORDER BY c.name)
@@ -18,7 +26,8 @@ const listWithMembers = async (client) => {
          LEFT JOIN ml_group_members m ON m.group_id = g.group_id
          LEFT JOIN clients c ON c.client_id = m.client_id
          GROUP BY g.group_id
-         ORDER BY g.created_at DESC`
+         ORDER BY g.created_at DESC`,
+        [TRAIN_STALE_MINUTES]
     )
     return rows
 }

@@ -8,7 +8,7 @@ ML Phase 1 endpoints for the web Insights tab:
   GET  /phase1/predictions/{id}           one session's predicted valence/arousal
   GET  /phase1/eligibility                per client: latest trainable session, BFI-2
   GET  /phase1/groups/models              every group's current model + scores
-  POST /phase1/groups/{group_id}/train    fit + register one group's model
+  POST /phase1/groups/{group_id}/train    start training one group's model (background)
   GET  /phase1/groups/{group_id}/fit      how a client compares with the group
 
 Groups themselves (names, members) are clinic data managed by the backend; this
@@ -24,13 +24,13 @@ per-clinic row-level security (session/client ownership) before forwarding here.
 See backend/src/routes/ml.routes.js and docs/ARCHITECTURE.md §6.
 """
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, BackgroundTasks, HTTPException
 from pydantic import BaseModel
 
 from app.data_access import phase1_status, phase1_store, queries
 from app.database import engine
-from app.phase1 import group_fit, train
-from app.workers import prediction_jobs
+from app.phase1 import group_fit
+from app.workers import train_jobs
 
 router = APIRouter(prefix="/phase1", tags=["ml-phase1"])
 
@@ -142,7 +142,7 @@ class GroupTrainRequest(BaseModel):
     """
     Body for POST /phase1/groups/{group_id}/train.
 
-    predict  run the new model over every member's completed sessions immediately,
+    predict  once trained, run the new model over every member's completed sessions,
              so the tab shows predictions without waiting for a background pass.
     """
     predict: bool = True
@@ -173,42 +173,32 @@ def group_models_endpoint():
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@router.post("/groups/{group_id}/train")
-def group_train_endpoint(group_id: str, req: GroupTrainRequest):
+@router.post("/groups/{group_id}/train", status_code=202)
+def group_train_endpoint(group_id: str, req: GroupTrainRequest, background: BackgroundTasks):
     """
-    Fit + register one group's model — the endpoint behind the technician's Train
-    button. Runs synchronously; on this project's data that is a few seconds per member.
+    Start training one group's model in the background — the endpoint behind the
+    technician's Train button. Answers 202 straight away; progress and the outcome are
+    recorded on the group (ml_groups.train_*, migration 027) for the page to poll.
+    Training takes minutes and grows with every member, far beyond any sensible HTTP
+    timeout, which is why it no longer runs inside the request.
 
-    The new model always becomes the group's current one, and its honest scores (with
-    and without BFI, against the predict-the-mean baseline) are returned with it.
-
-    Reached only through the backend's authenticated proxy, which confirms the group
-    belongs to the caller's clinic before forwarding here.
+    409 when the group is already training. Reached only through the backend's
+    authenticated proxy, which confirms the group belongs to the caller's clinic.
     """
     try:
         with engine.begin() as conn:
             if queries.fetch_group(conn, group_id) is None:
                 raise HTTPException(status_code=404, detail="Group not found.")
-            summary = train.train_group_and_save(conn, group_id)
+            started_at = train_jobs.claim(conn, group_id)
     except HTTPException:
         raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+    if started_at is None:
+        raise HTTPException(status_code=409, detail="This group is already training.")
 
-    if not summary.get("trained"):
-        return summary
-
-    inferred = None
-    if req.predict:
-        # Every completed session of every member, not just the training ones, so the
-        # tab can show this model on any of their recordings. Outside the training
-        # transaction: inference failing must not roll back a model that trained fine.
-        with engine.connect() as conn:
-            session_ids = phase1_store.group_session_ids(conn, group_id)
-        if session_ids:
-            inferred = prediction_jobs.predict_sessions_with_model(summary, session_ids)
-
-    return {**summary, "inference": inferred}
+    background.add_task(train_jobs.run, group_id, started_at, req.predict)
+    return {"status": "running", "group_id": group_id, "started_at": started_at}
 
 
 @router.get("/groups/{group_id}/fit")

@@ -87,13 +87,21 @@ describe('group edits and training', () => {
         assert.equal(fetch.mock.callCount(), 0)
     })
 
-    test('training proxies to the group\'s train endpoint', async () => {
+    test('training starts in the background and answers 202 at once', async () => {
         mock.method(mlGroupModel, 'findById', async () => ({ group_id: G1 }))
-        const fetch = fetchReturning(200, { trained: true, model_version: 4 })
+        const fetch = fetchReturning(202, { status: 'running', started_at: '2026-10-26T08:53:55Z' })
         const { response } = await invoke(mlGroupController.trainGroup, { params: { groupId: G1 }, body: {} })
         assert.match(fetch.mock.calls[0].arguments[0], new RegExp(`/phase1/groups/${G1}/train$`))
         assert.equal(JSON.parse(fetch.mock.calls[0].arguments[1].body).predict, true)
-        assert.equal(response.json.mock.calls[0].arguments[0].model_version, 4)
+        assert.equal(response.status.mock.calls[0].arguments[0], 202)
+        assert.equal(response.json.mock.calls[0].arguments[0].status, 'running')
+    })
+
+    test('passes on 409 when the group is already training', async () => {
+        mock.method(mlGroupModel, 'findById', async () => ({ group_id: G1 }))
+        fetchReturning(409, { detail: 'This group is already training.' })
+        const { response } = await invoke(mlGroupController.trainGroup, { params: { groupId: G1 }, body: {} })
+        assert.equal(response.status.mock.calls[0].arguments[0], 409)
     })
 
     test('rejects a malformed group id', async () => {

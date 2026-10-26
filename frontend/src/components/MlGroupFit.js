@@ -2,7 +2,8 @@
 
 import { useEffect, useState } from "react";
 import { getMlGroupFit, getPhase1Eligibility } from "@/utils/api";
-import { Alert, Button, Field, Select, Spinner } from "@/components/ui";
+import { Alert, Button, Spinner } from "@/components/ui";
+import { SearchInput, byName, matchesSearch } from "@/components/listTools";
 
 // Compare a client outside a group with it (26 Oct 2026): personality (BFI-2), EEG profile
 // (frequency-band shares) and response (the group's model scored on them). Each result is
@@ -32,6 +33,17 @@ export function placementText(p, { closer, further }) {
       ? "at the edge of the members' range"
       : `${closer} than ${members_further} of ${n_members} member${n_members === 1 ? "" : "s"}`;
   return `${head}: ${body}.`;
+}
+
+/* What a client can be compared on, from the eligibility list: personality needs a BFI-2,
+   EEG profile and response need a usable session. With neither there is nothing to show. */
+export function comparable(c) {
+  const session = !!c.latest_session_id;
+  const bfi = !!c.has_bfi;
+  if (!session && !bfi) return { ok: false, note: "Nothing to compare yet: no usable session and no BFI-2." };
+  if (!session) return { ok: true, note: "Personality only: no usable session yet." };
+  if (!bfi) return { ok: true, note: "EEG profile and response only: no BFI-2 yet." };
+  return { ok: true, note: null };
 }
 
 function Section({ title, question, result, closer, further, children }) {
@@ -182,6 +194,7 @@ export default function MlGroupFit({ group }) {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
   const [result, setResult] = useState(null);
+  const [query, setQuery] = useState("");
 
   useEffect(() => {
     let active = true;
@@ -204,7 +217,11 @@ export default function MlGroupFit({ group }) {
     };
   }, []);
 
-  const candidates = (clients ?? []).filter((c) => !memberIds.has(c.client_id));
+  const candidates = (clients ?? [])
+    .filter((c) => !memberIds.has(c.client_id))
+    .sort((a, b) => byName(a.client_name, b.client_name));
+  const shown = candidates.filter((c) => matchesSearch(c.client_name || "Unnamed client", query));
+  const chosen = candidates.find((c) => c.client_id === clientId);
 
   const compare = async () => {
     setLoading(true);
@@ -241,21 +258,57 @@ export default function MlGroupFit({ group }) {
           <span className="text-[13px]">Loading clients…</span>
         </div>
       ) : (
-        <div className="mt-3 flex flex-wrap items-end gap-2">
-          <Field label="Client" className="min-w-[220px]">
-            <Select value={clientId} onChange={(e) => setClientId(e.target.value)} aria-label="Client to compare">
-              <option value="">Choose a client…</option>
-              {candidates.map((c) => (
-                <option key={c.client_id} value={c.client_id}>
+        <div className="mt-3 max-w-md">
+          <SearchInput value={query} onChange={setQuery} label="Search clients to compare" />
+          <div
+            role="listbox"
+            aria-label="Client to compare"
+            className="mt-2 max-h-56 overflow-y-auto rounded-md border border-border bg-surface"
+          >
+            {shown.map((c) => {
+              const missing = comparable(c);
+              const on = c.client_id === clientId;
+              return (
+                <button
+                  type="button"
+                  key={c.client_id}
+                  role="option"
+                  aria-selected={on}
+                  disabled={!missing.ok}
+                  onClick={() => setClientId(c.client_id)}
+                  className={`block w-full border-t border-border px-3 py-2 text-left text-[13px] first:border-t-0 focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-accent ${
+                    !missing.ok
+                      ? "cursor-not-allowed text-muted"
+                      : on
+                        ? "cursor-pointer bg-accent-soft text-ink"
+                        : "cursor-pointer text-ink hover:bg-inset/60"
+                  }`}
+                >
                   {c.client_name || "Unnamed client"}
-                </option>
-              ))}
-            </Select>
-          </Field>
-          <Button onClick={compare} loading={loading} disabled={!clientId || loading}>
-            {loading ? "Comparing…" : "Compare"}
-          </Button>
+                  {missing.note && <span className="block text-[11.5px] text-muted">{missing.note}</span>}
+                </button>
+              );
+            })}
+            {shown.length === 0 && (
+              <p className="px-3 py-3 text-center text-[12.5px] text-muted">
+                {candidates.length === 0
+                  ? "Every client is already in this group."
+                  : `No clients match “${query.trim()}”.`}
+              </p>
+            )}
+          </div>
+          <div className="mt-2 flex flex-wrap items-center gap-2">
+            <Button onClick={compare} loading={loading} disabled={!chosen || loading}>
+              {loading ? "Comparing…" : chosen ? `Compare ${chosen.client_name || "client"}` : "Compare"}
+            </Button>
+          </div>
         </div>
+      )}
+
+      {loading && (
+        <p className="mt-2 text-[12px] text-muted">
+          Refitting the group&apos;s model to test it on this client. This can take a minute or two.
+        </p>
       )}
 
       {error && <Alert tone="warn" className="mt-3">{error}</Alert>}
