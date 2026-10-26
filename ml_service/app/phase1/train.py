@@ -280,7 +280,8 @@ def train_group_and_save(
         conn, group_id=group_id, algo=ALGO, artifact_path=path,
         n_epochs=n_epochs, n_distinct_images=n_images, n_sessions=len(usable),
         n_clients=len(usable), cv=cv, cv_no_bfi=cv_no_bfi, null=null,
-        members=[{"client_id": m["client_id"], "session_id": m["session_id"]} for m in usable],
+        members=[{"client_id": m["client_id"], "session_id": m["session_id"],
+                  "cv": res.per_person.get(m["client_id"])} for m in usable],
     )
 
     _prune_artifacts(conn, group_id)
@@ -300,7 +301,8 @@ def train_group_and_save(
         "n_distinct_images": n_images,
         "n_folds": res.n_folds,
         "members": [{"client_id": m["client_id"], "client_name": m["client_name"],
-                     "session_id": m["session_id"]} for m in usable],
+                     "session_id": m["session_id"],
+                     "cv": res.per_person.get(m["client_id"])} for m in usable],
         "skipped": skipped,
         "cv": cv,
         "cv_no_bfi": cv_no_bfi,

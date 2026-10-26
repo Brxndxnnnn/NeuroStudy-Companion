@@ -180,7 +180,8 @@ actually used.
 
 **ML:** `ml_groups` + `ml_group_members` (named sets of clients, clinic-scoped under RLS),
 `ml_models` (registry; one current model per group, `group_id` NOT NULL),
-`ml_model_sessions` (which client contributed which session to a model),
+`ml_model_sessions` (which client contributed which session to a model, and that member's
+own held-out score, migration 026),
 `session_predictions`.
 
 **Auth / tenancy:** `roles`, `permissions`, `role_permissions`, `revoked_tokens`,
@@ -291,7 +292,9 @@ the predict-the-mean null, so the model card shows whether BFI helped
 (`ml_models.cv_r2_*_no_bfi`). Sample size is still the number of **distinct images**.
 
 **Audit:** `ml_model_sessions` records which client contributed which session, so a model's
-evidence survives later edits to the group.
+evidence survives later edits to the group. It also keeps each member's own held-out score
+(`cv_mae_*`, `cv_r2_*`; migration 026): how well the model served them while they were the
+person left out.
 
 **Promotion:** a newly trained model always becomes its group's current one.
 
@@ -300,6 +303,23 @@ The prediction worker gives each new session predictions from the current model 
 group its client is in; the tab shows one model's rows at a time (group/version switch).
 Groups and members are clinic data behind RLS, managed by the backend
 (`/api/ml/groups`); ml_service only reads them.
+
+**Comparing a client with a group** (`phase1/group_fit.py`,
+`GET /api/ml/groups/:id/fit?client_id=`; 26 Oct 2026): for a client in the group's clinic
+who is not one of the model's members, three separate comparisons:
+
+| Comparison | Question | Method |
+|---|---|---|
+| Personality | Is their BFI-2 profile like the group's? | z-score per domain vs the members, RMS distance |
+| EEG profile | Does their brain activity look like the group's? | Each channel's band shares (median over windows of `fft_band_powers`), z-score per channel·band, RMS distance |
+| Response | Does the group's EEG → emotion link hold for them? | The group's model recipe, fitted on the members only and scored on the client with their test images held out, the same way each member was scored |
+
+Each client is placed in the range of the members' own scores. For the two distance
+comparisons each member is measured against the *other* members, which needs at least 3
+members; with fewer, the comparison with the group average is shown without a placement.
+Spreads are floored (0.25 BFI points, 1 percentage point) so identical members cannot
+produce an infinite distance. Descriptive only: the page says "within / outside the
+group's range", never that a client fits. Read-only; nothing is stored.
 
 ### Why image duration matters
 

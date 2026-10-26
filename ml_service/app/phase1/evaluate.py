@@ -30,7 +30,7 @@ people talk themselves into believing there is.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 import numpy as np
 from sklearn.base import clone
@@ -247,6 +247,10 @@ class GroupResult:
     mae_no_bfi: dict
     null_r2: dict               # predict-the-training-mean on the same splits
     null_mae: dict
+    # The with-BFI score of each person on their own held-out epochs, keyed by person:
+    # {"n_epochs", "r2": {...}, "mae": {...}}. How well the group's model would have
+    # served each member had they been new; the range a newcomer is placed in.
+    per_person: dict = field(default_factory=dict)
 
 
 def cross_validate_people(
@@ -319,8 +323,22 @@ def cross_validate_people(
     r2, mae = metrics(oof)
     r2_no, mae_no = metrics(oof_no)
     null_r2, null_mae = metrics(null)
+    per_person = {}
+    for person in person_ids:
+        rows = scored & (people == person)
+        if rows.sum() >= 2:
+            per_person[person] = {"n_epochs": int(rows.sum()),
+                                  **score_predictions(y[rows], oof[rows])}
     return GroupResult(
         n_people=len(person_ids), n_epochs=int(scored.sum()), n_images=n_images,
         n_folds=n_folds, r2=r2, mae=mae, r2_no_bfi=r2_no, mae_no_bfi=mae_no,
-        null_r2=null_r2, null_mae=null_mae,
+        null_r2=null_r2, null_mae=null_mae, per_person=per_person,
     )
+
+
+def score_predictions(y: np.ndarray, pred: np.ndarray) -> dict:
+    """{"r2": {...}, "mae": {...}} keyed by target, for one set of predictions."""
+    return {
+        "r2": {t: float(r2_score(y[:, i], pred[:, i])) for i, t in enumerate(TARGETS)},
+        "mae": {t: float(mean_absolute_error(y[:, i], pred[:, i])) for i, t in enumerate(TARGETS)},
+    }

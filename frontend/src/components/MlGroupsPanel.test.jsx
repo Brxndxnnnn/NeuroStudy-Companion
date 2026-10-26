@@ -8,6 +8,7 @@ const api = vi.hoisted(() => ({
   updateMlGroup: vi.fn(),
   deleteMlGroup: vi.fn(),
   trainMlGroup: vi.fn(),
+  getMlGroupFit: vi.fn(),
 }))
 vi.mock("@/utils/api", () => api)
 
