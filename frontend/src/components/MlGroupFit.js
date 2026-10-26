@@ -258,6 +258,12 @@ export default function MlGroupFit({ group }) {
         </div>
       )}
 
+      {loading && (
+        <p className="mt-2 text-[12px] text-muted">
+          Refitting the group&apos;s model to test it on this client. This can take a minute or two.
+        </p>
+      )}
+
       {error && <Alert tone="warn" className="mt-3">{error}</Alert>}
 
       {result && (

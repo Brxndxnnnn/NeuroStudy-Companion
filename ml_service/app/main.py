@@ -33,8 +33,8 @@ async def lifespan(app: FastAPI):
       • prediction worker — Phase 1 inference: runs each client's current model over
                             their completed sessions (see workers/prediction_jobs.py)
 
-    Phase 1 training is not scheduled: a model is fitted per client, when a
-    technician asks for one (POST /phase1/train).
+    Phase 1 training is not scheduled: a group's model is fitted when a technician
+    asks for one (POST /phase1/groups/{id}/train, run as a background task).
 
     Several workers may be alive at once (uvicorn --workers, or the dev reloader),
     so more than one scheduler will tick. That is safe: every job claims its work
