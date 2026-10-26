@@ -143,6 +143,8 @@ def test_training_appends_bfi_after_per_session_zscoring(monkeypatch, tmp_path):
     assert np.allclose(fitted[sessions == "s2", -5], 1.0)
     assert inserted["n_clients"] == 2
     assert {m["session_id"] for m in inserted["members"]} == {"s1", "s2"}
+    # Each member's own held-out score is kept for comparing newcomers with the group.
+    assert all(set(m["cv"]["mae"]) == {"valence", "arousal"} for m in inserted["members"])
 
 
 def test_training_refuses_a_group_with_one_usable_member(monkeypatch):

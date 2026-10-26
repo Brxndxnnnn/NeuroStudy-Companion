@@ -39,6 +39,9 @@ import mlGroupController from '../controllers/mlGroup.controller.js'
  *                                              read/written under RLS here, then
  *                                              training proxied. Writes need
  *                                              insights:write.
+ *   - /groups/:id/fit                       → compare a client with a group: the group
+ *                                              and client are checked under RLS (same
+ *                                              clinic) before the read is proxied.
  *
  * Verifying the JWT inside ml_service instead was rejected deliberately:
  * authenticate.js also checks token revocation by jti, which is stateful, and
@@ -270,5 +273,29 @@ router.delete('/groups/:groupId', dbContext, requirePermission(PERMS.INSIGHTS_WR
  *       502: { description: ML service unreachable }
  */
 router.post('/groups/:groupId/train', dbContext, requirePermission(PERMS.INSIGHTS_WRITE_OWN_CLINIC), mlGroupController.trainGroup)
+
+/**
+ * @openapi
+ * /api/ml/groups/{groupId}/fit:
+ *   get:
+ *     summary: Compare a client outside the group with it
+ *     description: >
+ *       Three comparisons, each placed in the range of the members' own scores:
+ *       personality (BFI-2 domains), EEG profile (each channel's frequency-band shares),
+ *       and response (the group's model scored on the client, with their test images
+ *       held out). Descriptive only; nothing is saved. Needs a trained group, and the
+ *       client must be in the group's clinic and not one of the model's members.
+ *     tags: [ML]
+ *     security: [{ bearerAuth: [] }]
+ *     parameters:
+ *       - { in: path, name: groupId, required: true, schema: { type: string, format: uuid } }
+ *       - { in: query, name: client_id, required: true, schema: { type: string, format: uuid } }
+ *     responses:
+ *       200: { description: "personality, eeg_profile and response, each with available and placement" }
+ *       400: { description: "Invalid ids, a client from another clinic, or one of the model's members" }
+ *       404: { description: "Group or client not found, or the group has no trained model" }
+ *       502: { description: ML service unreachable }
+ */
+router.get('/groups/:groupId/fit', dbContext, requirePermission(PERMS.INSIGHTS_READ_OWN_CLINIC), mlGroupController.compareClient)
 
 export default router

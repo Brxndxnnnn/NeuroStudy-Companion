@@ -94,9 +94,12 @@ def _log_extraction(conn, reports, session_ids: list[str] | None) -> None:
         )
 
     # Which timeline produced this data — see queries.MIN_TIMELINE_VERSION.
+    # In a savepoint: catching a failed query is not enough, because Postgres aborts the
+    # whole enclosing transaction and every later statement (the model insert) fails.
     try:
         ids = session_ids or [str(r.session_id) for r in reports]
-        mix = queries.fetch_timeline_version_mix(conn, [str(s) for s in ids])
+        with conn.begin_nested():
+            mix = queries.fetch_timeline_version_mix(conn, [str(s) for s in ids])
         if mix:
             log.info("Timeline versions in training set: %s (1 = pre-fix compressed, 2 = honest gaps).", mix)
         if len(mix) > 1:
@@ -277,7 +280,8 @@ def train_group_and_save(
         conn, group_id=group_id, algo=ALGO, artifact_path=path,
         n_epochs=n_epochs, n_distinct_images=n_images, n_sessions=len(usable),
         n_clients=len(usable), cv=cv, cv_no_bfi=cv_no_bfi, null=null,
-        members=[{"client_id": m["client_id"], "session_id": m["session_id"]} for m in usable],
+        members=[{"client_id": m["client_id"], "session_id": m["session_id"],
+                  "cv": res.per_person.get(m["client_id"])} for m in usable],
     )
 
     _prune_artifacts(conn, group_id)
@@ -297,7 +301,8 @@ def train_group_and_save(
         "n_distinct_images": n_images,
         "n_folds": res.n_folds,
         "members": [{"client_id": m["client_id"], "client_name": m["client_name"],
-                     "session_id": m["session_id"]} for m in usable],
+                     "session_id": m["session_id"],
+                     "cv": res.per_person.get(m["client_id"])} for m in usable],
         "skipped": skipped,
         "cv": cv,
         "cv_no_bfi": cv_no_bfi,

@@ -29,6 +29,13 @@ const findById = async (group_id, client) => {
     return rows[0] ?? null
 }
 
+// One client's clinic as the caller can see it, or null when the client is not visible.
+const clinicOfClient = async (client_id, client) => {
+    const { rows } = await query(client,
+        'SELECT clinic_id FROM clients WHERE client_id = $1', [client_id])
+    return rows[0]?.clinic_id ?? null
+}
+
 // The clinics the given clients belong to (as the caller can see them).
 const clinicsOfClients = async (client_ids, client) => {
     const { rows } = await query(client,
@@ -92,4 +99,4 @@ const remove = async (group_id, client) => {
     return rowCount > 0
 }
 
-export default { listWithMembers, findById, clinicsOfClients, create, update, remove }
+export default { listWithMembers, findById, clinicsOfClients, create, update, remove, clinicOfClient }

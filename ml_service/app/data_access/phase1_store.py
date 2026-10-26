@@ -24,9 +24,10 @@ def insert_model(conn, *, group_id: str, algo, artifact_path, n_epochs,
     return its model_version.
 
     `cv`, `cv_no_bfi` carry 'r2' and 'mae' dicts keyed 'valence'/'arousal'; `null`
-    carries 'r2'. `members` is [{client_id, session_id}] — who contributed which
+    carries 'r2'. `members` is [{client_id, session_id, cv?}] — who contributed which
     session, kept in ml_model_sessions so the model's evidence survives later edits to
-    the group.
+    the group. `cv` is the member's own held-out score ({n_epochs, r2, mae}), absent
+    when they had too few scored epochs.
 
     The demotion is scoped to the group and happens in the same transaction as the
     insert, so there is never a window with zero or two current models for a group
@@ -67,12 +68,21 @@ def insert_model(conn, *, group_id: str, algo, artifact_path, n_epochs,
     version = int(row[0])
 
     if members:
+        def member_row(m):
+            cv_m = m.get("cv") or {}
+            r2, mae = cv_m.get("r2") or {}, cv_m.get("mae") or {}
+            return {"ver": version, "sid": m["session_id"], "cid": m["client_id"],
+                    "n": cv_m.get("n_epochs"),
+                    "r2_v": r2.get("valence"), "r2_a": r2.get("arousal"),
+                    "mae_v": mae.get("valence"), "mae_a": mae.get("arousal")}
+
         conn.execute(text("""
-            INSERT INTO ml_model_sessions (model_version, session_id, client_id)
-            VALUES (:ver, :sid, :cid)
+            INSERT INTO ml_model_sessions (
+                model_version, session_id, client_id, cv_n_epochs,
+                cv_r2_valence, cv_r2_arousal, cv_mae_valence, cv_mae_arousal
+            ) VALUES (:ver, :sid, :cid, :n, :r2_v, :r2_a, :mae_v, :mae_a)
             ON CONFLICT DO NOTHING
-        """), [{"ver": version, "sid": m["session_id"], "cid": m["client_id"]}
-               for m in members])
+        """), [member_row(m) for m in members])
 
     return version
 
@@ -101,9 +111,14 @@ def current_models_for_client(conn, client_id: str) -> list[dict]:
 
 
 def model_members(conn, model_version: int) -> list[dict]:
-    """Who trained a model and with which session — the audit trail."""
+    """
+    Who trained a model and with which session — the audit trail — and each member's
+    own held-out score (NULL for models trained before migration 026).
+    """
     rows = conn.execute(text("""
-        SELECT ms.client_id, c.name AS client_name, ms.session_id, s.start_time
+        SELECT ms.client_id, c.name AS client_name, ms.session_id, s.start_time,
+               ms.cv_n_epochs, ms.cv_r2_valence, ms.cv_r2_arousal,
+               ms.cv_mae_valence, ms.cv_mae_arousal
         FROM   ml_model_sessions ms
         LEFT   JOIN clients c ON c.client_id = ms.client_id
         LEFT   JOIN sessions s ON s.session_id = ms.session_id

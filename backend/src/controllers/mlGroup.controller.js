@@ -82,4 +82,23 @@ const trainGroup = catchAsync(async (req, res) => {
     }))
 })
 
-export default { listGroups, createGroup, updateGroup, deleteGroup, trainGroup }
+// ── GET /api/ml/groups/:groupId/fit?client_id= ────────────────────────────────────
+// How a client outside the group compares with it (personality, EEG profile, response
+// to the group's model). Read-only. The group and the client must both be visible to
+// the caller and belong to the same clinic; ml_service has no tenant checks of its own.
+const compareClient = catchAsync(async (req, res) => {
+    const groupId = groupIdParam(req)
+    const clientId = req.query.client_id
+    if (!isUuid(clientId)) throw new BadRequestError('client_id must be a UUID.')
+    const group = await mlGroupModel.findById(groupId, req.dbClient)
+    if (!group) throw new NotFoundError('Group not found.')
+    const clinicId = await mlGroupModel.clinicOfClient(clientId, req.dbClient)
+    if (!clinicId) throw new NotFoundError('Client not found.')
+    if (clinicId !== group.clinic_id)
+        throw new BadRequestError('The client belongs to a different clinic from the group.')
+    return send(res, await mlFetch(
+        `/phase1/groups/${groupId}/fit?client_id=${encodeURIComponent(clientId)}`,
+        { timeoutMs: TRAIN_TIMEOUT_MS }))
+})
+
+export default { listGroups, createGroup, updateGroup, deleteGroup, trainGroup, compareClient }
