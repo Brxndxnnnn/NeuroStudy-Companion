@@ -8,10 +8,12 @@
 // is not reachable from outside the stack.
 const ML_BASE = process.env.ML_SERVICE_URL || 'http://ml:8000'
 
-// Reads are quick; training can take longer. Both are bounded so a pathological
-// request cannot hold a connection open indefinitely.
+// Reads are quick. Comparing a client with a group refits the group's model, which takes
+// up to a minute or two, so it gets longer (kept under nginx's 300 s for that route).
+// Training does not wait at all: it runs in the background on ml_service. Both are
+// bounded so a pathological request cannot hold a connection open indefinitely.
 export const READ_TIMEOUT_MS = Number(process.env.ML_READ_TIMEOUT_MS || 30000)
-export const TRAIN_TIMEOUT_MS = Number(process.env.ML_TRAIN_TIMEOUT_MS || 120000)
+export const COMPARE_TIMEOUT_MS = Number(process.env.ML_COMPARE_TIMEOUT_MS || 280000)
 
 /**
  * Forward a request to ml_service and return { status, payload }. Never throws on a

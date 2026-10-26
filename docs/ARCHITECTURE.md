@@ -298,6 +298,15 @@ person left out.
 
 **Promotion:** a newly trained model always becomes its group's current one.
 
+**Runs in the background** (`workers/train_jobs.py`, migration 027): training takes minutes
+on the droplet and grows with every member, so `POST /phase1/groups/{id}/train` only claims
+the group (`ml_groups.train_status = 'running'`, atomically, 409 if already running) and
+answers 202; the work runs after the response and records `done` (with `train_result`) or
+`failed` (with `train_error`). The page polls `GET /api/ml/groups` while a group is training.
+A run still `running` after `PHASE1_TRAIN_STALE_MINUTES` (60) is treated as dead (service
+restarted) and Train is offered again; each write is keyed on `train_started_at`, so an
+overtaken run never overwrites its successor.
+
 **Serving:** after training, the model predicts every completed session of every member.
 The prediction worker gives each new session predictions from the current model of every
 group its client is in; the tab shows one model's rows at a time (group/version switch).

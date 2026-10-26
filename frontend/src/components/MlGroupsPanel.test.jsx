@@ -37,27 +37,64 @@ describe("bfiEffect", () => {
 })
 
 describe("MlGroupsPanel", () => {
-  test("lists groups and shows who was left out after training", async () => {
-    api.getMlGroups
-      .mockResolvedValueOnce(ok({ groups: [GROUP], models_available: true }))
-      .mockResolvedValueOnce(ok({ groups: [{ ...GROUP, current_model: MODEL }], models_available: true }))
-    api.trainMlGroup.mockResolvedValue(ok({
-      trained: true, message: "Trained on 3 member(s)' latest sessions.",
-      skipped: [{ client_name: "Test Client", reason: "no complete BFI-2 questionnaire" }],
-    }))
-    const onTrained = vi.fn()
-    render(<MlGroupsPanel onTrained={onTrained} />)
+  test("training shows progress, polls, then shows the outcome and who was left out", async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true })
+    try {
+      const RUNNING = { ...GROUP, train_status: "running", train_started_at: new Date().toISOString(), train_stale: false }
+      const DONE = {
+        ...GROUP, current_model: MODEL, train_status: "done", train_finished_at: new Date().toISOString(),
+        train_result: {
+          trained: true, message: "Trained on 3 member(s)' latest sessions.",
+          skipped: [{ client_name: "Test Client", reason: "no complete BFI-2 questionnaire" }],
+        },
+      }
+      api.getMlGroups
+        .mockResolvedValueOnce(ok({ groups: [GROUP], models_available: true }))
+        .mockResolvedValueOnce(ok({ groups: [RUNNING], models_available: true }))
+        .mockResolvedValue(ok({ groups: [DONE], models_available: true }))
+      api.trainMlGroup.mockResolvedValue(ok({ status: "running" }, 202))
+      const onTrained = vi.fn()
+      render(<MlGroupsPanel onTrained={onTrained} />)
 
-    expect(await screen.findByText("Pilot")).toBeInTheDocument()
-    expect(screen.getByText("Not trained")).toBeInTheDocument()
+      expect(await screen.findByText("Pilot")).toBeInTheDocument()
+      expect(screen.getByText("Not trained")).toBeInTheDocument()
 
-    fireEvent.click(screen.getByRole("button", { name: "Train" }))
+      fireEvent.click(screen.getByRole("button", { name: "Train" }))
 
-    expect(await screen.findByText(/Test Client \(no complete BFI-2 questionnaire\)/)).toBeInTheDocument()
-    await waitFor(() => expect(onTrained).toHaveBeenCalled())
-    expect(screen.getByText("Trained · v7")).toBeInTheDocument()
-    expect(screen.getByText("Without BFI")).toBeInTheDocument()
-    expect(screen.getByText("no meaningful difference")).toBeInTheDocument()
+      // Still training: the page says so instead of reporting a failure.
+      expect(await screen.findByText(/Training… started at/)).toBeInTheDocument()
+      expect(screen.getByText(/carries on in the background/)).toBeInTheDocument()
+      expect(onTrained).not.toHaveBeenCalled()
+
+      await vi.advanceTimersByTimeAsync(4500)
+
+      expect(await screen.findByText(/Test Client \(no complete BFI-2 questionnaire\)/)).toBeInTheDocument()
+      await waitFor(() => expect(onTrained).toHaveBeenCalledTimes(1))
+      expect(screen.getByText("Trained · v7")).toBeInTheDocument()
+      expect(screen.getByText("Without BFI")).toBeInTheDocument()
+      expect(screen.getByText("no meaningful difference")).toBeInTheDocument()
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  test("a failed run says so with the reason", async () => {
+    api.getMlGroups.mockResolvedValue(ok({ groups: [{
+      ...GROUP, train_status: "failed", train_finished_at: "2026-10-26T09:00:00Z", train_error: "RuntimeError: database went away",
+    }], models_available: true }))
+    render(<MlGroupsPanel />)
+    expect(await screen.findByText(/Training failed at/)).toBeInTheDocument()
+    expect(screen.getByText("RuntimeError: database went away")).toBeInTheDocument()
+    expect(screen.getByRole("button", { name: "Train" })).not.toBeDisabled()
+  })
+
+  test("a run that never finished offers Train again", async () => {
+    api.getMlGroups.mockResolvedValue(ok({ groups: [{
+      ...GROUP, train_status: "running", train_started_at: "2026-10-26T07:00:00Z", train_stale: true,
+    }], models_available: true }))
+    render(<MlGroupsPanel />)
+    expect(await screen.findByText(/has not finished. The ML service may have restarted/)).toBeInTheDocument()
+    expect(screen.getByRole("button", { name: "Train" })).not.toBeDisabled()
   })
 
   test("the editor flags clients who cannot train and creates the group", async () => {

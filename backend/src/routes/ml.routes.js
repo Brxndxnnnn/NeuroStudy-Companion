@@ -249,9 +249,11 @@ router.delete('/groups/:groupId', dbContext, requirePermission(PERMS.INSIGHTS_WR
  * @openapi
  * /api/ml/groups/{groupId}/train:
  *   post:
- *     summary: Train an ML group's model
+ *     summary: Start training an ML group's model in the background
  *     description: >
- *       Random forest on each member's latest labelled session, with their BFI-2 domain
+ *       Answers 202 at once; training takes minutes. Progress and the outcome are on the
+ *       group in GET /api/ml/groups (train_status running / done / failed, train_result,
+ *       train_error). Random forest on each member's latest labelled session, with their BFI-2 domain
  *       scores as extra inputs. Scored by holding one person and their test images out,
  *       with and without BFI, against predicting the average. Members without a
  *       trainable session or a complete BFI-2 are left out and listed in `skipped`.
@@ -268,8 +270,9 @@ router.delete('/groups/:groupId', dbContext, requirePermission(PERMS.INSIGHTS_WR
  *             properties:
  *               predict: { type: boolean, default: true }
  *     responses:
- *       200: { description: "Finished. See trained, message, skipped and the scores." }
+ *       202: { description: "Started; poll GET /api/ml/groups for train_status" }
  *       404: { description: Group not found in the caller's clinic }
+ *       409: { description: The group is already training }
  *       502: { description: ML service unreachable }
  */
 router.post('/groups/:groupId/train', dbContext, requirePermission(PERMS.INSIGHTS_WRITE_OWN_CLINIC), mlGroupController.trainGroup)

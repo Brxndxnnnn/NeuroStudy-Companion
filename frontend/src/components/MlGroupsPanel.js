@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import {
   getMlGroups,
   getPhase1Eligibility,
@@ -354,19 +354,69 @@ function GroupEditor({ initial, onSaved, onCancel }) {
   );
 }
 
-function TrainOutcome({ result }) {
-  if (!result) return null;
-  return (
-    <Alert tone={result.trained ? "good" : "warn"} className="mt-3">
-      <span className="block">{result.message}</span>
-      {result.skipped?.length > 0 && (
-        <span className="mt-1 block font-normal">
-          Left out:{" "}
-          {result.skipped.map((s) => `${s.client_name ?? "Unnamed"} (${s.reason})`).join("; ")}.
+// Training runs in the background on the ML service (it takes minutes and grows with every
+// member); its progress is saved on the group, so the page polls the group list while any
+// group is training and shows the outcome even after a reload.
+const POLL_MS = 4000;
+
+export const isTraining = (g) => g.train_status === "running" && !g.train_stale;
+
+const clock = (t) => (t ? new Date(t).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" }) : "—");
+const when = (t) => (t ? `${new Date(t).toLocaleDateString()} ${clock(t)}` : "—");
+
+function minutesSince(t) {
+  const m = Math.floor((Date.now() - new Date(t).getTime()) / 60000);
+  return m < 1 ? "less than a minute" : `${m} minute${m === 1 ? "" : "s"}`;
+}
+
+export function TrainStatus({ group }) {
+  const { train_status: status, train_result: result, train_error: error } = group;
+  if (isTraining(group)) {
+    return (
+      <Alert tone="accent" className="mt-3">
+        <span className="flex items-center gap-2">
+          <Spinner size={14} />
+          Training… started at {clock(group.train_started_at)} ({minutesSince(group.train_started_at)} ago).
         </span>
-      )}
-    </Alert>
-  );
+        <span className="mt-1 block font-normal">
+          Larger groups can take several minutes. It carries on in the background, so you can
+          leave this page and come back.
+        </span>
+      </Alert>
+    );
+  }
+  if (status === "running") {
+    return (
+      <Alert tone="warn" className="mt-3">
+        Training started at {when(group.train_started_at)} and has not finished. The ML service may
+        have restarted. Press Train to start again.
+      </Alert>
+    );
+  }
+  if (status === "failed") {
+    return (
+      <Alert tone="warn" className="mt-3">
+        <span className="block">Training failed at {when(group.train_finished_at)}.</span>
+        {error && <span className="mt-1 block font-normal">{error}</span>}
+      </Alert>
+    );
+  }
+  if (status === "done" && result) {
+    return (
+      <Alert tone={result.trained ? "good" : "warn"} className="mt-3">
+        <span className="block">
+          {result.message} <span className="font-normal">Finished {when(group.train_finished_at)}.</span>
+        </span>
+        {result.skipped?.length > 0 && (
+          <span className="mt-1 block font-normal">
+            Left out:{" "}
+            {result.skipped.map((s) => `${s.client_name ?? "Unnamed"} (${s.reason})`).join("; ")}.
+          </span>
+        )}
+      </Alert>
+    );
+  }
+  return null;
 }
 
 export default function MlGroupsPanel({ onTrained }) {
@@ -374,14 +424,17 @@ export default function MlGroupsPanel({ onTrained }) {
   const [modelsAvailable, setModelsAvailable] = useState(true);
   const [error, setError] = useState("");
   const [editing, setEditing] = useState(null); // null | "new" | group
-  const [trainingId, setTrainingId] = useState(null);
-  const [results, setResults] = useState({});
+  const [startingId, setStartingId] = useState(null);
+  const [trainErrors, setTrainErrors] = useState({});
+  const wasTraining = useRef(new Set());
   const [confirmDelete, setConfirmDelete] = useState(null);
   const [expanded, setExpanded] = useState({});
   const [comparing, setComparing] = useState({});
 
-  const load = async () => {
-    setError("");
+  // poll: a background refresh while training. A failed poll keeps what is on screen
+  // and the next one tries again, rather than emptying the list and stopping the polling.
+  const load = async ({ poll = false } = {}) => {
+    if (!poll) setError("");
     try {
       const res = await getMlGroups();
       const data = await res.json().catch(() => ({}));
@@ -389,6 +442,7 @@ export default function MlGroupsPanel({ onTrained }) {
       setGroups(data.groups || []);
       setModelsAvailable(data.models_available !== false);
     } catch (err) {
+      if (poll) return;
       setGroups([]);
       setError(err.message || "Could not load groups.");
     }
@@ -398,25 +452,50 @@ export default function MlGroupsPanel({ onTrained }) {
     load();
   }, []);
 
+  // Poll while any group is training.
+  const anyTraining = !!groups?.some(isTraining);
+  useEffect(() => {
+    if (!anyTraining) return undefined;
+    const timer = setInterval(() => load({ poll: true }), POLL_MS);
+    return () => clearInterval(timer);
+  }, [anyTraining]);
+
+  // A group that just finished training: open its new model and refresh the rest of the
+  // Insights tab (session list, predictions).
+  useEffect(() => {
+    if (!groups) return;
+    const finished = groups.filter(
+      (g) => wasTraining.current.has(g.group_id) && !isTraining(g) && g.train_result?.trained
+    );
+    wasTraining.current = new Set(groups.filter(isTraining).map((g) => g.group_id));
+    if (finished.length) {
+      setExpanded((e) => ({ ...e, ...Object.fromEntries(finished.map((g) => [g.group_id, true])) }));
+      onTrained?.();
+    }
+  }, [groups, onTrained]);
+
+  // Starts training in the background. The request answers at once; progress then comes
+  // from the group list, which is polled while the group is training.
   const train = async (group) => {
-    setTrainingId(group.group_id);
-    setResults((r) => ({ ...r, [group.group_id]: null }));
+    setStartingId(group.group_id);
+    setTrainErrors((r) => ({ ...r, [group.group_id]: "" }));
     try {
       const res = await trainMlGroup(group.group_id);
-      const data = await res.json().catch(() => ({}));
-      const result = res.ok
-        ? data
-        : { trained: false, message: res.status === 403 ? "You do not have permission to train models." : data.message || data.detail || "Training failed." };
-      setResults((r) => ({ ...r, [group.group_id]: result }));
-      if (result.trained) {
-        setExpanded((e) => ({ ...e, [group.group_id]: true }));
-        await load();
-        onTrained?.();
+      if (!res.ok && res.status !== 409) {
+        const data = await res.json().catch(() => ({}));
+        setTrainErrors((r) => ({
+          ...r,
+          [group.group_id]:
+            res.status === 403
+              ? "You do not have permission to train models."
+              : data.message || data.detail || "Could not start training.",
+        }));
       }
+      await load();
     } catch {
-      setResults((r) => ({ ...r, [group.group_id]: { trained: false, message: "Could not reach the server." } }));
+      setTrainErrors((r) => ({ ...r, [group.group_id]: "Could not reach the server." }));
     } finally {
-      setTrainingId(null);
+      setStartingId(null);
     }
   };
 
@@ -481,7 +560,8 @@ export default function MlGroupsPanel({ onTrained }) {
         ) : (
           groups.map((g) => {
             const model = g.current_model;
-            const busy = trainingId === g.group_id;
+            const training = isTraining(g);
+            const busy = training || startingId === g.group_id;
             const open = !!expanded[g.group_id];
             const comparingOpen = !!comparing[g.group_id];
             return (
@@ -495,13 +575,15 @@ export default function MlGroupsPanel({ onTrained }) {
                     </p>
                   </div>
                   <div className="flex flex-wrap items-center gap-2">
-                    {model ? (
+                    {training ? (
+                      <Pill tone="accent" dot live>Training…</Pill>
+                    ) : model ? (
                       <Pill tone="good" dot>Trained · v{model.model_version}</Pill>
                     ) : (
                       <Pill tone="warn" dot>Not trained</Pill>
                     )}
-                    <Button size="sm" onClick={() => train(g)} loading={busy} disabled={trainingId !== null}>
-                      {busy ? "Training…" : model ? "Retrain" : "Train"}
+                    <Button size="sm" onClick={() => train(g)} loading={busy} disabled={busy}>
+                      {training ? "Training…" : model ? "Retrain" : "Train"}
                     </Button>
                     <Button size="sm" variant="ghost" onClick={() => setEditing(g)} disabled={busy}>
                       Edit
@@ -528,7 +610,10 @@ export default function MlGroupsPanel({ onTrained }) {
                   </p>
                 )}
 
-                <TrainOutcome result={results[g.group_id]} />
+                <TrainStatus group={g} />
+                {trainErrors[g.group_id] && (
+                  <Alert tone="warn" className="mt-3">{trainErrors[g.group_id]}</Alert>
+                )}
 
                 {model && (
                   <div className="mt-3">

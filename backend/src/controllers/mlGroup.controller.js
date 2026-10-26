@@ -2,7 +2,7 @@ import mlGroupModel from '../models/mlGroup.model.js'
 import catchAsync from '../utils/catchAsync.js'
 import { BadRequestError, NotFoundError } from '../utils/AppError.js'
 import { isUuid, validateGroupBody } from '../validators/mlGroup.validators.js'
-import { mlFetch, send, TRAIN_TIMEOUT_MS } from '../utils/mlClient.js'
+import { mlFetch, send, COMPARE_TIMEOUT_MS } from '../utils/mlClient.js'
 
 // ML groups (ITP2, 21 Oct 2026): a technician puts clients into a named group and trains
 // one Phase 1 model on each member's latest labelled session. Groups are clinic data, so
@@ -72,13 +72,16 @@ const deleteGroup = catchAsync(async (req, res) => {
 })
 
 // ── POST /api/ml/groups/:groupId/train ────────────────────────────────────────────
+// Starts training in the background on ml_service: 202 straight away, 409 if the group
+// is already training. Progress is on the group (train_status etc.), which GET /groups
+// returns, so the page polls that rather than holding this request open for minutes.
 const trainGroup = catchAsync(async (req, res) => {
     const groupId = groupIdParam(req)
     if (!(await mlGroupModel.findById(groupId, req.dbClient)))
         throw new NotFoundError('Group not found.')
     const predict = req.body?.predict !== false
     return send(res, await mlFetch(`/phase1/groups/${groupId}/train`, {
-        method: 'POST', body: { predict }, timeoutMs: TRAIN_TIMEOUT_MS,
+        method: 'POST', body: { predict },
     }))
 })
 
@@ -98,7 +101,7 @@ const compareClient = catchAsync(async (req, res) => {
         throw new BadRequestError('The client belongs to a different clinic from the group.')
     return send(res, await mlFetch(
         `/phase1/groups/${groupId}/fit?client_id=${encodeURIComponent(clientId)}`,
-        { timeoutMs: TRAIN_TIMEOUT_MS }))
+        { timeoutMs: COMPARE_TIMEOUT_MS }))
 })
 
 export default { listGroups, createGroup, updateGroup, deleteGroup, trainGroup, compareClient }
