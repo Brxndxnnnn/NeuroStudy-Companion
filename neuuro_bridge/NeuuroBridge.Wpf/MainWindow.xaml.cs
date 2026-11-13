@@ -147,8 +147,75 @@ namespace NeuuroBridge.Wpf
             }
         }
 
+        private async void BtnImpedance_Click(object sender, RoutedEventArgs e)
+        {
+            BtnImpedance.IsEnabled = false;
+            BtnImpedance.Content = "Checking…";
+            TxtImpedance.Text = "Measuring electrode contact. Keep still for about 5 seconds.";
+            TxtImpedance.Foreground = (Brush)FindResource("Muted2");
+            try
+            {
+                var result = await _ctl.RunImpedanceCheckAsync();
+                ShowImpedanceSummary(result);
+            }
+            catch (Exception ex)
+            {
+                TxtImpedance.Text = "Impedance check failed: " + ex.Message;
+                TxtImpedance.Foreground = Bad;
+            }
+            finally
+            {
+                BtnImpedance.Content = "Check impedance";
+                BtnImpedance.IsEnabled = _ctl.IsConnected && !_ctl.SessionActive;
+            }
+        }
+
+        private void ShowImpedanceSummary(ImpedanceResult result)
+        {
+            var problems = _ctl.ImpedanceProblems();
+            if (result == null || !result.Detected)
+            {
+                TxtImpedance.Text = result?.Note ?? "No result.";
+                TxtImpedance.Foreground = Warn;
+            }
+            else if (problems == null || problems.Count == 0)
+            {
+                TxtImpedance.Text = $"All electrodes OK (checked {result.Utc.ToLocalTime():HH:mm}).";
+                TxtImpedance.Foreground = Good;
+            }
+            else
+            {
+                TxtImpedance.Text = "Needs attention: " + string.Join(", ", problems) +
+                                    ". Wipe the skin, wet the electrodes, reseat the band and check again.";
+                TxtImpedance.Foreground = Warn;
+            }
+        }
+
+        // Asks before recording when the electrodes were not checked or a check found a problem.
+        // Advisory, not a hard block: a known-dead electrode must not stop every session.
+        private bool ConfirmImpedanceBeforeStart()
+        {
+            var problems = _ctl.ImpedanceProblems();
+            string message;
+            if (problems == null)
+                message = "Electrode impedance hasn't been checked since the band connected.\n\n" +
+                          "Press No, then \"Check impedance\" (about 5 seconds), or Yes to start anyway.";
+            else if (_ctl.LastImpedance != null && !_ctl.LastImpedance.Detected)
+                message = "The last impedance check could not measure the electrodes:\n" + _ctl.LastImpedance.Note +
+                          "\n\nStart the session anyway?";
+            else if (problems.Count > 0)
+                message = "These electrodes may give a poor signal:\n  " + string.Join("\n  ", problems) +
+                          "\n\nWipe the skin, wet the electrodes and reseat the band, then check again." +
+                          "\n\nStart the session anyway?";
+            else
+                return true;
+            return MessageBox.Show(this, message, "Check electrode contact", MessageBoxButton.YesNo,
+                                   MessageBoxImage.Warning, MessageBoxResult.No) == MessageBoxResult.Yes;
+        }
+
         private void BtnStartSession_Click(object sender, RoutedEventArgs e)
         {
+            if (!ConfirmImpedanceBeforeStart()) return;
             BtnStartSession.IsEnabled = false;   // re-armed by RefreshSessionHint for the NEXT claimed session
             Log("Starting session…");
             _ctl.StartSession();
@@ -194,6 +261,8 @@ namespace NeuuroBridge.Wpf
         {
             SetConn("Connected", Good);
             Log($"Connected to {id} @ {addr}");
+            TxtImpedance.Text = "Fit the band, then press Check impedance.";
+            TxtImpedance.Foreground = (Brush)FindResource("Muted2");
             // Lock scanning/connecting while a device is held.
             BtnScan.IsEnabled = false;
             BtnConnect.IsEnabled = false;
@@ -521,15 +590,20 @@ namespace NeuuroBridge.Wpf
                 string lbl = BridgeController.ChannelLabels[ch];
                 string loc = ch < BridgeController.ChannelLocations.Length ? BridgeController.ChannelLocations[ch] : "";
                 bool? ok = s.Channels != null && ch < s.Channels.Length ? s.Channels[ch] : (bool?)null;
-                float k = s.Impedance != null && ch < s.Impedance.Length ? s.Impedance[ch] : float.NaN;
+                // Impedance comes from the last "Check impedance" run. The SDK's live figure is only
+                // the size of the EEG unless the test current is on, so it is not shown.
+                var imp = _ctl.LastImpedance;
+                float k = imp?.Kohm != null && ch < imp.Kohm.Length ? imp.Kohm[ch] : float.NaN;
                 // A flat-lined electrode is dead however cheerful the SDK's contact flag is —
                 // say so loudly, since this is the failure that reads as healthy.
                 bool flat = s.ChannelLive != null && ch < s.ChannelLive.Length && !s.ChannelLive[ch];
                 string contact = flat ? "FLAT" : ok == null ? "?" : ok.Value ? "OK" : "--";
-                rows.Add($"{lbl} · {loc}  —  contact={contact,-4}   {SignalQuality.FormatImpedance(k)}"
+                string impText = imp == null ? "impedance not checked" : SignalQuality.FormatImpedance(k);
+                rows.Add($"{lbl} · {loc}  —  contact={contact,-4}   {impText}"
                     + (flat ? "   ⚠ NO SIGNAL — reseat this electrode" : ""));
             }
             ChannelList.ItemsSource = rows;
+            BtnImpedance.IsEnabled = _ctl.IsConnected && !_ctl.SessionActive && !_ctl.ImpedanceCheckRunning;
 
             LivePanel.SetCognitive(s.Attention, s.Relaxation, s.MentalWorkload);
 

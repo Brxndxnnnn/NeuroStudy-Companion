@@ -14,16 +14,26 @@ namespace NeuuroBridge
     /// SDK kept reporting them as connected, so the panel showed "GOOD" over dead electrodes.
     /// A channel that isn't changing is not a channel, whatever the flag says.
     ///
-    /// Impedance is surfaced for the technician but is advisory: the SDK's impedance
-    /// scale/units are not documented and can't be verified without hardware, so it does not
-    /// (yet) drive the score. The thresholds in <see cref="GradeImpedance"/> are provisional
-    /// pending a bench check.
+    /// Impedance comes from the pre-session check (<see cref="ImpedanceCheck"/>), not from the
+    /// live stream, and does not drive the score. The thresholds in <see cref="GradeImpedance"/>
+    /// are provisional: Neeuro's acceptable range is not known.
     /// </summary>
     public static class SignalQuality
     {
-        // Provisional kΩ thresholds for a dry-electrode contact. Tune once verified on hardware.
-        private const float GoodKohm = 50f;
-        private const float FairKohm = 200f;
+        // Provisional kΩ thresholds. Overridable with the env keys IMPEDANCE_GOOD_KOHM and
+        // IMPEDANCE_FAIR_KOHM so they can be tuned on site without a new release.
+        public static readonly float GoodKohm = KohmFromEnv("IMPEDANCE_GOOD_KOHM", 50f);
+        public static readonly float FairKohm = KohmFromEnv("IMPEDANCE_FAIR_KOHM", 200f);
+
+        private static float KohmFromEnv(string key, float fallback)
+        {
+            try
+            {
+                return float.TryParse(EnvConfig.FindDotEnvValue(key)?.Trim(), System.Globalization.NumberStyles.Float,
+                                      System.Globalization.CultureInfo.InvariantCulture, out float v) && v > 0 ? v : fallback;
+            }
+            catch { return fallback; }
+        }
 
         /// <summary>
         /// 0–100 quality score. Higher is better contact / cleaner signal.
