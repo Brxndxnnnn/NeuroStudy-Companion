@@ -402,6 +402,27 @@ namespace NeuuroBridge
             });
         }
 
+        /// <summary>
+        /// Switches the band's lead-off detection between AC (true: injects the small test current
+        /// that <see cref="ImpedanceCheck"/> measures — it shows up in the EEG, so never while
+        /// recording) and DC (false: the normal mode). SDK commands FD 01 01 / FD 01 00.
+        /// </summary>
+        public void SetLeadOffMode(bool ac)
+        {
+            Post(() =>
+            {
+                if (!IsConnected) return;
+                try
+                {
+                    var sbwi = SenzeBandWindowsInterface.getSBWIHandler();
+                    if (ac) sbwi.sendACLeadoffCommand(_connectedAddress);
+                    else sbwi.sendDCLeadoffCommand(_connectedAddress);
+                    Log(ac ? "Impedance test current on (AC lead-off)." : "Impedance test current off (DC lead-off).");
+                }
+                catch (Exception ex) { Log("Lead-off mode change failed: " + ex.Message); }
+            });
+        }
+
         public void StopStream()
         {
             SenzeBandConnectInterface.getSBCIHandler().setEEG_Analyzing(false);

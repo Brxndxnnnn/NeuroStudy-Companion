@@ -13,7 +13,7 @@
     <Nullable>disable</Nullable>
     <!-- Single source of truth for the release version: packaging/pack.ps1 reads it
          and passes it to vpk; UpdateService shows it; bump it per release. -->
-    <Version>1.0.10</Version>
+    <Version>1.0.11</Version>
     <!-- Explicit Main (Program.cs) so VelopackApp.Build().Run() precedes WPF startup. -->
     <StartupObject>NeuuroBridge.Wpf.Program</StartupObject>
   </PropertyGroup>
