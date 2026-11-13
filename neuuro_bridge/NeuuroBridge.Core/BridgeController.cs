@@ -104,6 +104,13 @@ namespace NeuuroBridge
 
         private readonly object _stateLock = new object();
         private long _rawFrameCount;
+
+        // ── Pre-session impedance check (see RunImpedanceCheckAsync) ──
+        private readonly object _impLock = new object();
+        private List<float>[] _impSamples;          // non-null while a check is collecting raw µV
+        private int _impRunning;                    // 1 while a check runs (Interlocked)
+        private volatile bool _impModeUsed;         // the test current was switched on this connection
+        private volatile ImpedanceResult _lastImpedance;
         private bool _streaming;
         private bool _prepared;                 // unclaimed session row + pairing code exist (created on connect)
         private bool _recordingConfirmed;       // bridge_recording_at written for the active session (handshake ack)
@@ -235,6 +242,7 @@ namespace NeuuroBridge
         public event Action SyncStatusChanged;               // sessions.sync_status changed (unclaimed/claimed/completed)
         public event Action ProgressChanged;                 // web-side session progress advanced (see Progress)
         public event Action SessionStarted;                  // recording/upload began (Start pressed)
+        public event Action<ImpedanceResult> ImpedanceChecked;   // a pre-session impedance check finished
         public event Action SessionStopped;
         public event Action<RawEegFrame> RawFrame;           // every raw frame (for waveform charts)
         public event Action<BandPowers[]> FftBandPowers;     // ~1/s FFT result
@@ -349,6 +357,8 @@ namespace NeuuroBridge
                 _connAddress = addr; _connDeviceID = id;
                 lock (_devLock) { _devices.TryGetValue(id, out var d); _connDevice = d; }
                 _batteryWarnedAt = int.MaxValue;   // a new connection warns about its own battery afresh
+                _lastImpedance = null;             // a new fitting needs its own impedance check
+                _impModeUsed = false;
                 StartStallWatchdog();
                 Connected?.Invoke(addr, id);
                 // Ask Windows for a faster BLE interval before any streaming begins. The default
@@ -356,6 +366,9 @@ namespace NeuuroBridge
                 // and the vendor SDK amplifies each dropped notification into ~0.4 s of lost EEG.
                 // Best-effort and off-thread — see BleConnectionTuner.
                 _bleTuner.RequestThroughputAsync(addr, id);
+                // The band's 10-minute auto power-off starts counting at this connection; switch it
+                // off now (Neeuro's command, 10 Nov 2026). Best-effort and off-thread — see BandKeepAwake.
+                BandKeepAwake.SendAsync(m => Log?.Invoke(m), addr, id);
                 // Begin live preview immediately so the technician can fit the headset and watch the
                 // waveform BEFORE opening a DB session. Raw EEG unlocks once authentication completes;
                 // signal-quality/impedance flow even pre-auth. DB upload stays gated behind StartSession.
@@ -384,6 +397,8 @@ namespace NeuuroBridge
                 Log?.Invoke("[reconnect] link restored — resuming session");
                 // The old link's parameter request died with it; re-request against the new one.
                 _bleTuner.RequestThroughputAsync(addr, id);
+                // Not known whether the band keeps the auto power-off setting across a reconnect.
+                BandKeepAwake.SendAsync(m => Log?.Invoke(m), addr, id);
                 StartStreaming();
                 Reconnected?.Invoke();
             };
@@ -566,6 +581,8 @@ namespace NeuuroBridge
         /// </summary>
         public bool StartSession()
         {
+            // The impedance test current shows up in the EEG; make sure it is off before recording.
+            if (_impModeUsed) _svc.SetLeadOffMode(false);
             StartStreaming();                  // no-op if the live preview is already running
             if (!_prepared) PrepareSession();  // safety net: connect-time prepare didn't run
             RecordingStartUtc = DateTime.UtcNow;
@@ -579,6 +596,111 @@ namespace NeuuroBridge
             if (_db != null && _db.MarkRecording()) _recordingAnnounced = true;
             SessionStarted?.Invoke();
             return _db != null && _db.Streaming;
+        }
+
+        /// <summary>The last impedance check on this connection, or null when none has run.</summary>
+        public ImpedanceResult LastImpedance => _lastImpedance;
+        public bool ImpedanceCheckRunning => Volatile.Read(ref _impRunning) == 1;
+
+        private const int ImpedanceSettleMs = 1500;    // let the front end settle after switching modes
+        private const int ImpedanceTimeoutMs = 8000;   // give up if the EEG does not arrive
+
+        /// <summary>
+        /// Measures each electrode's impedance before a session: switches the band's test current
+        /// on (AC lead-off), records ~3 s of raw EEG, switches it off again and works out the
+        /// impedance from the test signal (see <see cref="ImpedanceCheck"/>). About 5 s. Only while
+        /// connected and not recording, because the test signal shows up in the EEG.
+        /// </summary>
+        public async Task<ImpedanceResult> RunImpedanceCheckAsync()
+        {
+            ImpedanceResult Fail(string note) => new ImpedanceResult
+            {
+                Kohm = Enumerable.Repeat(float.NaN, ChannelCount).ToArray(), Utc = DateTime.UtcNow, Note = note
+            };
+            if (!IsConnected) return Fail("Connect the band first.");
+            if (SessionActive || _draining) return Fail("Impedance can't be checked while recording.");
+            if (Interlocked.CompareExchange(ref _impRunning, 1, 0) != 0) return Fail("A check is already running.");
+            try
+            {
+                long framesBefore = Interlocked.Read(ref _rawFrameCount);
+                Log?.Invoke("[impedance] checking: test current on for about 4 s...");
+                _impModeUsed = true;
+                _svc.SetLeadOffMode(true);
+                try
+                {
+                    await Task.Delay(ImpedanceSettleMs).ConfigureAwait(false);
+                    lock (_impLock) _impSamples = Enumerable.Range(0, ChannelCount).Select(_ => new List<float>()).ToArray();
+                    var clock = System.Diagnostics.Stopwatch.StartNew();
+                    while (clock.ElapsedMilliseconds < ImpedanceTimeoutMs)
+                    {
+                        lock (_impLock)
+                            if (_impSamples.All(c => c.Count >= ImpedanceCheck.WindowSamples)) break;
+                        await Task.Delay(100).ConfigureAwait(false);
+                    }
+                }
+                finally
+                {
+                    _svc.SetLeadOffMode(false);
+                }
+
+                float[][] samples;
+                lock (_impLock) { samples = _impSamples.Select(c => c.ToArray()).ToArray(); _impSamples = null; }
+
+                var result = Interlocked.Read(ref _rawFrameCount) == framesBefore
+                    ? Fail("No raw EEG is arriving yet (it unlocks once the band is authenticated). Try again in a moment.")
+                    : ImpedanceCheck.Compute(samples, DateTime.UtcNow);
+                _lastImpedance = result;
+                LogImpedance(result);
+                ImpedanceChecked?.Invoke(result);
+                return result;
+            }
+            finally
+            {
+                lock (_impLock) _impSamples = null;
+                Interlocked.Exchange(ref _impRunning, 0);
+            }
+        }
+
+        private void CollectImpedanceSamples(int[] raw)
+        {
+            lock (_impLock)
+            {
+                if (_impSamples == null) return;
+                int spc = raw.Length / ChannelCount;
+                for (int ch = 0; ch < ChannelCount; ch++)
+                    for (int i = 0; i < spc; i++)
+                        _impSamples[ch].Add((float)(raw[ch * spc + i] * MicrovoltsPerCount));
+            }
+        }
+
+        private void LogImpedance(ImpedanceResult r)
+        {
+            if (!r.Detected)
+            {
+                Log?.Invoke("[impedance] " + r.Note);
+                return;
+            }
+            var parts = r.Kohm.Select((k, ch) => $"{ChannelLabels[ch]} {SignalQuality.FormatImpedance(k)}");
+            Log?.Invoke($"[impedance] test signal at {r.ExcitationHz:0.#} Hz: " + string.Join(", ", parts));
+        }
+
+        /// <summary>
+        /// Electrodes that need attention before recording, as "Fp1 (poor, 350 kΩ)", or an empty list
+        /// when all are good or fair. Null when no check has run on this connection.
+        /// </summary>
+        public List<string> ImpedanceProblems()
+        {
+            var r = _lastImpedance;
+            if (r == null) return null;
+            var problems = new List<string>();
+            for (int ch = 0; ch < ChannelCount; ch++)
+            {
+                float k = r.Kohm != null && ch < r.Kohm.Length ? r.Kohm[ch] : float.NaN;
+                string grade = SignalQuality.GradeImpedance(k);
+                if (grade == "poor") problems.Add($"{ChannelLabels[ch]} (poor, {k:F0} kΩ)");
+                else if (grade == "not measured") problems.Add($"{ChannelLabels[ch]} (not measured)");
+            }
+            return problems;
         }
 
         /// <summary>
@@ -964,6 +1086,7 @@ namespace NeuuroBridge
                     _lastRawInt = frame.IntSamples;
                     UpdateChannelLiveness(frame.IntSamples);
                 }
+                CollectImpedanceSamples(frame.IntSamples);
 
                 // Capture a local ref: StopSession may dispose _db on another thread mid-frame.
                 var db = _db;

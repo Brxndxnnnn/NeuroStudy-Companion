@@ -276,8 +276,10 @@ namespace NeuuroBridge
                 if (_impedance != null)
                 {
                     var parts = _impedance.Select((k, i) =>
-                        $"{(i < ChannelLabels.Length ? ChannelLabels[i] : "Ch" + i)}={k:F1}kΩ");
-                    Print("  Impedance: " + string.Join("  ", parts));
+                        $"{(i < ChannelLabels.Length ? ChannelLabels[i] : "Ch" + i)}={k / 1000:F1}kΩ");
+                    // The SDK reports ohms, worked out from the EEG's size: a real impedance only while
+                    // the band's test current is on (see ImpedanceCheck); otherwise just signal size.
+                    Print("  SDK impedance estimate (only valid in impedance-test mode): " + string.Join("  ", parts));
                 }
             }
         }
@@ -309,7 +311,8 @@ namespace NeuuroBridge
                     for (int ch = 0; ch < ChannelCount; ch++)
                     {
                         bool? ok = channels != null && ch < channels.Length ? channels[ch] : (bool?)null;
-                        float k = imp != null && ch < imp.Length ? imp[ch] : float.NaN;
+                        // SDK ohms -> kΩ; see the note on the status view above.
+                        float k = imp != null && ch < imp.Length ? imp[ch] / 1000f : float.NaN;
                         string contact = ok == null ? "?" : ok.Value ? "OK" : "--";
                         Print($"     {ChannelLabels[ch],-4} contact={contact,-2}  impedance={SignalQuality.FormatImpedance(k)}");
                     }
