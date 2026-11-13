@@ -356,6 +356,9 @@ namespace NeuuroBridge
                 // and the vendor SDK amplifies each dropped notification into ~0.4 s of lost EEG.
                 // Best-effort and off-thread — see BleConnectionTuner.
                 _bleTuner.RequestThroughputAsync(addr, id);
+                // The band's 10-minute auto power-off starts counting at this connection; switch it
+                // off now (Neeuro's command, 10 Nov 2026). Best-effort and off-thread — see BandKeepAwake.
+                BandKeepAwake.SendAsync(m => Log?.Invoke(m), addr, id);
                 // Begin live preview immediately so the technician can fit the headset and watch the
                 // waveform BEFORE opening a DB session. Raw EEG unlocks once authentication completes;
                 // signal-quality/impedance flow even pre-auth. DB upload stays gated behind StartSession.
@@ -384,6 +387,8 @@ namespace NeuuroBridge
                 Log?.Invoke("[reconnect] link restored — resuming session");
                 // The old link's parameter request died with it; re-request against the new one.
                 _bleTuner.RequestThroughputAsync(addr, id);
+                // Not known whether the band keeps the auto power-off setting across a reconnect.
+                BandKeepAwake.SendAsync(m => Log?.Invoke(m), addr, id);
                 StartStreaming();
                 Reconnected?.Invoke();
             };
