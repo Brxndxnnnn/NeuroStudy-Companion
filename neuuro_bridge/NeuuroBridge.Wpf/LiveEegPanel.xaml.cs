@@ -167,11 +167,12 @@ namespace NeuuroBridge.Wpf
         // reveal; FeedEegPending drains them at the true 250 Hz hardware rate every render frame,
         // so the chart shows a smooth, constant trickle instead of a jump-then-hold. If a queue
         // empties (a real gap — e.g. actual BLE packet loss, see docs/ARCHITECTURE.md §8), the
-        // trace correctly holds until more real data arrives; nothing is invented to fill it.
+        // trace holds its last value until more real data arrives, then a short dropout is drawn
+        // as a straight line (see MaxBridgedGapSamples).
         private readonly Queue<double>[] _eegPending = new Queue<double>[Channels];
         // False until the first real PushRaw arrives — before that, FeedEegPending must not run at
         // all, otherwise its real-time clock treats the whole "not connected yet" span as one giant
-        // gap and immediately paints the entire chart with a "GAP" marker before the SenzeBand has
+        // gap and immediately treats the whole chart as a dropout before the SenzeBand has
         // even paired. See PushRaw/Clear.
         private bool _eegHasData;
         // Wall-clock moment of the first-ever real EEG sample — session t=0 for the time axis shown
@@ -226,22 +227,40 @@ namespace NeuuroBridge.Wpf
         // ITP2 #5 — blink/clench quality-check markers. Colors reuse the existing chart Palette
         // (already validated readable on this dark theme) rather than introducing new ad-hoc ones.
         private static readonly SPColor BlinkLineColor = Palette[4];  // violet
-        private static readonly SPColor ClenchSpanColor = Palette[3]; // orange
+        private static readonly SPColor ClenchLineColor = Palette[3]; // orange
 
-        // ── "GAP" label over real BLE data-loss stretches ──────────────────────────────────────
-        // The line still breaks exactly as before (NaN in the streamer — see PooledScrollView);
-        // this only adds a labelled span over it so a technician reads it as "known event" rather
-        // than "app froze." Deliberately does NOT connect a line across the gap — see
-        // project_ble_packet_loss.md: interpolating through missing data risks masking a real
-        // anomaly (movement/contact loss) under a fabricated smooth trend. A gap shorter than
-        // GapLabelMinMs never gets a marker at all (still shows as a bare break) — real BLE loss
-        // runs hundreds of ms to seconds; anything shorter is more likely feed-pacing jitter than
-        // a genuine outage, and labelling every sub-frame blip would just be noise.
-        private static readonly SPColor GapSpanColor = new SPColor("#EF4444");
-        private const double GapLabelMinMs = 150.0;
-        private bool _eegGapOpen;
-        private DateTime _eegGapStartUtc;
-        private EegMarker _eegGapMarker;   // null until the open gap has persisted past GapLabelMinMs
+        // ── Dropouts (BLE data loss) ───────────────────────────────────────────────────────────
+        // A dropout of up to MaxBridgedGapSamples is drawn as a straight line from the last sample
+        // before it to the first sample after it, keeping its real duration on the time axis so the
+        // event / blink / clench markers stay on the right part of the trace. While a dropout is
+        // still in progress the live edge holds the last value, for up to the same limit. Longer
+        // than that the headband has effectively disconnected and the line breaks (NaN — see
+        // PooledScrollView). This is the usual approach for live wireless EEG (the OpenBCI GUI
+        // interpolates lost packets) and for live charts generally (Grafana's "connect null values
+        // below a threshold"). Display only: the stored EEG, the website and the PDF are untouched.
+        private const int MaxBridgedGapSamples = 500;   // 2 s @ 250 Hz
+        private readonly double[] _lastHp = NaNs(Channels);   // last high-passed sample written per channel
+        private readonly double[] _lastFed = NaNs(Channels);  // last value fed to each live streamer
+        private int _heldTicks;                               // consecutive live-edge ticks with no data
+
+        private static double[] NaNs(int n)
+        {
+            var a = new double[n];
+            for (int i = 0; i < n; i++) a[i] = double.NaN;
+            return a;
+        }
+
+        /// <summary>The <paramref name="count"/> samples standing in for a dropout between
+        /// <paramref name="from"/> and <paramref name="to"/>: a straight line if the dropout is short
+        /// enough to bridge and there is a sample before it, otherwise NaN (a break).</summary>
+        private static double[] GapFill(double from, double to, int count)
+        {
+            var fill = new double[count];
+            bool bridge = count <= MaxBridgedGapSamples && !double.IsNaN(from) && !double.IsNaN(to);
+            for (int k = 0; k < count; k++)
+                fill[k] = bridge ? from + (to - from) * (k + 1) / (count + 1) : double.NaN;
+            return fill;
+        }
 
         // Bands keep the slower EMA approach — one discrete sample at a time (~1 Hz), not a batch,
         // so the "window too short" failure mode above doesn't apply the same way.
@@ -776,18 +795,29 @@ namespace NeuuroBridge.Wpf
             _rawLastUtc = nowUtc;
             if (gapSamples > 0) foreach (var hp in _displayHighPass) hp.Reset();
 
+            // High-pass this frame first, so a short dropout before it can be drawn as a line to its
+            // first sample (see GapFill). After a gap the filter restarts at 0, the trace's baseline.
+            var fresh = new double[Channels][];
+            var gapFill = new double[Channels][];
+            for (int ch = 0; ch < Channels; ch++)
+            {
+                fresh[ch] = new double[spc];
+                for (int i = 0; i < spc; i++) fresh[ch][i] = _displayHighPass[ch].Process(frame[ch * spc + i]);
+                gapFill[ch] = GapFill(_lastHp[ch], fresh[ch][0], gapSamples);
+                _lastHp[ch] = fresh[ch][spc - 1];
+            }
+
             lock (_lock)
             {
                 for (int g = 0; g < gapSamples; g++)
                 {
-                    for (int ch = 0; ch < Channels; ch++) _rawFull[ch][_rawFullHead] = double.NaN;
+                    for (int ch = 0; ch < Channels; ch++) _rawFull[ch][_rawFullHead] = gapFill[ch][g];
                     _rawFullHead = (_rawFullHead + 1) % RawFullCapacity;
                     if (_rawFullCount < RawFullCapacity) _rawFullCount++;
                 }
                 for (int i = 0; i < spc; i++)
                 {
-                    for (int ch = 0; ch < Channels; ch++)
-                        _rawFull[ch][_rawFullHead] = _displayHighPass[ch].Process(frame[ch * spc + i]);
+                    for (int ch = 0; ch < Channels; ch++) _rawFull[ch][_rawFullHead] = fresh[ch][i];
                     _rawFullHead = (_rawFullHead + 1) % RawFullCapacity;
                     if (_rawFullCount < RawFullCapacity) _rawFullCount++;
                 }
@@ -803,12 +833,8 @@ namespace NeuuroBridge.Wpf
                 RecalibrateEegGain(ch);
                 double mean = _eegBaseMean[ch], range = _eegBaseRange[ch];
                 var q = _eegPending[ch];
-                for (int g = 0; g < gapSamples; g++) q.Enqueue(double.NaN);
-                // The high-passed values were just written to the ring — read them back from there.
-                double[] fresh;
-                lock (_lock) fresh = SliceFromRing(_rawFull[ch], _rawFullHead, _rawFullCount, spc, 0);
-                foreach (var v in fresh)
-                    q.Enqueue(Normalize(v, mean, range));
+                foreach (var v in gapFill[ch]) q.Enqueue(Normalize(v, mean, range));
+                foreach (var v in fresh[ch]) q.Enqueue(Normalize(v, mean, range));
                 // CompositionTarget.Rendering (and so FeedEegPending) pauses while the window is
                 // minimised, but PushRaw keeps arriving — bound growth instead of buffering an
                 // unminimise-and-dump backlog. Dropping the OLDEST queued samples is fine: they were
@@ -825,10 +851,9 @@ namespace NeuuroBridge.Wpf
         ///
         /// Critically, the real-time clock below keeps advancing the streamer regardless of whether
         /// real data is available: every owed 250 Hz slot gets filled, either with a real dequeued
-        /// sample or — if a genuine BLE gap has left the queue empty — with NaN (see AddEegSample /
-        /// PooledScrollView). That keeps the chart's timeline scrolling through an outage instead of
-        /// visibly freezing, while PooledScrollView draws an honest break in the line at the NaN
-        /// points rather than smoothing over or inventing what the missing samples might have been.</summary>
+        /// sample or — if a dropout has left the queue empty — with the last value held (for up to
+        /// MaxBridgedGapSamples, then NaN, which PooledScrollView draws as a break). That keeps the
+        /// chart's timeline scrolling through an outage instead of visibly freezing.</summary>
         private void FeedEegPending()
         {
             if (!_eegTrack.Live || !_eegHasData) return;
@@ -860,65 +885,21 @@ namespace NeuuroBridge.Wpf
             // are independent either way, so this reorder changes nothing about what each streamer
             // receives. The double.NaN fallback below only fires if the queue is unexpectedly empty
             // (display pacing briefly outran arrival) — a safety net, not the primary gap signal.
-            DateTime frameNowUtc = DateTime.UtcNow;
             for (int i = 0; i < samples; i++)
             {
-                bool isGapTick = false;
+                // No data yet for this tick (a dropout still in progress): hold the last value so
+                // the line stays joined, up to the same limit as a bridged gap; past it, break.
+                bool waiting = _eegPending[0].Count == 0;
+                _heldTicks = waiting ? _heldTicks + 1 : 0;
+                bool hold = _heldTicks <= MaxBridgedGapSamples;
                 for (int ch = 0; ch < Channels; ch++)
                 {
                     var q = _eegPending[ch];
-                    double v = q.Count > 0 ? q.Dequeue() : double.NaN;
-                    if (ch == 0 && double.IsNaN(v)) isGapTick = true;
+                    double v = q.Count > 0 ? q.Dequeue() : (hold ? _lastFed[ch] : double.NaN);
+                    if (!double.IsNaN(v)) _lastFed[ch] = v;
                     AddEegSample(ch, v);
                 }
-                UpdateGapTracking(isGapTick, frameNowUtc);
             }
-        }
-
-        /// <summary>Opens/grows/closes the current live-edge "GAP" marker as real gap ticks are fed.
-        /// See the GapLabelMinMs field comment for why a marker isn't created immediately.</summary>
-        private void UpdateGapTracking(bool isGapTick, DateTime nowUtc)
-        {
-            if (isGapTick)
-            {
-                if (!_eegGapOpen) { _eegGapOpen = true; _eegGapStartUtc = nowUtc; }
-                else if (_eegGapMarker == null && (nowUtc - _eegGapStartUtc).TotalMilliseconds >= GapLabelMinMs)
-                {
-                    _eegGapMarker = CreateGapMarker(_eegGapStartUtc);
-                    _eegMarkers.Add(_eegGapMarker);
-                }
-                if (_eegGapMarker != null) _eegGapMarker.EffectiveEndUtc = nowUtc;
-            }
-            else if (_eegGapOpen)
-            {
-                _eegGapOpen = false;
-                _eegGapMarker = null;   // finalized — UpdateEegMarkers keeps positioning/pruning it like any other marker
-            }
-        }
-
-        private EegMarker CreateGapMarker(DateTime startUtc)
-        {
-            var marker = new EegMarker
-            {
-                ShownAtUtc = startUtc,
-                EffectiveEndUtc = startUtc,
-                IsPhase = true,
-                Items = new IPlottable[Channels],
-            };
-            for (int i = 0; i < Channels; i++)
-            {
-                var plt = _eegPlots[i].Plot;
-                var span = plt.Add.HorizontalSpan(0, 0, GapSpanColor.WithAlpha(0.15));
-                span.LineColor = ScottPlot.Colors.Transparent;
-#pragma warning disable CS0618
-                span.Label.Text = "GAP";
-                span.Label.ForeColor = GapSpanColor;
-                span.Label.FontSize = 9;
-                span.Label.Bold = true;
-#pragma warning restore CS0618
-                marker.Items[i] = span;
-            }
-            return marker;
         }
 
         /// <summary>ITP2 #5 — eye-blink marker: a dashed vertical line on the Fp1/Fp2 lanes only
@@ -926,7 +907,23 @@ namespace NeuuroBridge.Wpf
         /// rather than a window. Items[2]/Items[3] (T4/T3) are left null — UpdateEegMarkers/
         /// RebuildEegWindow/Clear all null-check before touching a lane's item, since this is the
         /// first marker type that doesn't populate all 4 lanes.</summary>
-        private EegMarker CreateBlinkMarker(DateTime shownAtUtc)
+        private EegMarker CreateBlinkMarker(DateTime shownAtUtc) =>
+            CreateArtefactMarker(shownAtUtc, firstLane: 0, BlinkLineColor, "Blink");   // Fp1, Fp2
+
+        /// <summary>ITP2 #5 — teeth-clench marker: same shape as the blink marker (a dashed
+        /// vertical line at the detected onset, named at the top) on the T4/T3 lanes only
+        /// (indices 2/3). Items[0]/Items[1] (Fp1/Fp2) left null.</summary>
+        private EegMarker CreateClenchMarker(DateTime shownAtUtc) =>
+            CreateArtefactMarker(shownAtUtc, firstLane: 2, ClenchLineColor, "Clench"); // T4, T3
+
+        /// <summary>A dashed vertical line across two adjacent lanes, with <paramref name="text"/>
+        /// printed at the top of the upper lane, just right of the line.
+        ///
+        /// ScottPlot draws an axis line's label OUTSIDE the data area by default (below it, or above
+        /// it with LabelOppositeAxis). These lanes are frameless, so there is no room there and the
+        /// label was clipped. With LabelOppositeAxis the anchor is the data area's top edge; aligning
+        /// the label UpperLeft from that anchor hangs it down into the plot instead.</summary>
+        private EegMarker CreateArtefactMarker(DateTime shownAtUtc, int firstLane, SPColor color, string text)
         {
             var marker = new EegMarker
             {
@@ -935,47 +932,31 @@ namespace NeuuroBridge.Wpf
                 IsPhase = false,
                 Items = new IPlottable[Channels],
             };
-            for (int i = 0; i <= 1; i++) // Fp1, Fp2
+            for (int i = firstLane; i <= firstLane + 1; i++)
             {
-                var plt = _eegPlots[i].Plot;
-                var line = plt.Add.VerticalLine(0, 1, BlinkLineColor.WithAlpha(0.6), LinePattern.Dashed);
-                line.LabelStyle.Text = "Blink";
-                line.LabelStyle.ForeColor = BlinkLineColor;
-                line.LabelStyle.FontSize = 9;
-                line.LabelStyle.Bold = false;
+                var line = _eegPlots[i].Plot.Add.VerticalLine(0, 1.5f, color.WithAlpha(0.85), LinePattern.Dashed);
+                SetTopLabel(line, i == firstLane ? text : null, color, bold: true);   // label once, at the top of the pair
                 marker.Items[i] = line;
             }
             return marker;
         }
 
-        /// <summary>ITP2 #5 — teeth-clench marker: a short labelled span on the T4/T3 lanes only
-        /// (indices 2/3). Given a brief nominal duration (ClenchMarkerDurationMs) rather than a
-        /// point, since a jaw contraction has some real duration even though only its onset is
-        /// detected (see BridgeController.DetectClench). Items[0]/Items[1] (Fp1/Fp2) left null.</summary>
-        private const double ClenchMarkerDurationMs = 400.0;
-        private EegMarker CreateClenchMarker(DateTime shownAtUtc)
+        /// <summary>Prints <paramref name="text"/> at the top of the lane, just right of the line, or
+        /// no label when it's null. ScottPlot draws an axis line's label OUTSIDE the data area by
+        /// default (below it, or above it with LabelOppositeAxis); these lanes are frameless, so
+        /// there is no room there and the label was clipped. With LabelOppositeAxis the anchor is
+        /// the data area's top edge, and aligning UpperLeft from it hangs the label into the plot.</summary>
+        private static void SetTopLabel(VerticalLine line, string text, SPColor color, bool bold)
         {
-            var marker = new EegMarker
-            {
-                ShownAtUtc = shownAtUtc,
-                EffectiveEndUtc = shownAtUtc.AddMilliseconds(ClenchMarkerDurationMs),
-                IsPhase = true,
-                Items = new IPlottable[Channels],
-            };
-            for (int i = 2; i <= 3; i++) // T4, T3
-            {
-                var plt = _eegPlots[i].Plot;
-                var span = plt.Add.HorizontalSpan(0, 0, ClenchSpanColor.WithAlpha(0.18));
-                span.LineColor = ScottPlot.Colors.Transparent;
-#pragma warning disable CS0618
-                span.Label.Text = "Clench";
-                span.Label.ForeColor = ClenchSpanColor;
-                span.Label.FontSize = 9;
-                span.Label.Bold = true;
-#pragma warning restore CS0618
-                marker.Items[i] = span;
-            }
-            return marker;
+            line.LabelStyle.Text = text ?? string.Empty;
+            if (text == null) return;
+            line.LabelStyle.ForeColor = color;
+            line.LabelStyle.BackgroundColor = new SPColor("#0B121C").WithAlpha(0.75); // PlotBg: readable over traces
+            line.LabelStyle.FontSize = 10;
+            line.LabelStyle.Bold = bold;
+            line.LabelStyle.PixelPadding = new PixelPadding(3, 3, 1, 1);
+            line.LabelOppositeAxis = true;
+            line.ManualLabelAlignment = Alignment.UpperLeft;
         }
 
         /// <summary>ITP2 #5 — live-chart-only annotation (not persisted to the DB) for a detected
@@ -1109,10 +1090,8 @@ namespace NeuuroBridge.Wpf
                     else
                     {
                         var line = plt.Add.VerticalLine(0, 1, MarkerLineColor.WithAlpha(0.6), LinePattern.Dashed);
-                        line.LabelStyle.Text = e.Label;
-                        line.LabelStyle.ForeColor = MarkerLineColor;
-                        line.LabelStyle.FontSize = 9;
-                        line.LabelStyle.Bold = false;
+                        // Name the image once, at the top of the first lane (Fp1).
+                        SetTopLabel(line, i == 0 ? e.Label : null, MarkerLineColor, bold: false);
                         marker.Items[i] = line;
                     }
                 }
@@ -1299,8 +1278,8 @@ namespace NeuuroBridge.Wpf
                 for (int i = 0; i < Channels; i++)
                     if (mk.Items[i] != null) _eegPlots[i].Plot.Remove(mk.Items[i]);
             _eegMarkers.Clear();
-            _eegGapOpen = false;
-            _eegGapMarker = null;
+            for (int ch = 0; ch < Channels; ch++) { _lastHp[ch] = double.NaN; _lastFed[ch] = double.NaN; }
+            _heldTicks = 0;
             for (int ch = 0; ch < Channels; ch++)
             {
                 foreach (var seg in _eegHistSegments[ch]) _eegPlots[ch].Plot.Remove(seg);
@@ -1534,7 +1513,7 @@ namespace NeuuroBridge.Wpf
                 SetEegHistVisible(live: false);
             }
 
-            // Markers (session events + GAP spans) are only ever repositioned while live (see
+            // Markers (session events, blinks, clenches) are only ever repositioned while live (see
             // UpdateEegMarkers) — their pixel positions are frozen the instant scrubbing starts, but
             // the axis coordinate space they were drawn in is reused for the historical Signal view
             // too, so a left-in-place marker would visually overlap whatever real data is now shown

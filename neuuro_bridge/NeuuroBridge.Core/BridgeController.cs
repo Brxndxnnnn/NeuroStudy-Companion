@@ -72,12 +72,9 @@ namespace NeuuroBridge
         public event Action<DateTime> BlinkDetected;
         public event Action<DateTime> ClenchDetected;
 
-        // Blink: fixed peak-amplitude threshold on the filtered Fp1/Fp2 signal. Blink amplitude
-        // is a fairly device-independent physiological phenomenon (unlike EMG below) — a flat µV
-        // cutoff is standard practice in EEG artifact-rejection literature.
-        private const double BlinkThresholdUv = 100.0;
-        private const int BlinkCooldownMs = 400; // one real blink can span several frames; collapse to one marker
-        private DateTime _lastBlinkUtc = DateTime.MinValue;
+        // Blink: band-passed Fp1/Fp2 swing over a sliding 0.5 s window, against each channel's own
+        // running background — see BlinkDetector for why a fixed µV threshold didn't work here.
+        private readonly BlinkDetector _blinkDetector = new BlinkDetector(CaptureSampleRateHz);
 
         // Clench: adaptive threshold on T3/T4's existing Gamma-band power (EegProcessor already
         // computes this, 30-45Hz — squarely the EMG range), not a fixed number. Muscle-tension
@@ -1104,7 +1101,7 @@ namespace NeuuroBridge
                 _processor.AddFilteredFrame(filtered);
                 UploadFilteredFrame(filtered, frame.ArrivalUtc, frame.Packages);
                 if (_capturing) lock (_captureLock) _capFilt.Add((DateTime.UtcNow, filtered));
-                DetectBlink(filtered);
+                DetectBlink(filtered, frame.ArrivalUtc);
             }
 
             // Combined CSV capture: record raw ADC + raw µV for this frame, tagged with the
@@ -1136,37 +1133,15 @@ namespace NeuuroBridge
             return filtered;
         }
 
-        /// <summary>ITP2 #5 — flags a transient eye-blink artifact when either frontal channel's
-        /// filtered signal peaks above BlinkThresholdUv within this frame. Checked on every raw
-        /// frame (same cadence as ApplyLowPass), cooldown-gated so one real blink — which can
-        /// span several consecutive frames while amplitude stays elevated — produces one marker,
-        /// not a flooded cluster.</summary>
-        private void DetectBlink(float[] filtered)
+        /// <summary>ITP2 #5 — feeds each filtered frame to <see cref="BlinkDetector"/> and raises
+        /// BlinkDetected at the blink's peak. Skipped while an impedance check runs: its injected
+        /// test current swings every electrode far more than a blink, and would also teach the
+        /// detector a background level that has nothing to do with the EEG.</summary>
+        private void DetectBlink(float[] filtered, DateTime frameEndUtc)
         {
-            int spc = filtered.Length / ChannelCount;
-            if (spc == 0) return;
-            float peak = 0;
-            for (int ch = 0; ch <= 1; ch++) // Fp1, Fp2 — frontal channels only
-            {
-                int baseIdx = ch * spc;
-                // Measure the deflection from this frame's own baseline, not from zero. The filtered
-                // stream is a low-pass of the raw signal and keeps the electrode's DC offset, so an
-                // absolute threshold fired on the offset rather than on blinks.
-                double mean = 0;
-                for (int i = 0; i < spc; i++) mean += filtered[baseIdx + i];
-                mean /= spc;
-                for (int i = 0; i < spc; i++)
-                {
-                    float abs = (float)Math.Abs(filtered[baseIdx + i] - mean);
-                    if (abs > peak) peak = abs;
-                }
-            }
-            if (peak < BlinkThresholdUv) return;
-
-            DateTime now = DateTime.UtcNow;
-            if ((now - _lastBlinkUtc).TotalMilliseconds < BlinkCooldownMs) return;
-            _lastBlinkUtc = now;
-            BlinkDetected?.Invoke(now);
+            if (Volatile.Read(ref _impSamples) != null) { _blinkDetector.ResetSignal(); return; }
+            DateTime? at = _blinkDetector.Process(filtered, ChannelCount, frameEndUtc);
+            if (at.HasValue) BlinkDetected?.Invoke(at.Value);
         }
 
         /// <summary>ITP2 #5 — flags a teeth-clench/EMG artifact when either temporal channel's
