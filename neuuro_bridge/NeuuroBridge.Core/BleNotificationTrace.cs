@@ -101,23 +101,11 @@ namespace NeuuroBridge
         {
             try
             {
-                var services = await device.GetGattServicesAsync(BluetoothCacheMode.Cached);
-                if (services.Status != GattCommunicationStatus.Success)
+                foreach (var c in await BandGatt.FindAsync(device, DataCharacteristics, _log, "ble-trace"))
                 {
-                    _log($"[ble-trace] could not read the band's services ({services.Status}) — trace off.");
-                    return;
-                }
-                foreach (var service in services.Services)
-                {
-                    var chars = await service.GetCharacteristicsAsync(BluetoothCacheMode.Cached);
-                    if (chars.Status != GattCommunicationStatus.Success) continue;
-                    foreach (var c in chars.Characteristics)
-                    {
-                        if (!DataCharacteristics.Contains(c.Uuid)) continue;
-                        if ((c.CharacteristicProperties & GattCharacteristicProperties.Notify) == 0) continue;
-                        c.ValueChanged += OnValueChanged;
-                        lock (_gate) _subscribed.Add(c);
-                    }
+                    if ((c.CharacteristicProperties & GattCharacteristicProperties.Notify) == 0) continue;
+                    c.ValueChanged += OnValueChanged;
+                    lock (_gate) _subscribed.Add(c);
                 }
                 int count;
                 lock (_gate) count = _subscribed.Count;

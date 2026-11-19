@@ -26,7 +26,9 @@ namespace NeuuroBridge
     /// roughly 8x its own size. Across all 18 completed sessions the mean loss was 20%.
     ///
     /// Requesting ThroughputOptimized (7.5–15 ms) gives 66–133 notification slots per second
-    /// against the ~40 needed, which is comfortable headroom.
+    /// against the ~40 needed, which is comfortable headroom. In practice the band now connects at
+    /// 7.5 ms on its own and the request SLOWS it to 15 ms, so by default no request is made
+    /// (see ConnectionParametersFromEnv); this class still logs the link parameters.
     ///
     /// WHY IT OPENS ITS OWN HANDLE
     /// ---------------------------
@@ -62,13 +64,17 @@ namespace NeuuroBridge
             _sdkStats = sdkStats;
         }
 
-        // Which connection parameters to ask Windows for (env key BLE_CONNECTION_PARAMS):
-        // "throughput" (default), "balanced", "power", or "none" to leave whatever the band and
-        // Windows negotiate on their own. An experiment switch: on 21 Oct the band connected at
-        // 7.5 ms and the ThroughputOptimized request moved it to 15 ms, which halves its send slots.
+        // Which connection parameters to ask Windows for (env key BLE_CONNECTION_PARAMS): "none"
+        // (default) leaves whatever the band and Windows negotiate on their own; "throughput",
+        // "balanced" or "power" request that preset. The band connects at 7.5 ms by itself, and the
+        // ThroughputOptimized request moves it to 15 ms, halving its send slots. Tested on 19 Nov
+        // 2026 with the same band, PC and wearer, 6 min each: at 15 ms the SDK accepted 75% of
+        // packages with 82 buffer overruns and a 10 s EEG stall, and two earlier 15 ms runs that
+        // day stalled every 15-20 s (49-53% accepted); left at 7.5 ms it accepted 79% with 7
+        // overruns and no stalls. So no request is made unless one is configured.
         private static BluetoothLEPreferredConnectionParameters ConnectionParametersFromEnv(out string name)
         {
-            name = (EnvConfig.FindDotEnvValue("BLE_CONNECTION_PARAMS") ?? "throughput").Trim().ToLowerInvariant();
+            name = (EnvConfig.FindDotEnvValue("BLE_CONNECTION_PARAMS") ?? "none").Trim().ToLowerInvariant();
             switch (name)
             {
                 case "none":
@@ -79,9 +85,11 @@ namespace NeuuroBridge
                     return BluetoothLEPreferredConnectionParameters.Balanced;
                 case "power":
                     return BluetoothLEPreferredConnectionParameters.PowerOptimized;
-                default:
-                    name = "throughput";
+                case "throughput":
                     return BluetoothLEPreferredConnectionParameters.ThroughputOptimized;
+                default:
+                    name = "none";
+                    return null;
             }
         }
 
@@ -145,7 +153,7 @@ namespace NeuuroBridge
                 }
                 _log(request != null
                     ? $"[ble] requested {parametersName} connection parameters — held for the lifetime of this connection."
-                    : "[ble] BLE_CONNECTION_PARAMS=none — leaving the connection parameters to the band and Windows.");
+                    : "[ble] leaving the connection parameters to the band and Windows (BLE_CONNECTION_PARAMS=none).");
 
                 await OpenGattSession(device);
 
@@ -243,8 +251,8 @@ namespace NeuuroBridge
                 _log($"[ble] link parameters ({when}): interval {intervalMs:F2} ms, peripheral latency " +
                      $"{p.ConnectionLatency}, supervision timeout {p.LinkTimeout * 10} ms{phy}. " +
                      (intervalMs <= 15.0
-                         ? "Throughput-optimised interval is in effect."
-                         : "Still a slow interval — the band (or Windows) has not applied the faster one."));
+                         ? "Fast interval."
+                         : "Slow interval — fewer send slots than the band needs."));
             }
             catch (Exception ex)
             {

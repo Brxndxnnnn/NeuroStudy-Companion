@@ -63,7 +63,9 @@ namespace NeuuroBridge.Wpf
             _ctl.SyncStatusChanged += () => Ui(OnSyncStatusChanged);
             _ctl.SessionStarted += () => Ui(OnSessionStarted);
             _ctl.SessionStopped += () => Ui(OnSessionStopped);
-            _ctl.RawFrame += f => Ui(() => LivePanel.PushRaw(f.IntSamples));
+            // The waveform chart takes each 200 ms package as it arrives rather than the 1 s frames,
+            // which reach us up to 2 s after recording (see SenzeBandService.OnRawPackage).
+            _ctl.LivePackage += p => Ui(() => LivePanel.PushPackage(p.Samples, p.GapSamples, p.FirstSampleUtc));
             _ctl.FftBandPowers += p => Ui(() => LivePanel.PushBands(p));
             _ctl.SessionEvents += list => Ui(() => LivePanel.PushEvents(list));
             _ctl.BlinkDetected += ts => Ui(() => LivePanel.PushBlinkMarker(ts));
