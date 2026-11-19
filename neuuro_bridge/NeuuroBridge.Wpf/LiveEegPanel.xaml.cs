@@ -100,13 +100,14 @@ namespace NeuuroBridge.Wpf
         private readonly double[][] _rawFull = new double[Channels][];
         private int _rawFullHead, _rawFullCount;
         private readonly object _lock = new object();
-        // Real wall-clock arrival time of the last PushRaw call — lets PushRaw itself detect a real
-        // gap (elapsed time implies more samples than actually arrived) and write NaN placeholders
-        // straight into _rawFull, so the PERSISTED history is gap-aware too, not just the live edge.
-        // Without this, _rawFull only ever holds real samples packed back-to-back with no notion of
-        // elapsed time — exactly the pre-ScottPlot5 behaviour that silently time-compressed real BLE
-        // loss into an invisible smooth line (see the ITP1-era LiveEegPanel, commit a0ff01e).
-        private DateTime? _rawLastUtc;
+        // Each package arrives placed on BridgeController's steady 250 Hz sample clock (the one the
+        // blink/clench detector uses too, so markers land on their trace): its first sample's time
+        // and how many samples were lost before it. A dropout is written as a gap of its real length
+        // before the package, so the history is gap-aware rather than packing real samples
+        // back-to-back — the ITP1-era behaviour that silently time-compressed BLE loss (commit a0ff01e).
+        private DateTime _pkgFirstUtc;
+        // Time of the newest sample written to _rawFull (the end of the last package).
+        private DateTime? _rawLatestUtc;
 
         // _bandFull[source][band]; source 0..3 = Fp1/Fp2/T4/T3 (SourceLabels order).
         private readonly double[][][] _bandFull = new double[BandSources][][];
@@ -170,14 +171,30 @@ namespace NeuuroBridge.Wpf
         // trace holds its last value until more real data arrives, then a short dropout is drawn
         // as a straight line (see MaxBridgedGapSamples).
         private readonly Queue<double>[] _eegPending = new Queue<double>[Channels];
-        // False until the first real PushRaw arrives — before that, FeedEegPending must not run at
+        // Recording time (UTC ticks) of each sample in _eegPending (shared by all channels: they are
+        // queued and drained together), so the live edge knows exactly which moment it is drawing.
+        private readonly Queue<long> _eegPendingTicks = new Queue<long>();
+        // Recording time of the newest sample drawn at the live edge. Markers and the time axis are
+        // positioned against THIS rather than the wall clock, so they sit on the part of the trace
+        // they belong to whatever the display delay is.
+        private DateTime? _liveEdgeUtc;
+        // How far behind the newest arrived sample the live edge is kept, in samples. Packages land
+        // every ~200 ms with some jitter; a small buffer lets the trace move smoothly instead of
+        // stalling between packages. FeedEegPending speeds up or slows down slightly to hold the
+        // queue near this, so the delay can't build up (it used to grow to several seconds).
+        private const int LiveLeadSamples = 75;   // 0.3 s
+        // Live-edge ticks drawn as a held value while the queue was empty, since the last package.
+        // If that package then turns out to follow a dropout, this much of the dropout has already
+        // been drawn and is not queued again (it was, which added the whole dropout to the delay).
+        private int _heldSinceData;
+        // False until the first real PushPackage arrives — before that, FeedEegPending must not run at
         // all, otherwise its real-time clock treats the whole "not connected yet" span as one giant
         // gap and immediately treats the whole chart as a dropout before the SenzeBand has
-        // even paired. See PushRaw/Clear.
+        // even paired. See PushPackage/Clear.
         private bool _eegHasData;
         // Wall-clock moment of the first-ever real EEG sample — session t=0 for the time axis shown
         // on all three chart tabs (EEG Waves / Frequency Bands / Mental States), not just this one.
-        // Distinct from _rawLastUtc, which moves every call; this one is fixed for the whole session.
+        // Unlike _liveEdgeUtc, this one is fixed for the whole session.
         private DateTime? _sessionStartUtc;
         private int _eegFeedTicks;
         private double _eegFeedRemainder;   // fractional samples owed, carried across ticks to avoid drift
@@ -192,8 +209,12 @@ namespace NeuuroBridge.Wpf
         private readonly HighPassFilter[] _displayHighPass = new HighPassFilter[Channels];
 
         // EEG lane scale: 0 = auto-gain to the visible window; otherwise each lane is pinned to
-        // ±that many µV (same choices as the web chart), so channels can be compared by eye.
-        private static readonly double[] EegScalesUv = { 0, 5, 10, 25, 50, 100 };
+        // ±that many µV, so channels can be compared by eye. These are real µV: the live chart is
+        // fed the SDK's per-package samples, which are already µV. (The 1 s frames the bridge
+        // stores are whole µV too, but have always been treated as ADC counts and multiplied by
+        // 0.02235 again, so stored data and the website's ±5..±100 µV choices read ~45x small.
+        // Tracked separately; nothing stored is changed here.)
+        private static readonly double[] EegScalesUv = { 0, 50, 100, 200, 500 };
         private double _eegFixedHalfUv;
         private Button[] _eegScaleButtons;
 
@@ -217,9 +238,10 @@ namespace NeuuroBridge.Wpf
             public DateTime ShownAtUtc;
             public DateTime EffectiveEndUtc;   // = ShownAtUtc for point events (images/questions)
             public bool IsPhase;
-            public IPlottable[] Items;         // one slot per EEG lane plot; null for a lane this
-                                                // marker doesn't apply to (e.g. blink only populates
-                                                // Fp1/Fp2) — every consumer below must null-check
+            public string Artefact;            // "Blink"/"Clench" for quality-check markers, else null
+            public IPlottable[] Items;         // one slot per EEG lane plot; may be null for a lane
+                                                // a marker doesn't apply to — every consumer below
+                                                // must null-check
         }
         private readonly List<EegMarker> _eegMarkers = new List<EegMarker>();
         private static readonly SPColor MarkerLineColor = new SPColor("#F59E0B");
@@ -308,6 +330,7 @@ namespace NeuuroBridge.Wpf
             SetupPlots();
             BuildChannelSelector();
             BuildEegScaleSelector();
+            BuildArtefactToggles();
 
             HookScrub(_eegPlots, _eegTrack, RawWindow, RebuildEegWindow);
             HookScrub(_bandPlots, _bandTrack, Hist, RebuildBandWindow);
@@ -353,7 +376,6 @@ namespace NeuuroBridge.Wpf
                 }
                 UpdateEegMarkers();
                 UpdateScaleBars();
-                UpdateTimeAxis(_eegPlots, _eegTrack, RawWindow);
                 // Data is fed into the streamers at the true 250 Hz hardware rate every frame (see
                 // FeedEegPending) so the underlying trace is exactly as smooth/accurate as before —
                 // but that means HasNewData is true on essentially every single composition frame,
@@ -402,6 +424,13 @@ namespace NeuuroBridge.Wpf
         {
             (_eegPlots, _eegStream, _eegHistSig, _eegHistBuf, _eegAxisLimits) =
                 CreateLanePlots(EegPlotHost, Channels, RawWindow, ChNames, wipe: EegWipeMode);
+            // No time axis on the EEG lanes: its labels and the vertical gridlines drawn at them
+            // slid along with the trace every frame. Markers are still placed by time internally.
+            foreach (var p in _eegPlots)
+            {
+                p.Plot.Axes.Bottom.IsVisible = false;
+                p.Plot.Axes.Bottom.SetTicks(Array.Empty<double>(), Array.Empty<string>());
+            }
             (_bandPlots, _bandStream, _bandHistSig, _bandHistBuf, _bandAxisLimits) =
                 CreateLanePlots(BandPlotHost, Bands, Hist, BandNames, wipe: false);
 
@@ -761,48 +790,46 @@ namespace NeuuroBridge.Wpf
         }
 
         // ── Data in ──────────────────────────────────────────────────────────
-        public void PushRaw(int[] frame)
+        /// <summary>Takes one live package from the SDK (µV, block layout 4 x N, frame order
+        /// Fp1, Fp2, T4, T3) recorded up to <paramref name="endUtc"/>.</summary>
+        public void PushPackage(float[] samplesUv, int gapSamples, DateTime firstSampleUtc)
         {
-            if (frame == null || frame.Length < Channels) return;
-            int spc = frame.Length / Channels;
-            DateTime nowUtc = DateTime.UtcNow;
+            if (samplesUv == null || samplesUv.Length < Channels) return;
+            int spc = samplesUv.Length / Channels;
 
-            // How many samples SHOULD have arrived since the last call, given real elapsed wall-clock
-            // time at the true 250 Hz hardware rate — if that's more than what this frame actually
-            // delivered, the shortfall is a real gap (BLE loss between bursts), and gets written as
-            // NaN placeholders BEFORE this frame's real samples, in both _rawFull (permanent history)
-            // and _eegPending (live edge) — the single source of truth both views now share. Capped
-            // to RawWindow so one very long pause (device disconnect, app minimised) can't wipe out
-            // ~30 min of real ring-buffer history with placeholder padding.
-            int gapSamples = 0;
+            // A dropout shows up as the sample clock running ahead of what has arrived: everything
+            // missing beyond the jitter tolerance is written as gap samples BEFORE this package, in
+            // both _rawFull (permanent history) and _eegPending (live edge) — the single source of
+            // truth both views share. Capped to RawWindow so one very long pause (device
+            // disconnect) can't wipe out ~30 min of real history with placeholder padding.
+            // Sample times come from the steady sample clock, not from when each package happened
+            // to arrive: arrival jitters by tens of ms, and stamping by it made the live edge's
+            // time (and with it every marker) jump at each package while the trace moved evenly.
+            _pkgFirstUtc = firstSampleUtc;
+            gapSamples = Math.Min(gapSamples, RawWindow);
             if (!_eegHasData)
             {
-                // First real sample of the session (or since the last Clear) — start the pacing
-                // clock fresh from right now, so FeedEegPending's next tick doesn't see a huge
-                // "owed" backlog spanning all the idle time before the device connected, and no gap
-                // is fabricated for that idle span either.
+                // First real sample of the session (or since the last Clear): nothing to gap from.
+                gapSamples = 0;
                 _eegHasData = true;
-                _sessionStartUtc = nowUtc;
+                _sessionStartUtc = firstSampleUtc.AddMilliseconds(-EegSampleIntervalMs);
+                _liveEdgeUtc = _sessionStartUtc;
+                _heldSinceData = 0;
                 _eegFeedTicks = Environment.TickCount;
                 _eegFeedRemainder = 0;
             }
-            else if (_rawLastUtc.HasValue)
-            {
-                double elapsedMs = (nowUtc - _rawLastUtc.Value).TotalMilliseconds;
-                int expected = (int)Math.Round(elapsedMs / EegSampleIntervalMs);
-                gapSamples = Math.Max(0, Math.Min(expected - spc, RawWindow));
-            }
-            _rawLastUtc = nowUtc;
+            _rawLatestUtc = SampleTimeUtc(gapSamples + spc - 1, gapSamples);
             if (gapSamples > 0) foreach (var hp in _displayHighPass) hp.Reset();
 
-            // High-pass this frame first, so a short dropout before it can be drawn as a line to its
-            // first sample (see GapFill). After a gap the filter restarts at 0, the trace's baseline.
+            // High-pass this package first, so a short dropout before it can be drawn as a line to
+            // its first sample (see GapFill). After a gap the filter restarts at 0, the trace's baseline.
             var fresh = new double[Channels][];
             var gapFill = new double[Channels][];
             for (int ch = 0; ch < Channels; ch++)
             {
                 fresh[ch] = new double[spc];
-                for (int i = 0; i < spc; i++) fresh[ch][i] = _displayHighPass[ch].Process(frame[ch * spc + i]);
+                for (int i = 0; i < spc; i++)
+                    fresh[ch][i] = _displayHighPass[ch].Process(samplesUv[ch * spc + i] / MicrovoltsPerCount);
                 gapFill[ch] = GapFill(_lastHp[ch], fresh[ch][0], gapSamples);
                 _lastHp[ch] = fresh[ch][spc - 1];
             }
@@ -823,28 +850,49 @@ namespace NeuuroBridge.Wpf
                 }
             }
 
+            int held = _heldSinceData;
+            _heldSinceData = 0;
             if (!_eegTrack.Live) return;
 
             // Stage into the pending queues rather than pushing straight to the streamer —
-            // FeedEegPending drains these at the true hardware rate so a whole ~200ms burst
-            // doesn't appear as one instantaneous jump. See the field comment on _eegPending.
+            // FeedEegPending drains these at the hardware rate so a whole 200 ms package doesn't
+            // appear as one instantaneous jump. See the field comment on _eegPending. The part of
+            // a dropout the live edge already drew as a held value is skipped here.
+            int skip = Math.Min(held, gapSamples);
+            for (int k = skip; k < gapSamples + spc; k++)
+                _eegPendingTicks.Enqueue(SampleTimeUtc(k, gapSamples).Ticks);
             for (int ch = 0; ch < Channels; ch++)
             {
                 RecalibrateEegGain(ch);
                 double mean = _eegBaseMean[ch], range = _eegBaseRange[ch];
                 var q = _eegPending[ch];
-                foreach (var v in gapFill[ch]) q.Enqueue(Normalize(v, mean, range));
+                for (int g = skip; g < gapSamples; g++) q.Enqueue(Normalize(gapFill[ch][g], mean, range));
                 foreach (var v in fresh[ch]) q.Enqueue(Normalize(v, mean, range));
-                // CompositionTarget.Rendering (and so FeedEegPending) pauses while the window is
-                // minimised, but PushRaw keeps arriving — bound growth instead of buffering an
-                // unminimise-and-dump backlog. Dropping the OLDEST queued samples is fine: they were
-                // already written to _rawFull and are still fully available there for scrub/history.
-                while (q.Count > RawWindow) q.Dequeue();
             }
+            // CompositionTarget.Rendering (and so FeedEegPending) pauses while the window is
+            // minimised, but packages keep arriving — bound growth instead of buffering an
+            // unminimise-and-dump backlog. Dropping the OLDEST queued samples is fine: they were
+            // already written to _rawFull and are still fully available there for scrub/history.
+            while (_eegPending[0].Count > RawWindow) DequeuePending();
+        }
+
+        /// <summary>Recording time of slot <paramref name="k"/> of the package just pushed, counting
+        /// its <paramref name="gapSamples"/> gap slots first (so k = gapSamples is its first sample).</summary>
+        private DateTime SampleTimeUtc(int k, int gapSamples) =>
+            _pkgFirstUtc.AddTicks((long)Math.Round((k - gapSamples) * EegSampleIntervalMs * TimeSpan.TicksPerMillisecond));
+
+        /// <summary>Removes the oldest queued sample from every channel's queue into _dequeued
+        /// (reused, one value per channel) and moves the live edge's time to it.</summary>
+        private readonly double[] _dequeued = new double[Channels];
+        private double[] DequeuePending()
+        {
+            for (int ch = 0; ch < Channels; ch++) _dequeued[ch] = _eegPending[ch].Dequeue();
+            if (_eegPendingTicks.Count > 0) _liveEdgeUtc = new DateTime(_eegPendingTicks.Dequeue(), DateTimeKind.Utc);
+            return _dequeued;
         }
 
         /// <summary>Drains _eegPending into the live streamer at a constant, true-to-hardware pace
-        /// (250 Hz) every render frame, instead of PushRaw dumping a whole ~200ms BLE burst into
+        /// (250 Hz) every render frame, instead of PushPackage dumping a whole ~200ms package into
         /// the streamer in one shot. Only paces while the EEG tab is actually visible — otherwise
         /// (nobody watching) it just drains everything immediately so the streamer stays current
         /// without wasting per-frame work on pacing nobody sees.
@@ -860,10 +908,10 @@ namespace NeuuroBridge.Wpf
 
             if (!EegPlot0Visible())
             {
-                for (int ch = 0; ch < Channels; ch++)
+                while (_eegPending[0].Count > 0)
                 {
-                    var q = _eegPending[ch];
-                    while (q.Count > 0) AddEegSample(ch, q.Dequeue());
+                    var vals = DequeuePending();
+                    for (int ch = 0; ch < Channels; ch++) AddEegSample(ch, vals[ch]);
                 }
                 return;
             }
@@ -871,7 +919,15 @@ namespace NeuuroBridge.Wpf
             int now = Environment.TickCount;
             double elapsedMs = now - _eegFeedTicks;
             _eegFeedTicks = now;
-            double owed = elapsedMs / EegSampleIntervalMs + _eegFeedRemainder;
+            // Hold the queue near LiveLeadSamples: drain a little faster when it has built up, a
+            // little slower when it is running low. A 10 % change in scroll speed is invisible; a
+            // delay that only ever grows is not.
+            int queued = _eegPending[0].Count;
+            double rate = queued > 2 * LiveLeadSamples ? 1.5
+                        : queued > LiveLeadSamples ? 1.1
+                        : queued < LiveLeadSamples / 2 ? 0.9
+                        : 1.0;
+            double owed = elapsedMs / EegSampleIntervalMs * rate + _eegFeedRemainder;
             int samples = Math.Max(0, (int)owed);
             _eegFeedRemainder = owed - samples;
             // A long pause (window minimised, debugger break, etc.) must not fire years of samples
@@ -879,63 +935,61 @@ namespace NeuuroBridge.Wpf
             // than fabricate a burst that never happened.
             samples = Math.Min(samples, RawWindow);
 
-            // Tick-major (not channel-major): all 4 channels are enqueued together in PushRaw (real
-            // gaps are pre-filled as NaN there too — see PushRaw), so channel 0's fed value is
-            // representative of whether THIS tick is a real gap tick. Per-channel AddEegSample calls
-            // are independent either way, so this reorder changes nothing about what each streamer
-            // receives. The double.NaN fallback below only fires if the queue is unexpectedly empty
-            // (display pacing briefly outran arrival) — a safety net, not the primary gap signal.
             for (int i = 0; i < samples; i++)
             {
+                if (_eegPending[0].Count > 0)
+                {
+                    _heldTicks = 0;
+                    var vals = DequeuePending();
+                    for (int ch = 0; ch < Channels; ch++)
+                    {
+                        double v = vals[ch];
+                        if (!double.IsNaN(v)) _lastFed[ch] = v;
+                        AddEegSample(ch, v);
+                    }
+                    continue;
+                }
                 // No data yet for this tick (a dropout still in progress): hold the last value so
                 // the line stays joined, up to the same limit as a bridged gap; past it, break.
-                bool waiting = _eegPending[0].Count == 0;
-                _heldTicks = waiting ? _heldTicks + 1 : 0;
+                // The live edge's time keeps advancing with the hardware clock.
+                _heldTicks++;
+                _heldSinceData++;
+                if (_liveEdgeUtc.HasValue) _liveEdgeUtc = _liveEdgeUtc.Value.AddMilliseconds(EegSampleIntervalMs);
                 bool hold = _heldTicks <= MaxBridgedGapSamples;
-                for (int ch = 0; ch < Channels; ch++)
-                {
-                    var q = _eegPending[ch];
-                    double v = q.Count > 0 ? q.Dequeue() : (hold ? _lastFed[ch] : double.NaN);
-                    if (!double.IsNaN(v)) _lastFed[ch] = v;
-                    AddEegSample(ch, v);
-                }
+                for (int ch = 0; ch < Channels; ch++) AddEegSample(ch, hold ? _lastFed[ch] : double.NaN);
             }
         }
 
-        /// <summary>ITP2 #5 — eye-blink marker: a dashed vertical line on the Fp1/Fp2 lanes only
-        /// (indices 0/1 — see BridgeController.ChannelLabels), a true instantaneous transient
-        /// rather than a window. Items[2]/Items[3] (T4/T3) are left null — UpdateEegMarkers/
-        /// RebuildEegWindow/Clear all null-check before touching a lane's item, since this is the
-        /// first marker type that doesn't populate all 4 lanes.</summary>
+        /// <summary>ITP2 #5 — eye-blink marker: a dashed vertical line at the blink's peak across
+        /// all four lanes (on this band a blink shows mostly on T4/T3, see ArtifactDetector).</summary>
         private EegMarker CreateBlinkMarker(DateTime shownAtUtc) =>
-            CreateArtefactMarker(shownAtUtc, firstLane: 0, BlinkLineColor, "Blink");   // Fp1, Fp2
+            CreateArtefactMarker(shownAtUtc, BlinkLineColor, "Blink");
 
-        /// <summary>ITP2 #5 — teeth-clench marker: same shape as the blink marker (a dashed
-        /// vertical line at the detected onset, named at the top) on the T4/T3 lanes only
-        /// (indices 2/3). Items[0]/Items[1] (Fp1/Fp2) left null.</summary>
+        /// <summary>ITP2 #5 — teeth-clench marker: same shape, at the clench's onset.</summary>
         private EegMarker CreateClenchMarker(DateTime shownAtUtc) =>
-            CreateArtefactMarker(shownAtUtc, firstLane: 2, ClenchLineColor, "Clench"); // T4, T3
+            CreateArtefactMarker(shownAtUtc, ClenchLineColor, "Clench");
 
-        /// <summary>A dashed vertical line across two adjacent lanes, with <paramref name="text"/>
-        /// printed at the top of the upper lane, just right of the line.
+        /// <summary>A dashed vertical line across all four lanes, with <paramref name="text"/>
+        /// printed at the top of the first lane, just right of the line.
         ///
         /// ScottPlot draws an axis line's label OUTSIDE the data area by default (below it, or above
         /// it with LabelOppositeAxis). These lanes are frameless, so there is no room there and the
         /// label was clipped. With LabelOppositeAxis the anchor is the data area's top edge; aligning
         /// the label UpperLeft from that anchor hangs it down into the plot instead.</summary>
-        private EegMarker CreateArtefactMarker(DateTime shownAtUtc, int firstLane, SPColor color, string text)
+        private EegMarker CreateArtefactMarker(DateTime shownAtUtc, SPColor color, string text)
         {
             var marker = new EegMarker
             {
                 ShownAtUtc = shownAtUtc,
                 EffectiveEndUtc = shownAtUtc,
                 IsPhase = false,
+                Artefact = text,
                 Items = new IPlottable[Channels],
             };
-            for (int i = firstLane; i <= firstLane + 1; i++)
+            for (int i = 0; i < Channels; i++)
             {
                 var line = _eegPlots[i].Plot.Add.VerticalLine(0, 1.5f, color.WithAlpha(0.85), LinePattern.Dashed);
-                SetTopLabel(line, i == firstLane ? text : null, color, bold: true);   // label once, at the top of the pair
+                SetTopLabel(line, i == 0 ? text : null, color, bold: true);   // label once, at the top
                 marker.Items[i] = line;
             }
             return marker;
@@ -960,12 +1014,74 @@ namespace NeuuroBridge.Wpf
         }
 
         /// <summary>ITP2 #5 — live-chart-only annotation (not persisted to the DB) for a detected
-        /// eye-blink artifact on Fp1/Fp2. See BridgeController.DetectBlink/BlinkDetected.</summary>
-        public void PushBlinkMarker(DateTime shownAtUtc) => _eegMarkers.Add(CreateBlinkMarker(shownAtUtc));
+        /// eye-blink artifact. See ArtifactDetector and BridgeController.BlinkDetected.</summary>
+        public void PushBlinkMarker(DateTime shownAtUtc)
+        {
+            if (_showBlinkMarkers) _eegMarkers.Add(CreateBlinkMarker(shownAtUtc));
+        }
 
         /// <summary>ITP2 #5 — live-chart-only annotation (not persisted to the DB) for a detected
-        /// teeth-clench/EMG artifact on T3/T4. See BridgeController.DetectClench/ClenchDetected.</summary>
-        public void PushClenchMarker(DateTime shownAtUtc) => _eegMarkers.Add(CreateClenchMarker(shownAtUtc));
+        /// teeth-clench/EMG artifact. See ArtifactDetector and BridgeController.ClenchDetected.</summary>
+        public void PushClenchMarker(DateTime shownAtUtc)
+        {
+            if (_showClenchMarkers) _eegMarkers.Add(CreateClenchMarker(shownAtUtc));
+        }
+
+        // ── Blink / clench marker toggles (EEG tab) ──
+        private bool _showBlinkMarkers = true, _showClenchMarkers = true;
+        private Button _blinkToggle, _clenchToggle;
+
+        private void BuildArtefactToggles()
+        {
+            EegScaleBar.Children.Add(new TextBlock
+            {
+                Text = "Markers:",
+                FontSize = 11,
+                Foreground = LabelBrush,
+                VerticalAlignment = System.Windows.VerticalAlignment.Center,
+                Margin = new Thickness(18, 0, 6, 0)
+            });
+            _blinkToggle = MakeToggle("Blink", () => { _showBlinkMarkers = !_showBlinkMarkers; if (!_showBlinkMarkers) RemoveArtefactMarkers("Blink"); });
+            _clenchToggle = MakeToggle("Clench", () => { _showClenchMarkers = !_showClenchMarkers; if (!_showClenchMarkers) RemoveArtefactMarkers("Clench"); });
+            UpdateArtefactToggleVisuals();
+        }
+
+        private Button MakeToggle(string text, Action flip)
+        {
+            var btn = new Button { Content = text, FontSize = 11, Padding = new Thickness(10, 3, 10, 3), Margin = new Thickness(0, 0, 6, 0) };
+            btn.Click += (_, __) => { flip(); UpdateArtefactToggleVisuals(); RefreshEegNow(); };
+            EegScaleBar.Children.Add(btn);
+            return btn;
+        }
+
+        private void UpdateArtefactToggleVisuals()
+        {
+            foreach (var (btn, on) in new[] { (_blinkToggle, _showBlinkMarkers), (_clenchToggle, _showClenchMarkers) })
+            {
+                btn.Background = on ? AccentBrush : ChipBrush;
+                btn.Foreground = on ? Brushes.White : LabelBrush;
+                btn.FontWeight = on ? FontWeights.SemiBold : FontWeights.Normal;
+                btn.ToolTip = on ? "Shown — click to hide these markers" : "Hidden — click to show new markers";
+            }
+        }
+
+        /// <summary>Takes every marker of one kind off the chart (turned off with its toggle).</summary>
+        private void RemoveArtefactMarkers(string kind)
+        {
+            for (int m = _eegMarkers.Count - 1; m >= 0; m--)
+            {
+                var mk = _eegMarkers[m];
+                if (mk.Artefact != kind) continue;
+                for (int i = 0; i < Channels; i++)
+                    if (mk.Items[i] != null) _eegPlots[i].Plot.Remove(mk.Items[i]);
+                _eegMarkers.RemoveAt(m);
+            }
+        }
+
+        private void RefreshEegNow()
+        {
+            for (int i = 0; i < Channels; i++) _eegPlots[i].Refresh();
+        }
 
         /// <summary>Pushes one real sample into an EEG lane's live streamer, hard-clearing the
         /// buffer (full blank, not an in-place overwrite) the instant it's full rather than letting
@@ -998,7 +1114,7 @@ namespace NeuuroBridge.Wpf
             }
             // Scans the ring buffer directly (same window SliceFromRing would extract, backOffset=0)
             // instead of allocating a fresh double[RawWindow] copy every call. This runs 4x per
-            // PushRaw burst (~20x/s), so the old version churned ~400KB/s of short-lived garbage —
+            // PushPackage call (~5x/s), so the old version churned ~400KB/s of short-lived garbage —
             // enough to periodically trigger a GC pause that showed up as a chart stutter.
             double mean = 0, min = double.MaxValue, max = double.MinValue;
             int n, valid = 0;
@@ -1108,7 +1224,9 @@ namespace NeuuroBridge.Wpf
         private void UpdateEegMarkers()
         {
             if (!_eegTrack.Live || _eegMarkers.Count == 0) return;
-            DateTime now = DateTime.UtcNow;
+            // Positioned against the time of the sample at the live edge, not the wall clock, so a
+            // marker lands on the trace it describes (see _liveEdgeUtc).
+            DateTime now = _liveEdgeUtc ?? DateTime.UtcNow;
             double staleSeconds = RawWindow / 250.0 * 1.5;   // window width + slack before pruning
 
             for (int m = _eegMarkers.Count - 1; m >= 0; m--)
@@ -1117,8 +1235,7 @@ namespace NeuuroBridge.Wpf
                 double endAgeSeconds = (now - mk.EffectiveEndUtc).TotalSeconds;
                 if (endAgeSeconds > staleSeconds)
                 {
-                    // ITP2 #5's blink/clench markers only populate 2 of the 4 lanes (Fp1/Fp2 or
-                    // T4/T3) — the other two stay null and must be skipped here.
+                    // A marker may leave some lanes null; skip those.
                     for (int i = 0; i < Channels; i++)
                         if (mk.Items[i] != null) _eegPlots[i].Plot.Remove(mk.Items[i]);
                     _eegMarkers.RemoveAt(m);
@@ -1176,7 +1293,9 @@ namespace NeuuroBridge.Wpf
         {
             if (_sessionStartUtc == null) return;
 
-            DateTime refNow = track.Live ? DateTime.UtcNow : track.FrozenNowUtc;
+            DateTime refNow = !track.Live ? track.FrozenNowUtc
+                            : track == _eegTrack && _liveEdgeUtc.HasValue ? _liveEdgeUtc.Value
+                            : DateTime.UtcNow;
             double rate = track.Live ? SamplesPerSecondFor(track) : track.FrozenSamplesPerSecond;
             if (rate <= 0)
             {
@@ -1263,8 +1382,11 @@ namespace NeuuroBridge.Wpf
             for (int ch = 0; ch < Channels; ch++) { _eegBaseMean[ch] = 0; _eegBaseRange[ch] = 1; }
             foreach (var hp in _displayHighPass) hp.Reset();
             foreach (var q in _eegPending) q.Clear();
+            _eegPendingTicks.Clear();
             _eegHasData = false;
-            _rawLastUtc = null;
+            _rawLatestUtc = null;
+            _liveEdgeUtc = null;
+            _heldSinceData = 0;
             _sessionStartUtc = null;
             foreach (var p in _eegPlots) p.Plot.Axes.Bottom.SetTicks(Array.Empty<double>(), Array.Empty<string>());
             foreach (var p in _bandPlots) p.Plot.Axes.Bottom.SetTicks(Array.Empty<double>(), Array.Empty<string>());
@@ -1411,7 +1533,9 @@ namespace NeuuroBridge.Wpf
                 // Freeze the reference clock the moment this tab leaves live mode — further scrub
                 // moves within this session only change ScrubOffset, not this snapshot, so the whole
                 // browse stays anchored to one static "now" instead of drifting with the real clock.
-                track.FrozenNowUtc = DateTime.UtcNow;
+                // EEG history ends at the newest arrived sample (the scrub view is sliced from
+                // _rawFull), so that is its "now".
+                track.FrozenNowUtc = track == _eegTrack && _rawLatestUtc.HasValue ? _rawLatestUtc.Value : DateTime.UtcNow;
                 track.FrozenSamplesPerSecond = SamplesPerSecondFor(track);
             }
             track.ScrubOffset = offset;
@@ -1482,10 +1606,13 @@ namespace NeuuroBridge.Wpf
             // about to happen (either direction — entering scrub or resuming live) — drop it rather
             // than let FeedEegPending replay it on top of freshly-seeded data.
             foreach (var q in _eegPending) q.Clear();
+            _eegPendingTicks.Clear();
             _eegFeedRemainder = 0;
 
             if (_eegTrack.Live)
             {
+                // The reseeded window ends at the newest arrived sample.
+                if (_rawLatestUtc.HasValue) _liveEdgeUtc = _rawLatestUtc;
                 // Resuming live: reseed each streamer from fresh history so it doesn't jump from
                 // wherever scrubbing left off, then show it again.
                 _eegFeedTicks = Environment.TickCount;
@@ -1631,7 +1758,7 @@ namespace NeuuroBridge.Wpf
         /// scrubbed near session start, not a real gap), and seeding a fresh (mean, range) baseline
         /// from the slice's real (non-NaN) samples — a hard reset, since this is a discontinuous jump
         /// anyway. Shared with Bands (which never has NaN, so this is a no-op there); for EEG, any NaN
-        /// gap placeholder in the slice (see PushRaw) passes through untouched into <paramref
+        /// gap placeholder in the slice (see PushPackage) passes through untouched into <paramref
         /// name="dst"/> rather than being normalised into a fabricated value — see
         /// RebuildEegHistSegments for how those NaN runs become real breaks on screen.</summary>
         /// <param name="fixedRange">When &gt; 0, use this range around zero instead of auto-gaining

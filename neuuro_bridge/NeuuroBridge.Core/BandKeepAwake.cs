@@ -33,12 +33,15 @@ namespace NeuuroBridge
     ///
     /// HOW
     /// ---
-    /// The SDK's SendCommand is async void: it cannot report a failed write, and its packet parser
-    /// does not recognise an FE reply. So this opens its own handle to the band (as
-    /// BleConnectionTuner does — a second handle to a connected device does not reconnect it),
-    /// writes to the band's command characteristic with the result checked, and listens to the
-    /// band's notifications for a few seconds for the "ACK" + FE reply. Sent on every connect and
-    /// reconnect: whether the band keeps the setting across a reconnect is unknown.
+    /// The SDK opens the band's UART service exclusively, so a second handle from the bridge is
+    /// refused (SharingViolation / AccessDenied) and the command never went out before 19 Nov 2026.
+    /// It is now written to the SDK's own, already-open command characteristic, found by reflection
+    /// (see <see cref="SdkBleLink"/>), with the result checked; the band's notifications are watched
+    /// for a few seconds for the "ACK" + FE reply. The SDK's SendCommand is not used: it is async
+    /// void, so it cannot report a failed write and its exceptions surface on the UI thread. If the
+    /// SDK lookup fails, a second handle is still tried (works on bands whose service isn't held
+    /// exclusively). Sent on every connect and reconnect: whether the band keeps the setting across
+    /// a reconnect is unknown.
     ///
     /// Everything is best-effort and logged; a failure here must never affect a recording.
     /// Env key DISABLE_AUTO_OFF=false turns the whole thing off.
@@ -100,36 +103,56 @@ namespace NeuuroBridge
                 log("[keep-awake] DISABLE_AUTO_OFF=false — the band's 10-minute auto power-off is left on.");
                 return;
             }
-            foreach (var candidate in addressCandidates ?? new string[0])
+            var keys = (addressCandidates ?? new string[0]).Where(k => !string.IsNullOrWhiteSpace(k)).ToArray();
+            foreach (var candidate in keys)
             {
                 if (BleConnectionTuner.TryParseBluetoothAddress(candidate, out ulong address))
                 {
-                    Task.Run(() => Run(address, log));
+                    Task.Run(() => Run(address, keys, log));
                     return;
                 }
             }
             log("[keep-awake] no usable device address — could not switch off the band's auto power-off.");
         }
 
-        private static async Task Run(ulong address, Action<string> log)
+        private static async Task Run(ulong address, string[] sdkKeys, Action<string> log)
         {
             await Gate.WaitAsync().ConfigureAwait(false);
-            BluetoothLEDevice device = null;
+            BluetoothLEDevice device = null;   // only when we open our own handle; the SDK's is never disposed here
             try
             {
                 await Task.Delay(SettleMs).ConfigureAwait(false);
-                device = await BluetoothLEDevice.FromBluetoothAddressAsync(address);
-                if (device == null)
+
+                // 1) The SDK's own open connection.
+                GattCharacteristic command = null;
+                var replies = new List<GattCharacteristic>();
+                var notes = new List<string>();
+                foreach (var key in sdkKeys.Concat(new[] { address.ToString() }).Distinct())
                 {
-                    log("[keep-awake] Windows returned no device for the band — auto power-off left on.");
-                    return;
+                    command = SdkBleLink.Find(key, out var data, out string note);
+                    notes.Add(note);
+                    if (command == null) continue;
+                    replies = data.Where(c => (c.CharacteristicProperties & GattCharacteristicProperties.Notify) != 0).ToList();
+                    log($"[keep-awake] using the SDK's open connection ({note}, {replies.Count} reply channel(s)).");
+                    break;
                 }
 
-                var (command, replies) = await FindCharacteristics(device).ConfigureAwait(false);
+                // 2) Fallback: our own handle (refused on bands whose UART service the SDK holds).
                 if (command == null)
                 {
-                    log("[keep-awake] the band's command characteristic was not found — auto power-off left on.");
-                    return;
+                    log("[keep-awake] SDK connection not usable (" + string.Join("; ", notes) + ") — trying a separate handle.");
+                    device = await BluetoothLEDevice.FromBluetoothAddressAsync(address);
+                    if (device == null)
+                    {
+                        log("[keep-awake] Windows returned no device for the band — auto power-off left on.");
+                        return;
+                    }
+                    (command, replies) = await FindCharacteristics(device, log).ConfigureAwait(false);
+                    if (command == null)
+                    {
+                        log("[keep-awake] the band's command characteristic was not found — auto power-off left on.");
+                        return;
+                    }
                 }
 
                 // Watch for the reply before writing, so a fast answer is not missed.
@@ -182,23 +205,17 @@ namespace NeuuroBridge
         }
 
         private static async Task<(GattCharacteristic command, List<GattCharacteristic> replies)> FindCharacteristics(
-            BluetoothLEDevice device)
+            BluetoothLEDevice device, Action<string> log)
         {
             GattCharacteristic command = null;
             var replies = new List<GattCharacteristic>();
-            var services = await device.GetGattServicesAsync(BluetoothCacheMode.Cached);
-            if (services.Status != GattCommunicationStatus.Success) return (null, replies);
-            foreach (var service in services.Services)
+            var wanted = CommandCharacteristics.Concat(ReplyCharacteristics).ToList();
+            foreach (var c in await BandGatt.FindAsync(device, wanted, log, "keep-awake").ConfigureAwait(false))
             {
-                var chars = await service.GetCharacteristicsAsync(BluetoothCacheMode.Cached);
-                if (chars.Status != GattCommunicationStatus.Success) continue;
-                foreach (var c in chars.Characteristics)
-                {
-                    if (command == null && CommandCharacteristics.Contains(c.Uuid)) command = c;
-                    else if (ReplyCharacteristics.Contains(c.Uuid)
-                             && (c.CharacteristicProperties & GattCharacteristicProperties.Notify) != 0)
-                        replies.Add(c);
-                }
+                if (command == null && CommandCharacteristics.Contains(c.Uuid)) command = c;
+                else if (ReplyCharacteristics.Contains(c.Uuid)
+                         && (c.CharacteristicProperties & GattCharacteristicProperties.Notify) != 0)
+                    replies.Add(c);
             }
             return (command, replies);
         }

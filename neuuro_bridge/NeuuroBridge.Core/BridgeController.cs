@@ -63,31 +63,16 @@ namespace NeuuroBridge
             .ToArray();
 
         // ITP2 #5 — "EEG Signal Quality Checks... auto-detect + label on the EEG chart: Eye
-        // Blink (transient/low-freq spike on Fp1/Fp2) and Teeth Clench (high-freq EMG on
-        // T3/T4)." No specific algorithm/threshold was given in the requirement — these are
-        // literature-reasonable starting heuristics, not clinically validated numbers; expect to
-        // tune once real T3/T4 signal is available (electrodes flagged dead in project notes as
-        // of writing). Live-chart annotation only, not persisted to the DB — see PushBlinkMarker/
-        // PushClenchMarker in LiveEegPanel.xaml.cs.
+        // Blink and Teeth Clench." Live-chart annotation only, not persisted to the DB — see
+        // ArtifactDetector for the method and PushBlinkMarker/PushClenchMarker in LiveEegPanel.
+        // Fed the 200 ms live packages (as the chart is), so markers follow events quickly and
+        // land on the same timeline as the trace (PackageSampleClock).
         public event Action<DateTime> BlinkDetected;
         public event Action<DateTime> ClenchDetected;
-
-        // Blink: band-passed Fp1/Fp2 swing over a sliding 0.5 s window, against each channel's own
-        // running background — see BlinkDetector for why a fixed µV threshold didn't work here.
-        private readonly BlinkDetector _blinkDetector = new BlinkDetector(CaptureSampleRateHz);
-
-        // Clench: adaptive threshold on T3/T4's existing Gamma-band power (EegProcessor already
-        // computes this, 30-45Hz — squarely the EMG range), not a fixed number. Muscle-tension
-        // baseline varies far more by individual and electrode contact than blink amplitude
-        // does, so a flat threshold would be much more likely to be wrong. Same slow-EMA-baseline
-        // approach LiveEegPanel's own auto-gain already uses (RecalibrateEegGain/BlendBaseline).
-        private const double ClenchBaselineAlpha = 0.02; // slow blend -- tracks "resting" Gamma, not instantaneous spikes
-        private const double ClenchMultiplier = 4.0;     // flag when current Gamma exceeds baseline by this factor
-        private const int ClenchCooldownMs = 600;
-        private const int ClenchMinBaselineSamples = 20; // ~5s at ~4Hz OnBandPowers rate -- skip until baseline means something
-        private readonly double[] _gammaBaseline = new double[ChannelCount];
-        private readonly int[] _gammaBaselineCount = new int[ChannelCount];
-        private DateTime _lastClenchUtc = DateTime.MinValue;
+        private readonly ArtifactDetector _artifacts = new ArtifactDetector(CaptureSampleRateHz);
+        private DateTime _artifactStatsUtc;
+        private readonly PackageSampleClock _liveClock = new PackageSampleClock(CaptureSampleRateHz, maxGapSamples: 10 * CaptureSampleRateHz);
+        private readonly List<(ArtifactKind Kind, DateTime AtUtc)> _artifactEvents = new List<(ArtifactKind, DateTime)>();
 
         // Holds the faster-BLE-interval request for as long as a device is connected. Its log
         // messages go to the same sink as everything else, so a refused request is visible in the
@@ -241,7 +226,8 @@ namespace NeuuroBridge
         public event Action SessionStarted;                  // recording/upload began (Start pressed)
         public event Action<ImpedanceResult> ImpedanceChecked;   // a pre-session impedance check finished
         public event Action SessionStopped;
-        public event Action<RawEegFrame> RawFrame;           // every raw frame (for waveform charts)
+        public event Action<RawEegFrame> RawFrame;           // every raw 1 s frame (one frame late, see SenzeBandService.OnRawInt)
+        public event Action<LiveEegPackage> LivePackage;     // every 200 ms package, as it arrives (live waveform chart)
         public event Action<BandPowers[]> FftBandPowers;     // ~1/s FFT result
         public event Action<List<SessionEventMarker>> SessionEvents;  // new image/question/baseline markers, advisory
         public event Action SdkCognitiveChanged;             // attention/relaxation/mwl/ABDT updated
@@ -447,6 +433,7 @@ namespace NeuuroBridge
                 SignalStateChanged?.Invoke();
             };
             _svc.OnRawEeg += HandleRawEeg;
+            _svc.OnLivePackage += HandleLivePackage;
             // ITP2 #4: eeg_filtered_samples (and everywhere else "filtered" is used — FFT/band
             // powers, live cache, CSV) now comes from our own documented 100Hz low-pass
             // (HandleRawEeg -> ApplyLowPass), not the SDK's own onboard filter. OnFilteredEeg is
@@ -466,7 +453,6 @@ namespace NeuuroBridge
             _processor.OnBandPowers += powers => { lock (_stateLock) _fftPowers = powers; };
             _processor.OnBandPowers += UploadBandPowers;
             _processor.OnBandPowers += powers => FftBandPowers?.Invoke(powers);
-            _processor.OnBandPowers += DetectClench;
         }
 
         public bool StartScan() => _svc.StartScan();
@@ -664,9 +650,14 @@ namespace NeuuroBridge
             {
                 if (_impSamples == null) return;
                 int spc = raw.Length / ChannelCount;
+                // The SDK's raw int frames are already whole µV (its float twin carries the same
+                // values), not ADC counts: multiplying by MicrovoltsPerCount here made every
+                // impedance ~45x too low, so nearly any fit graded "good" (found 19-20 Nov 2026).
+                // The stored EEG has the same double conversion (HandleRawEeg / ApplyLowPass); that
+                // fix is deferred pending Neeuro's confirmation and a stored-data version bump.
                 for (int ch = 0; ch < ChannelCount; ch++)
                     for (int i = 0; i < spc; i++)
-                        _impSamples[ch].Add((float)(raw[ch * spc + i] * MicrovoltsPerCount));
+                        _impSamples[ch].Add(raw[ch * spc + i]);
             }
         }
 
@@ -1101,7 +1092,6 @@ namespace NeuuroBridge
                 _processor.AddFilteredFrame(filtered);
                 UploadFilteredFrame(filtered, frame.ArrivalUtc, frame.Packages);
                 if (_capturing) lock (_captureLock) _capFilt.Add((DateTime.UtcNow, filtered));
-                DetectBlink(filtered, frame.ArrivalUtc);
             }
 
             // Combined CSV capture: record raw ADC + raw µV for this frame, tagged with the
@@ -1133,56 +1123,37 @@ namespace NeuuroBridge
             return filtered;
         }
 
-        /// <summary>ITP2 #5 — feeds each filtered frame to <see cref="BlinkDetector"/> and raises
-        /// BlinkDetected at the blink's peak. Skipped while an impedance check runs: its injected
-        /// test current swings every electrode far more than a blink, and would also teach the
-        /// detector a background level that has nothing to do with the EEG.</summary>
-        private void DetectBlink(float[] filtered, DateTime frameEndUtc)
+        /// <summary>ITP2 #5 — runs each live package through <see cref="ArtifactDetector"/> and raises
+        /// BlinkDetected/ClenchDetected. Skipped while an impedance check runs: its injected test
+        /// current swings every electrode far more than a blink, and would also teach the detector
+        /// background levels that have nothing to do with the EEG.</summary>
+        private void HandleLivePackage(LiveEegPackage pkg)
         {
-            if (Volatile.Read(ref _impSamples) != null) { _blinkDetector.ResetSignal(); return; }
-            DateTime? at = _blinkDetector.Process(filtered, ChannelCount, frameEndUtc);
-            if (at.HasValue) BlinkDetected?.Invoke(at.Value);
-        }
+            if (pkg.Samples == null || pkg.Samples.Length < 4) return;
+            // One clock for everything downstream: the chart and the detector used to run their own,
+            // and since each absorbs arrival jitter its own way they could disagree by up to ~0.25 s,
+            // which put a marker visibly off its blink.
+            pkg.GapSamples = _liveClock.Advance(pkg.Samples.Length / 4, pkg.ArrivalUtc, out double first);
+            pkg.FirstSampleUtc = _liveClock.TimeOf(first + pkg.GapSamples);
 
-        /// <summary>ITP2 #5 — flags a teeth-clench/EMG artifact when either temporal channel's
-        /// Gamma band power (EegProcessor already computes this, 30-45Hz — squarely the EMG
-        /// range) exceeds a slow-moving per-channel baseline by ClenchMultiplier. Adaptive rather
-        /// than a fixed power number, since muscle-tension baseline varies far more by
-        /// individual/electrode contact than blink amplitude does (see DetectBlink). Same
-        /// cooldown reasoning as blink: a held contraction shouldn't flood one marker per
-        /// ~256ms band-power update.</summary>
-        private void DetectClench(BandPowers[] powers)
-        {
-            bool triggered = false;
-            for (int ch = 2; ch <= 3; ch++) // T4, T3 — temporal channels only
+            if (Volatile.Read(ref _impSamples) != null) _artifacts.Reset();
+            else
             {
-                double gamma = powers[ch].Gamma;
-                double baseline = _gammaBaseline[ch];
-
-                if (_gammaBaselineCount[ch] < ClenchMinBaselineSamples)
+                _artifactEvents.Clear();
+                _artifacts.Process(pkg.Samples, pkg.GapSamples, pkg.FirstSampleUtc, _artifactEvents);
+                if ((pkg.ArrivalUtc - _artifactStatsUtc).TotalSeconds >= 30)
                 {
-                    // Still establishing a baseline — blend in but don't detect against it yet
-                    // (an unestablished baseline of 0 would trivially "exceed" on sample one).
-                    _gammaBaseline[ch] = _gammaBaselineCount[ch] == 0
-                        ? gamma
-                        : baseline * (1 - ClenchBaselineAlpha) + gamma * ClenchBaselineAlpha;
-                    _gammaBaselineCount[ch]++;
-                    continue;
+                    if (_artifactStatsUtc != default) Log?.Invoke("[artefacts] last 30 s: " + _artifacts.TakeStats());
+                    else _artifacts.TakeStats();
+                    _artifactStatsUtc = pkg.ArrivalUtc;
                 }
-
-                if (baseline > 0 && gamma > baseline * ClenchMultiplier)
-                    triggered = true;
-
-                // Blend AFTER the comparison — a genuine clench shouldn't drag its own baseline up.
-                _gammaBaseline[ch] = baseline * (1 - ClenchBaselineAlpha) + gamma * ClenchBaselineAlpha;
+                foreach (var (kind, at) in _artifactEvents)
+                {
+                    if (kind == ArtifactKind.Blink) BlinkDetected?.Invoke(at);
+                    else ClenchDetected?.Invoke(at);
+                }
             }
-
-            if (!triggered) return;
-
-            DateTime now = DateTime.UtcNow;
-            if ((now - _lastClenchUtc).TotalMilliseconds < ClenchCooldownMs) return;
-            _lastClenchUtc = now;
-            ClenchDetected?.Invoke(now);
+            LivePackage?.Invoke(pkg);
         }
 
         private void UploadEegSnapshot()
@@ -1276,6 +1247,25 @@ namespace NeuuroBridge
 
         private void CaptureRawFrame(RawEegFrame frame)
         {
+            // The SDK delivers every 1 s frame twice — int samples, then the same frame as floats
+            // (SenzeBandService.OnRawInt / OnRawFloat, same ArrivalUtc). Each used to become its own
+            // CSV row, so every frame appeared twice and the capture's timeline ran 2x long. The
+            // float twin now fills in the int row it belongs to.
+            if (frame.IntSamples == null && frame.FloatSamples != null)
+            {
+                lock (_captureLock)
+                {
+                    int last = _capRaw.Count - 1;
+                    if (last >= 0 && _capRaw[last].Arrival == frame.ArrivalUtc && _capRaw[last].RawUv == null)
+                    {
+                        var merged = _capRaw[last];
+                        merged.RawUv = (float[])frame.FloatSamples.Clone();
+                        _capRaw[last] = merged;
+                        return;
+                    }
+                }
+            }
+
             int? hr, spo2; float att, rel, mwl; bool? ready; bool[] channels;
             lock (_stateLock)
             {
